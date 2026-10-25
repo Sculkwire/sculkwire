@@ -1,0 +1,41 @@
+{
+  "name": "sculkwire",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent-first MCP server and CLI for Minecraft: Bedrock Edition add-on development: versioned knowledge, precise validation, live game bridge, GameTest and visual proof.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "bin": {
+    "sculk": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "sculk": "node --experimental-strip-types src/cli.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "fflate": "^0.8.3",
+    "jsonc-parser": "^3.3.1",
+    "minisearch": "^7.2.0",
+    "node-html-markdown": "^2.0.0",
+    "tar": "^7.5.22",
+    "ws": "^8.22.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/ws": "^8.18.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}
