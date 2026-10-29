@@ -1,0 +1,17 @@
+{
+  "format_version": "1.8.0",
+  "animations": {
+    "animation.mcbe.test_mob.idle": {
+      "loop": true,
+      "bones": {
+        "body": {
+          "rotation": [
+            0,
+            "q.life_time * 10",
+            0
+          ]
+        }
+      }
+    }
+  }
+}

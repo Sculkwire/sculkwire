@@ -1,0 +1,32 @@
+{
+  "format_version": "1.10.0",
+  "minecraft:client_entity": {
+    "description": {
+      "identifier": "mcbe:test_mob",
+      "materials": {
+        "default": "entity_alphatest"
+      },
+      "textures": {
+        "default": "textures/entity/nope"
+      },
+      "geometry": {
+        "default": "geometry.mcbe.nope"
+      },
+      "animations": {
+        "idle": "animation.mcbe.test_mob.idle"
+      },
+      "scripts": {
+        "animate": [
+          "idle"
+        ]
+      },
+      "render_controllers": [
+        "controller.render.nope"
+      ],
+      "spawn_egg": {
+        "base_color": "#00ff00",
+        "overlay_color": "#004400"
+      }
+    }
+  }
+}

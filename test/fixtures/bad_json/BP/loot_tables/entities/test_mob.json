@@ -1,0 +1,9 @@
+{
+  // comments are fine in Bedrock JSON
+  "pools": [
+    {
+      "rolls": 1
+      "entries": [{"type": "item", "name": "mcbe:test_item", "weight": 1}]
+    }
+  ]
+}

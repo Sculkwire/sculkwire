@@ -1,0 +1,9 @@
+{
+  "resource_pack_name": "mcbe",
+  "texture_name": "atlas.items",
+  "texture_data": {
+    "mcbe_test_item": {
+      "textures": "textures/items/test_item"
+    }
+  }
+}

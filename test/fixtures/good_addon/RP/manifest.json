@@ -1,0 +1,29 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "MCBE Fixture RP",
+    "description": "validator fixture",
+    "uuid": "5b1c7a0e-2f1d-4c55-9a39-1e7d3b6a0011",
+    "version": [
+      1,
+      0,
+      0
+    ],
+    "min_engine_version": [
+      1,
+      21,
+      80
+    ]
+  },
+  "modules": [
+    {
+      "type": "resources",
+      "uuid": "5b1c7a0e-2f1d-4c55-9a39-1e7d3b6a0012",
+      "version": [
+        1,
+        0,
+        0
+      ]
+    }
+  ]
+}

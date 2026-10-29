@@ -1,0 +1,39 @@
+{
+  "format_version": "1.21.0",
+  "minecraft:entity": {
+    "description": {
+      "identifier": "mcbe:test_mob",
+      "is_spawnable": true,
+      "is_summonable": true
+    },
+    "components": {
+      "minecraft:type_family": {
+        "family": [
+          "mcbe_test",
+          "mob"
+        ]
+      },
+      "minecraft:health": {
+        "value": 10,
+        "max": 10
+      },
+      "minecraft:physics": {},
+      "minecraft:collision_box": {
+        "width": 0.6,
+        "height": 0.9
+      },
+      "minecraft:loot": {
+        "table": "loot_tables/entities/test_mob.json"
+      },
+      "minecraft:movement": {
+        "value": 0.25
+      },
+      "minecraft:navigation.walk": {},
+      "minecraft:movement.basic": {},
+      "minecraft:jump.static": {},
+      "minecraft:behavior.random_stroll": {
+        "priority": 6
+      }
+    }
+  }
+}

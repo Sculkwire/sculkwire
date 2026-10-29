@@ -1,0 +1,5 @@
+entity.mcbe:test_mob.name=Test Mob
+item.spawn_egg.entity.mcbe:test_mob.name=Spawn Test Mob
+item.mcbe:test_item=Test Item
+this line has no separator
+entity.mcbe:test_mob.name=Duplicate Mob
