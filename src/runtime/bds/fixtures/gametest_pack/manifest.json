@@ -1,0 +1,28 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "sculkwire GameTest fixture",
+    "description": "One passing and one failing GameTest (sculkwire, MIT)",
+    "uuid": "fe70a3c4-5be0-4628-905a-22f41cf80345",
+    "version": [1, 0, 0],
+    "min_engine_version": [1, 21, 80]
+  },
+  "modules": [
+    {
+      "type": "script",
+      "language": "javascript",
+      "uuid": "b63de6d8-0ef9-4fa3-b680-a628b801a746",
+      "version": [1, 0, 0],
+      "entry": "scripts/main.js"
+    },
+    {
+      "type": "data",
+      "uuid": "5d999b93-3327-4c70-9ec1-f7ac1504e154",
+      "version": [1, 0, 0]
+    }
+  ],
+  "dependencies": [
+    { "module_name": "@minecraft/server", "version": "2.0.0" },
+    { "module_name": "@minecraft/server-gametest", "version": "1.0.0-beta" }
+  ]
+}
