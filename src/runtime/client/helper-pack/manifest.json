@@ -1,0 +1,20 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "sculkwire helper",
+    "description": "In-world query helper for the sculkwire client bridge (MIT)",
+    "uuid": "6c1c2a51-7f5e-4f0e-9b8f-5c0a8e3d1a01",
+    "version": [1, 0, 0],
+    "min_engine_version": [1, 21, 80]
+  },
+  "modules": [
+    {
+      "type": "script",
+      "language": "javascript",
+      "uuid": "0f4b9d0e-3a7c-4f53-8c41-2d6e9a5b7c02",
+      "version": [1, 0, 0],
+      "entry": "scripts/main.js"
+    }
+  ],
+  "dependencies": [{ "module_name": "@minecraft/server", "version": "2.0.0" }]
+}
