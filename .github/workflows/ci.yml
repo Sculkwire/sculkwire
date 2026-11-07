@@ -1,0 +1,134 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # macOS has no BDS and no game client, so it runs weekly and on demand only; pushes test Linux and Windows.
+  schedule:
+    - cron: "0 3 * * 1"
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'pull_request') && '["ubuntu-latest","windows-latest"]' || '["ubuntu-latest","windows-latest","macos-latest"]') }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx vitest run
+
+      # BDS ships for Linux and Windows x64 only. The fixture has one passing and one failing GameTest.
+      - name: BDS GameTest smoke
+        if: runner.os != 'macOS'
+        shell: bash
+        env:
+          SCULKWIRE_ACCEPT_EULA: "1"
+        run: |
+          set +e
+          node src/cli.ts bds gametest src/runtime/bds/fixtures/gametest_pack --json > gametest.json
+          code=$?
+          set -e
+          cat gametest.json
+          test "$code" = 1
+          node -e "const r=require('./gametest.json'); if (r.passed!==1 || r.failed!==1) { console.error('expected 1 passed, 1 failed'); process.exit(1) }"
+
+      - name: BDS refuses macOS cleanly
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set +e
+          node src/cli.ts bds install --accept-eula
+          test $? = 2
+
+      - name: Validator smoke
+        shell: bash
+        run: |
+          node src/cli.ts validate test/fixtures/good_addon --checks json,manifest,schema,reference,lang,mcfunction
+          set +e
+          node src/cli.ts validate test/fixtures/bad_refs --checks json,manifest,schema,reference,lang,mcfunction
+          test $? = 1
+
+      # The platform installer from this checkout, without access to the GitHub repository: it installs the main
+      # channel from the checkout itself (a local path works as --repo; the commit under test becomes the local main
+      # branch) into temp folders, then runs the installed copy the way a user and an MCP client do.
+      - name: Installer smoke (install.sh)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          SCULKWIRE_DATA: ${{ runner.temp }}/sculkwire/data
+          SCULKWIRE_CONFIG: ${{ runner.temp }}/sculkwire/config
+          SCULKWIRE_BIN_DIR: ${{ runner.temp }}/sculkwire/bin
+          SCULKWIRE_AUTO_UPDATE: "0"
+        run: |
+          git update-ref refs/heads/main HEAD
+          ./install.sh --yes --channel main --repo "$GITHUB_WORKSPACE" < /dev/null
+          version=$(node -p "require('./package.json').version")
+          test "$("$SCULKWIRE_BIN_DIR/sculk" --version)" = "$version"
+          # doctor exits 1 when a required check fails; optional ones (game, BDS, rgl, uv) only print warnings.
+          set +e
+          "$SCULKWIRE_BIN_DIR/sculk" doctor > doctor.txt
+          code=$?
+          set -e
+          cat doctor.txt
+          test "$code" -le 1
+          grep -Eq '^(ok|missing) +node ' doctor.txt
+          # Piped like `curl ... | sh`: options from the environment, source cloned from SCULKWIRE_REPO.
+          SCULKWIRE_YES=1 SCULKWIRE_CHANNEL=main SCULKWIRE_REPO="$GITHUB_WORKSPACE" sh < install.sh
+
+      # Windows PowerShell 5.1, the shell every Windows has.
+      - name: Installer smoke (install.ps1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          SCULKWIRE_DATA: ${{ runner.temp }}\sculkwire\data
+          SCULKWIRE_CONFIG: ${{ runner.temp }}\sculkwire\config
+          SCULKWIRE_BIN_DIR: ${{ runner.temp }}\sculkwire\bin
+          SCULKWIRE_AUTO_UPDATE: "0"
+        run: |
+          # Native stderr (progress) must not abort the step; every result is checked explicitly.
+          $ErrorActionPreference = "Continue"
+          git update-ref refs/heads/main HEAD
+          .\install.ps1 -Yes -Channel main -Repo $env:GITHUB_WORKSPACE
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 exited $LASTEXITCODE" }
+          $version = node -p "require('./package.json').version"
+          # install.ps1 put SCULKWIRE_BIN_DIR (with sculk.cmd) on PATH for this session and the user.
+          $out = sculk --version
+          if ($LASTEXITCODE -ne 0 -or "$out".Trim() -ne $version) { throw "sculk --version printed '$out', expected $version" }
+          # The registered MCP command: cmd /c <data>\bin\sculk.cmd, started without a shell.
+          $launcher = Join-Path $env:SCULKWIRE_DATA "bin\sculk.cmd"
+          $out = cmd /c $launcher --version
+          if ($LASTEXITCODE -ne 0 -or "$out".Trim() -ne $version) { throw "cmd /c $launcher --version printed '$out', expected $version" }
+          # doctor exits 1 when a required check fails; optional ones (game, BDS, rgl, uv) only print warnings.
+          cmd /c $launcher doctor > doctor.txt
+          $code = $LASTEXITCODE
+          Get-Content doctor.txt
+          if ($code -gt 1) { throw "sculk doctor exited $code" }
+          if (-not (Select-String -Path doctor.txt -Pattern '^(ok|missing) +node ' -Quiet)) { throw "sculk doctor printed no node line" }
+          # The runner fails the step on the last native exit code, which is doctor's.
+          exit 0
+
+      # Piped like `irm ... | iex` (PowerShell 7): options from the environment, source cloned from SCULKWIRE_REPO.
+      - name: Installer smoke (install.ps1 piped)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          SCULKWIRE_DATA: ${{ runner.temp }}\sculkwire\data
+          SCULKWIRE_CONFIG: ${{ runner.temp }}\sculkwire\config
+          SCULKWIRE_BIN_DIR: ${{ runner.temp }}\sculkwire\bin
+          SCULKWIRE_AUTO_UPDATE: "0"
+          SCULKWIRE_YES: "1"
+          SCULKWIRE_CHANNEL: main
+        run: |
+          $ErrorActionPreference = "Continue"
+          $env:SCULKWIRE_REPO = $env:GITHUB_WORKSPACE
+          Get-Content -Raw install.ps1 | Invoke-Expression
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 exited $LASTEXITCODE" }
