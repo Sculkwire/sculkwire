@@ -1,0 +1,26 @@
+[2026-11-08 20:49:12:467 WARN SERVICES 328 324] Auth token signature failed verification
+[2026-11-08 20:49:12:469 INFO NETWORK 424 324] [424][V][XSAPI] RunAsync::XAsyncOp::GetResult: IdentityName=XblUserStatisticsGetMultipleUserStatisticsForMultipleServiceConfigurationsAsync
+[2026-11-08 20:49:12:476 INFO SERVER 376 324] Pack Stack - [00] Frost Wand Behavior Pack (id: e753ecd7-8d65-46fe-905e-61e11f3d31a8, version: 1.0.0) @ C:/users/player/AppData/Roaming/Minecraft Bedrock/Users/Shared/games/com.mojang/development_behavior_packs/sculkwire_frost-wand_BP
+[2026-11-08 20:49:12:489 INFO LEVELTRANSITION 376 324] [Server]Level-LevelConstructed
+[2026-11-08 20:49:12:490 ERROR SCRIPTING 376 324] [Scripting] Plugin [Frost Wand Behavior Pack - 1.0.0] - does not contain main file [steve/frost_wand/main.js].
+
+[2026-11-08 20:49:12:490 WARN SCRIPTING 376 324] [Scripting] Debugger auto-attach waiting for [5] seconds.
+
+[2026-11-08 20:49:12:499 ERROR PERSONA 328 324] [PendingAppearance] Loading custom skin failed: aaaaaaaa-7b21-4637-9b63-8ad63622ef01.1
+[2026-11-08 20:49:12:531 INFO UNKNOWN 400 324] Error: generic: no such file or directory (2)
+Call stack:[
+{ { FileSystem.cpp, 2273896864597288460, 336 } }
+]
+[2026-11-08 20:49:12:563 WARN SCRIPTING 376 324] [Scripting] Debugger attached to [127.0.0.1] on port [19151].
+
+[2026-11-08 20:49:12:568 ERROR GUI 376 324] [UI] ui/hud_screen.json | hud_title | Unknown control type
+
+[2026-11-08 20:49:13:483 INFO SCRIPTING 720 324] [Scripting] [sculkwire:ready]
+
+[2026-11-08 20:49:14:120 INFO LEVELTRANSITION 376 324] [Client]Level-LevelInitialized
+[2026-11-08 20:49:20:211 WARN SCRIPTING 712 320] [Scripting] [frost] hit minecraft:cow slowness amp=1 dur=100
+
+[2026-11-08 20:49:21:005 ERROR SCRIPTING 712 320] [Scripting] [Frost Wand Behavior Pack] TypeError: cannot read property 'x' of undefined
+    at onHit (steve/frost_wand/main.js:42)
+
+[2026-11-08 20:49:22:301 INFO NETWORK 424 324] Connecting to websocket at: wss://example.invalid/ws
