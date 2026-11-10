@@ -114,7 +114,8 @@ describe("release archive", () => {
       calls.push(url);
       return url.endsWith(".sha256") ? new TextEncoder().encode(`${sha256Hex(zip)}  asset\n`) : zip;
     };
-    const built = await fetchPrebuiltAgent({ cacheRoot: join(root, "cache"), platform: "linux", fetchBytes });
+    // The cache is a folder on this machine, so these calls run with this machine's path rules (the default).
+    const built = await fetchPrebuiltAgent({ cacheRoot: join(root, "cache"), fetchBytes });
     expect(calls).toEqual([prebuiltUrl(), `${prebuiltUrl()}.sha256`]);
     expect(built).toMatchObject({ key: `prebuilt-${VERSION}`, source: "prebuilt", cached: false });
     expect(built.dir).toBe(join(root, "cache", `prebuilt-${VERSION}`));
@@ -125,7 +126,6 @@ describe("release archive", () => {
     // The second call finds both files and never touches the network.
     const again = await fetchPrebuiltAgent({
       cacheRoot: join(root, "cache"),
-      platform: "linux",
       fetchBytes: async () => {
         throw new Error("should not download again");
       },
@@ -138,8 +138,8 @@ describe("release archive", () => {
     const cacheRoot = join(root, "cache");
     const fetchBytes = async (url: string): Promise<Uint8Array> =>
       url.endsWith(".sha256") ? new TextEncoder().encode("1".repeat(64)) : releaseZip();
-    await expect(fetchPrebuiltAgent({ cacheRoot, platform: "linux", fetchBytes })).rejects.toThrow(/is corrupt/);
-    await expect(fetchPrebuiltAgent({ cacheRoot, platform: "linux", fetchBytes })).rejects.toThrow(AgentBuildError);
+    await expect(fetchPrebuiltAgent({ cacheRoot, fetchBytes })).rejects.toThrow(/is corrupt/);
+    await expect(fetchPrebuiltAgent({ cacheRoot, fetchBytes })).rejects.toThrow(AgentBuildError);
     expect(existsSync(join(cacheRoot, `prebuilt-${VERSION}`))).toBe(false);
   });
 
@@ -148,7 +148,6 @@ describe("release archive", () => {
     await expect(
       fetchPrebuiltAgent({
         cacheRoot: join(root, "cache"),
-        platform: "linux",
         fetchBytes: async () => {
           throw new Error("getaddrinfo ENOTFOUND github.com");
         },
@@ -195,12 +194,12 @@ describe("agent resolution", () => {
     const calls: { cmd: string; args: string[]; cwd: string }[] = [];
     const run = async (cmd: string, args: string[], cwd: string) => {
       calls.push({ cmd, args, cwd });
-      const artifacts = cargoArtifacts(crate, "linux");
+      const artifacts = cargoArtifacts(crate);
       touch(artifacts.dll, "fresh-dll");
       touch(artifacts.injector, "fresh-exe");
       return { code: 0, output: "Finished release", timedOut: false };
     };
-    const built = await buildWithCargo(crate, "/opt/rust/bin/cargo", { cacheRoot, platform: "linux", run });
+    const built = await buildWithCargo(crate, "/opt/rust/bin/cargo", { cacheRoot, run });
     expect(calls).toEqual([{ cmd: "/opt/rust/bin/cargo", args: cargoBuildArgs(), cwd: crate }]);
     expect(built).toMatchObject({ key: nativeSourceHash(crate), dir: join(cacheRoot, nativeSourceHash(crate)), cached: false, source: "cargo" });
     expect(built.dll).toBe(join(built.dir, `sculkwire-agent-${built.key}.dll`));
@@ -209,7 +208,6 @@ describe("agent resolution", () => {
     // A second build of the same sources is a cache hit and never runs cargo again.
     const again = await buildWithCargo(crate, "/opt/rust/bin/cargo", {
       cacheRoot,
-      platform: "linux",
       run: async () => {
         throw new Error("should not build again");
       },
@@ -221,20 +219,21 @@ describe("agent resolution", () => {
     const crate = await tempRoot("sculkwire-crate-");
     touch(join(crate, "Cargo.toml"), "[workspace]\n");
     const run = async () => ({ code: 101, output: "error[E0308]: mismatched types", timedOut: false });
-    await expect(buildWithCargo(crate, "cargo", { cacheRoot: join(await tempRoot("sculkwire-cache-"), "cache"), platform: "linux", run })).rejects.toThrow(
+    await expect(buildWithCargo(crate, "cargo", { cacheRoot: join(await tempRoot("sculkwire-cache-"), "cache"), run })).rejects.toThrow(
       /cargo build failed \(exit code 101\):\nerror\[E0308\]/,
     );
   });
 
   // The routing picks cargo only when this machine has it; `run` stops before anything is compiled.
-  it.skipIf(findCargo() === undefined)("routes to the cargo build when the crate and cargo are both here", async () => {
+  const hostCargo = findCargo();
+  it.skipIf(hostCargo === undefined)("routes to the cargo build when the crate and cargo are both here", async () => {
     const cacheRoot = join(await tempRoot("sculkwire-cache-"), "cache");
     const options = {
       cacheRoot,
-      platform: "linux" as const,
-      // An empty env has no SCULKWIRE_AGENT_DLL, so the override route does not apply; the prebuilt route would
-      // try to download instead.
-      env: {},
+      // Only the folder of this machine's cargo is on PATH, looked up with this machine's rules (`cargo.exe` on
+      // Windows). No SCULKWIRE_AGENT_DLL, so the override route does not apply; the prebuilt route would try to
+      // download instead.
+      env: { PATH: dirname(hostCargo!) },
       run: async () => {
         throw new Error("stop before compiling");
       },
