@@ -40,4 +40,4 @@ TypeScript, Node >= 22.18, ESM. Source runs directly (`node src/cli.ts`); `npm r
 - An input provider's input lock fails open: a missing or bad signal must never block the user's own input.
 
 ## Remotes
-`origin` is GitHub (`ve3dy/sculkwire`). Push `main` there.
+`origin` is GitHub (`ve3dy/sculkwire`), `gitlab` is its GitLab mirror. Push `main` and release tags to both.
