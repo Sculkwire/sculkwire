@@ -10,6 +10,7 @@ import { commands as knowledgeCommands } from "./knowledge/cli.ts";
 import { serveStdio } from "./mcp/server.ts";
 import { commands as bdsCommands } from "./runtime/bds/cli.ts";
 import { commands as gameCommands } from "./runtime/client/cli.ts";
+import { commands as engineCommands } from "./runtime/engine/cli.ts";
 import { commands as updateCommands } from "./update/cli.ts";
 import { commands as validateCommands } from "./validate/cli.ts";
 import { useKnowledgeProviders } from "./validate/providers.ts";
@@ -27,6 +28,7 @@ const BUILTIN: CliCommand[] = [
   ...validateCommands,
   ...bdsCommands,
   ...gameCommands,
+  ...engineCommands,
   ...gamefilesCommands,
   ...decisionCommands,
   ...updateCommands,

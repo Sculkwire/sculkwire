@@ -9,6 +9,7 @@ import { register as gamefiles } from "../gamefiles/mcp.ts";
 import { register as knowledge } from "../knowledge/mcp.ts";
 import { register as bds } from "../runtime/bds/mcp.ts";
 import { register as game } from "../runtime/client/mcp.ts";
+import { register as engine } from "../runtime/engine/mcp.ts";
 import { autoUpdate } from "../update/auto.ts";
 import { register as update } from "../update/mcp.ts";
 import { register as validate } from "../validate/mcp.ts";
@@ -19,7 +20,7 @@ import { register as validate } from "../validate/mcp.ts";
  */
 export type RegisterFeature = (server: McpServer) => void;
 
-const FEATURES: RegisterFeature[] = [knowledge, validate, bds, game, gamefiles, decision, update];
+const FEATURES: RegisterFeature[] = [knowledge, validate, bds, game, engine, gamefiles, decision, update];
 
 /** The server with every built-in feature, then the tools of every installed extension (`src/extensions/`). */
 export async function createServer(): Promise<McpServer> {

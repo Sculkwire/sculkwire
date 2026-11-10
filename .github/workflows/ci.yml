@@ -10,6 +10,22 @@ on:
     - cron: "0 3 * * 1"
 
 jobs:
+  # The in-game agent builds the same way on both hosts: rustup, the MSVC target and rust-lld, no Windows SDK. cargo
+  # reads native/.cargo/config.toml from the working directory, so the build runs inside native/.
+  agent:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add x86_64-pc-windows-msvc
+      - run: cargo build --release --locked --target x86_64-pc-windows-msvc
+
   test:
     strategy:
       fail-fast: false

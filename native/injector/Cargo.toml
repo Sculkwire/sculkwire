@@ -1,0 +1,12 @@
+[package]
+name = "sculkwire-injector"
+version = "0.1.0"
+edition = "2021"
+description = "Loads a DLL into a running Windows process by executable name."
+license = "MIT"
+
+[[bin]]
+name = "sculkwire-injector"
+path = "src/main.rs"
+
+[dependencies]

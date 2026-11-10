@@ -1,0 +1,9 @@
+[package]
+name = "agent-core"
+version = "0.1.0"
+edition = "2021"
+description = "Build-agnostic core of the sculkwire in-game agent: JSON-RPC server, request queue, tick stream, input lock, PE/x64/hook primitives."
+license = "MIT"
+
+[dependencies]
+serde_json = { version = "1", default-features = false, features = ["alloc"] }

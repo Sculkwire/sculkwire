@@ -11,8 +11,11 @@ import { detectBuilds, gameDirCandidates, noBuildMessage, selectBuild } from "..
 import { registerInputProvider } from "../runtime/client/inputprovider.ts";
 import { findInstall, installerRoot } from "../runtime/client/install.ts";
 import { winePrefix } from "../runtime/client/launcher.ts";
+import { registerAgentSource } from "../runtime/engine/build.ts";
+import { gamePath } from "../runtime/engine/gamepath.ts";
 
 export type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+export type { AgentBuild, AgentSource, AgentSourceBuildOptions } from "../runtime/engine/build.ts";
 
 export interface ExtensionHost {
   /** zod, for tool input and output schemas. */
@@ -27,8 +30,15 @@ export interface ExtensionHost {
   findInstall: typeof findInstall;
   installerRoot: typeof installerRoot;
   winePrefix: typeof winePrefix;
-  /** Install the in-process input provider (`src/runtime/client/inputprovider.ts`). */
+  /** Replace sculkwire's built-in in-process input provider (the in-game agent) with the extension's own. */
   registerInputProvider: typeof registerInputProvider;
+  /**
+   * Supply the in-game agent's DLL for game folders the extension recognises: the first registered source whose
+   * `matches(gameDir)` is true replaces the built-in build at attach.
+   */
+  registerAgentSource: typeof registerAgentSource;
+  /** The path a Windows game process uses for a host path (`Z:` under Wine, the native path on Windows). */
+  gamePath: typeof gamePath;
   /** Installed PC (GDK) game builds (`src/gamefiles/detect.ts`). */
   gamefiles: {
     gameDirCandidates: typeof gameDirCandidates;
@@ -48,6 +58,8 @@ export function extensionHost(): ExtensionHost {
     installerRoot,
     winePrefix,
     registerInputProvider,
+    registerAgentSource,
+    gamePath,
     gamefiles: { gameDirCandidates, detectBuilds, selectBuild, noBuildMessage },
   };
 }

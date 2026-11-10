@@ -2,6 +2,14 @@
 
 sculkwire works with the PC (GDK) edition of Minecraft Bedrock on Windows and Linux, and detects installed copies automatically. Run `node src/cli.ts game status` to see which installs were found.
 
+Next to the bridge, an optional in-game agent can be loaded into the running game: it runs commands, controls game time, reads the player, takes a screenshot through the game's own code, holds the input lock, drives menus and screens, reads inventories and containers, crafts and uses blocks, and reads and changes game and world settings, all from inside the game rather than through the screen. It is attached with `engine_attach` and is documented in [In-Game Agent](engine.md), including its requirements and its current status.
+
+While the agent is attached, the bridge's own input takes its route where it can:
+
+- `game_input` sends keys, text and left and right clicks through the game's own UI (`ui.key`, `ui.text`, `ui.click`), so they work in the background and on Windows without the foreground. A mouse move and a middle click keep the keyboard and mouse route.
+- `player_act` and `sculk bench` use the engine route through the built-in [input provider](extensions.md#input-provider), with the input lock held while actions run.
+- The sign-in recovery below reads the screen from the agent and presses through it.
+
 ## Platform Support
 
 | Feature | Windows | Linux |
@@ -15,6 +23,7 @@ sculkwire works with the PC (GDK) edition of Minecraft Bedrock on Windows and Li
 | `mute` | Yes (the game's audio sessions) | Yes (a silent PipeWire or PulseAudio sink) |
 | Off-screen (`headless`) mode | No | Yes |
 | Watch the game while the agent works | Yes | Yes, in window mode (default) |
+| In-game agent (`engine_*`, `game_input_lock`, `game_settings`, `world_settings`, `game_ui`, `player_inventory`, `container`, `craft`, `interact`, `screen`) | Yes, in the game's own process | Yes, through the install's Wine or Proton prefix. See [In-Game Agent](engine.md) |
 
 The one real difference is where the agent's input goes:
 
@@ -93,7 +102,7 @@ The world link can beat Microsoft sign-in, and the join then fails in one of two
 - The game rejects the client's login, logs `LoginPacket failed validation` and `DisconnectPacket` in `logs/Debug_Log*.txt`, and stops on "An error has occurred. You need to authenticate to Microsoft services." After "Back to menu" it either joins the world by itself or shows the Play screen with the world list.
 - Sign-in finishes while the world is still loading. The game closes the world again (`[Server]Level-LevelStartLeaveGame` before any client join) and shows the start screen.
 
-`game_launch` watches for both signatures while it waits for the world and then walks the menus back into the test world the way a person would. It never relaunches the game for this. It follows which screen is up through the engine log, where the game names every screen it creates and closes, and acts on that screen.
+`game_launch` watches for both signatures while it waits for the world and then walks the menus back into the test world the way a person would. It never relaunches the game for this. Without the agent it follows which screen is up through the engine log, where the game names every screen it creates and closes, and acts on that screen with the host's keys and clicks.
 
 - On the error screen it presses Return, which activates the focused "Back to menu" button, and clicks the button if Return did nothing.
 - On the Marketplace, the Minecoins store, the Dressing Room or any other unexpected screen it presses Escape until the start screen is back. It never clicks on a store screen.
@@ -107,7 +116,11 @@ When a decision model with image support is configured (`sculk setup`, Jev), it 
 
 The recovery presses keys and clicks on Linux in window and off-screen mode and on Windows (where it brings the game window to the front first). In `desktop` mode on Linux there is no background input, so `game_launch` fails with a message that asks you to press "Back to menu" yourself, then Play and the test world. When you started the game yourself (no launch command), the same step is listed in `manualSteps` and sculkwire waits until you are in the world.
 
+With the in-game agent attached, the screen comes from the agent's `ui.screen` instead, and every press goes through the game's own UI: a named control where the screen lists one (`Back to menu`, `Play`), the key otherwise, and the world tile through `ui.click`. That works in the background and on Windows without the foreground. The engine log still says which world opened and whether each press moved the game on. When `ui.screen` fails twice in a row, the recovery falls back to the log and the host's keys for the rest of that run.
+
 ## Status
+
+This is the bridge. The in-game agent has its own status, in [In-Game Agent](engine.md#status).
 
 - **Linux:** verified end to end against the game with mcbe-gdk-installer and Flarial.
 - **Windows:** the input helper (held keys, chords, Unicode text, clicks on the requested pixel, relative mouse motion, nothing delivered and the loss reported while another window is in front, keys let go when the helper closes), `PrintWindow` screenshots and the screen-capture fallback are checked on CI against a test window, not against the game. The installers are checked on CI too.

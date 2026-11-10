@@ -9,6 +9,7 @@ import { dataDir } from "../../core/paths.ts";
 import { onShutdown } from "../../core/shutdown.ts";
 import { bridge, type BridgeStatus } from "./bridge.ts";
 import { inputProvider } from "./inputprovider.ts";
+import { engine, type EngineResult } from "../engine/engine.ts";
 import { type EntityInfo, type Loadout, type PlayerAction } from "./player.ts";
 import { play, PLAY_DEFAULT_DURATION_MS, PLAY_DEFAULT_STEP_MS, PLAY_MAX_DURATION_MS, type Death, type PlayAction, type PlayResult } from "./skills/play.ts";
 import { TACTICS } from "./skills/tactics.ts";
@@ -84,6 +85,36 @@ function diagText(diagnostics: readonly Diagnostic[], max = 20): string {
   const lines = diagnostics.slice(0, max).map(formatDiagnostic);
   if (diagnostics.length > max) lines.push(`… ${diagnostics.length - max} more`);
   return lines.join("\n");
+}
+
+/**
+ * Take a `game_input` action through the agent's own UI when it is attached: one `ui.key` per chord, `ui.text` into
+ * the focused box, `ui.click` in screenshot pixels (left, or right for button 3). False when this action has no `ui.*`
+ * call, so the caller keeps its own route: a mouse move, a middle click, or nothing to send.
+ */
+async function inputThroughUi(a: {
+  action: "key" | "type" | "click" | "move";
+  keys?: string;
+  text?: string;
+  x?: number;
+  y?: number;
+  button?: 1 | 2 | 3;
+}): Promise<boolean> {
+  if (!engine.attached) return false;
+  const sent = (result: EngineResult<unknown>): true => {
+    if (!result.ok) throw new Error(`${result.reason}: ${result.message}`);
+    return true;
+  };
+  if (a.action === "key") {
+    const chords = (a.keys ?? "").split(/\s+/).filter(Boolean);
+    for (const chord of chords) sent(await engine.uiKey(chord));
+    return chords.length > 0;
+  }
+  if (a.action === "type") return a.text ? sent(await engine.uiText(a.text)) : false;
+  if (a.action === "click" && a.x !== undefined && a.y !== undefined && a.button !== 2) {
+    return sent(await engine.uiClick(a.x, a.y, a.button === 3 ? "right" : "left"));
+  }
+  return false;
 }
 
 function statusText(s: BridgeStatus): string {
@@ -399,10 +430,12 @@ export function register(server: McpServer): void {
       title: "Keyboard and mouse input",
       description:
         "Drive the client like a player: `key` (xdotool key names, e.g. `w`, `space`, `Escape`, `Shift_L`, `F3`, chords " +
-        "like `ctrl+a`, several separated by spaces), `type` (text), `click` / `move` at x,y in screenshot pixels. Linux: " +
-        "into gamescope's own display, never the user's desktop. Windows: the system keyboard and mouse after bringing " +
-        "the game window to the foreground; fails with \"the game window is not in the foreground\" when the user " +
-        "switches away before the input is sent.",
+        "like `ctrl+a`, several separated by spaces), `type` (text), `click` / `move` at x,y in screenshot pixels. With " +
+        "the in-game agent attached, keys, text and left/right clicks go through the game's own UI instead (`game_ui`), " +
+        "which works in the background and on Windows without the foreground; `move` and a middle click always take the " +
+        "route below. Linux: into gamescope's own display, never the user's desktop. Windows: the system keyboard and " +
+        "mouse after bringing the game window to the foreground; fails with \"the game window is not in the foreground\" " +
+        "when the user switches away before the input is sent.",
       inputSchema: {
         action: z.enum(["key", "type", "click", "move"]),
         keys: z.string().optional(),
@@ -415,6 +448,7 @@ export function register(server: McpServer): void {
     },
     async (a) => {
       try {
+        if (await inputThroughUi(a)) return ok("done", { done: true });
         if (a.action === "key") {
           if (!a.keys) throw new Error("key needs `keys`");
           await bridge.input({ action: "key", keys: a.keys });
@@ -563,8 +597,8 @@ export function register(server: McpServer): void {
         "starts. On Windows input only reaches the game while its window is in the foreground: when the user switches " +
         "away, every key and button is let go, the running action stops with \"the game window is not in the " +
         "foreground\" and a play job pauses until the game window is in the foreground again or player_job stop. " +
-        "When an extension installs an in-process input provider, input " +
-        "goes through it instead whenever it answers (the engine route). `input` forces one route. When the engine " +
+        "When the in-game agent is attached (engine_attach), input goes through it instead whenever it answers (the " +
+        "engine route); an extension's own input provider takes its place while installed. `input` forces one route. When the engine " +
         "route fails mid-action, the action is redone with the keyboard and its message says so. " +
         "When the client cancels the call or it times out, the running action stops and every key and button is let go. " +
         "On the engine route the provider's input lock keeps the user's own keyboard and mouse out of the game while " +
@@ -587,7 +621,7 @@ export function register(server: McpServer): void {
         input: z
           .enum(["auto", "engine", "keyboard"])
           .optional()
-          .describe("Input route. auto (default): the input provider's engine route when one is installed and answers, else keyboard and mouse. engine fails when no provider can be used"),
+          .describe("Input route. auto (default): the engine route (the attached in-game agent, or an extension's input provider) when it answers, else keyboard and mouse. engine fails when no provider can be used"),
       },
       outputSchema: {
         results: z.array(z.object({ action: z.string(), ok: z.boolean(), message: z.string(), durationMs: z.number(), input: z.enum(["engine", "keyboard"]).optional() })),
@@ -753,9 +787,16 @@ export function register(server: McpServer): void {
     "game_stop",
     {
       title: "Stop the client",
-      description: "Quit the game, close the bridge and restore the options.txt keys sculkwire changed.",
+      description:
+        "Quit the game, close the bridge and restore the options.txt keys and game settings sculkwire changed " +
+        "(settings live while the game still runs, both in options.txt).",
       inputSchema: {},
-      outputSchema: { stopped: z.boolean(), message: z.string(), restoredOptions: z.record(z.string(), z.array(z.string())) },
+      outputSchema: {
+        stopped: z.boolean(),
+        message: z.string(),
+        restoredOptions: z.record(z.string(), z.array(z.string())),
+        restoredSettings: z.record(z.string(), z.union([z.boolean(), z.number(), z.string()]).nullable()),
+      },
     },
     async () => {
       try {

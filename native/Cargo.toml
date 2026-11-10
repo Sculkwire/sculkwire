@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["agent-core", "agent", "injector"]
+
+[profile.release]
+# The agent lives inside the game process: no unwinding, one codegen unit, no debug assertions.
+panic = "abort"
+opt-level = 2
+debug-assertions = false
+codegen-units = 1

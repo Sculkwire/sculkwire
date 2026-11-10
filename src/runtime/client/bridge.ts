@@ -59,6 +59,8 @@ import {
   type LaunchState,
 } from "./launcher.ts";
 import { bridgeOptions, restoreOptions, setOptions } from "./options.ts";
+import type { SettingValue } from "../engine/engine.ts";
+import { restoreGameSettings } from "../engine/settings.ts";
 import { Staleness, streamEntities, streamEntity, TickClock, type StreamedEntities } from "./entitystream.ts";
 import { horizontalDistance, PlayerController, type EntityInfo, type Impact, type Loadout, type PlayerState, type PlayerWorld } from "./player.ts";
 import { inputProvider } from "./inputprovider.ts";
@@ -76,6 +78,20 @@ const HELPER_FOR_MOTION_MS = 1000;
 const SPAWN_MARK = "[sculkwire:spawned]";
 const REPLY_MARK = "[sculkwire:reply] ";
 const STATE_MARK = "[sculkwire:state] ";
+
+/**
+ * A helper pack query that answered `ok: false`. `reason` is the helper's own machine-readable label when it sent one
+ * (`no_container` for a block that has none), so a caller can tell a bad request from a broken pack.
+ */
+export class HelperQueryError extends Error {
+  reason: string | undefined;
+
+  constructor(message: string, reason?: string) {
+    super(message);
+    this.name = "HelperQueryError";
+    this.reason = reason;
+  }
+}
 
 export interface BridgeStartOptions {
   /**
@@ -728,7 +744,9 @@ export class ClientBridge {
     return this.#controller;
   }
 
-  /** Ask the helper pack (`/scriptevent sculkwire:query`) and wait for its reply print. */
+  /**
+   * Ask the helper pack (`/scriptevent sculkwire:query`) and wait for its reply print.
+   */
   async query(kind: string, params: Record<string, unknown> = {}): Promise<unknown> {
     this.#requireRunning();
     const session = this.#session;
@@ -739,7 +757,10 @@ export class ClientBridge {
     const print = await this.waitForPrint((p) => p.message.startsWith(REPLY_MARK) && p.message.includes(`"id":${id},`), 10_000, since);
     const reply: unknown = JSON.parse(print.message.slice(REPLY_MARK.length));
     if (!reply || typeof reply !== "object" || !("ok" in reply)) throw new Error(`malformed helper reply: ${print.message}`);
-    if (reply.ok !== true) throw new Error(`helper: ${"error" in reply ? String(reply.error) : "failed"}`);
+    if (reply.ok !== true) {
+      const text = `helper: ${"error" in reply ? String(reply.error) : "failed"}`;
+      throw new HelperQueryError(text, "reason" in reply && typeof reply.reason === "string" ? reply.reason : undefined);
+    }
     return "result" in reply ? reply.result : undefined;
   }
 
@@ -899,9 +920,18 @@ export class ClientBridge {
     await sendInput(this.launchState as LaunchState, action);
   }
 
-  /** Stop the game, close listeners, restore the options.txt keys we changed. Safe to call twice. */
-  async stop(): Promise<{ stopped: boolean; message: string; restoredOptions: Record<string, string[]> }> {
+  /**
+   * Stop the game, close listeners, put back the options.txt keys and the game settings sculkwire changed. Safe to call
+   * twice. Game settings are restored first, while the game still runs, so the agent can apply them live.
+   */
+  async stop(): Promise<{
+    stopped: boolean;
+    message: string;
+    restoredOptions: Record<string, string[]>;
+    restoredSettings: Record<string, SettingValue | null>;
+  }> {
     const install = this.install ?? (await findInstall());
+    const restoredSettings = await restoreGameSettings({ install }).catch(() => ({}));
     const result = await stopGame(install);
     await inputProvider()?.stopped();
     const listener = this.#listener;
@@ -928,7 +958,7 @@ export class ClientBridge {
     this.#controller = undefined;
     this.#latestState = undefined;
     for (const dir of this.#deployed.splice(0)) await rm(dir, { recursive: true, force: true });
-    return { ...result, restoredOptions };
+    return { ...result, restoredOptions, restoredSettings };
   }
 }
 

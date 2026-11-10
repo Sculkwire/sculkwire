@@ -23,6 +23,7 @@
 | Server | `bds_check`, `gametest_run`, `bds_session_start`, `bds_session_command`, `bds_session_logs`, `bds_session_stop`, `script_profile` |
 | Game | `game_launch`, `game_status`, `game_command`, `game_reload`, `game_log`, `game_screenshot`, `game_query`, `game_registry`, `game_input`, `game_stop` |
 | Player | `player_act`, `player_job`, `player_state` |
+| In-Game Agent | `engine_attach`, `engine_status`, `engine_command`, `engine_player`, `engine_tick`, `engine_screenshot`, `game_input_lock`, `game_settings`, `world_settings`, `game_ui`, `player_inventory`, `container`, `craft`, `interact`, `screen` |
 | Game Files | `game_builds`, `game_vanilla_packs`, `game_extract_pack` |
 | Decision Model | `decision_status` |
 
@@ -36,6 +37,7 @@ See the [tool reference](docs/tools.md) for what each tool does and its inputs.
 - **Live game bridge.** Launch the real client in a private test world with your packs, reload after edits, read the content log, query the world, take screenshots and send keyboard and mouse input, on Windows and Linux. On Linux the input stays inside gamescope, so your own mouse and keyboard stay yours, and the game can also run off-screen. On Windows the agent uses the system keyboard and mouse while the game window is in the foreground, and stops when you switch away. A sign-in error at launch is recovered without restarting the game.
 - **Player control.** The agent plays like a person through `player_act`, on Linux and Windows. That covers smooth camera movement, pathfinding over blocks, ladders, water and gaps, and combat against zombies, skeletons, spiders and creepers. `play` runs a goal in the background, with an optional decision model as an advisor. On Windows a running action stops and a `play` job pauses while the game window is not in the foreground.
 - **Game files.** Reads your installed PC copy of the game: its version, and the per-version `vanilla_1.x` packs a world's `base_game_version` pins, unpacked from `.brarchive` into plain folders you can grep or diff against.
+- **In-game agent.** Loads a small DLL into the running retail game through engine hooks, on Linux under the install's Wine or Proton and natively on Windows. From inside the game it runs commands as the player, controls game time, reads the player and the level, takes screenshots through the game's own code, drives menus and screens in the background, reads inventories and containers, crafts, uses blocks and villagers like a right click, runs every station's own action, keeps your keyboard and mouse out while the agent plays (F9 takes over), and reads or changes game and world settings. `player_act`, `game_input` and the sign-in recovery use it when it is attached. The DLL is the prebuilt one from the GitHub release, or built from `native/` with cargo. See [In-Game Agent](docs/engine.md).
 - **Extensions.** Packages in your sculkwire config folder can add MCP tools, CLI commands and an in-process input route. See [Extensions](docs/extensions.md).
 - **Benchmarks.** `sculk bench` builds arenas in a test world and measures combat and movement skills.
 
@@ -129,6 +131,7 @@ The `play` action of `player_act` picks its tactics with built-in scores and wor
 | Knowledge and validation | Node.js 22.18 or newer. rgl for Regolith projects |
 | Bedrock Dedicated Server | Windows or Linux x64, and acceptance of the [Minecraft EULA](https://www.minecraft.net/eula) |
 | Game client | Minecraft Bedrock for PC on Windows or Linux. On Linux, gamescope and xdotool for window and headless modes. On Windows nothing extra (Windows PowerShell 5.1 ships with Windows); input needs the game window in the foreground. See [Game Client Setup](docs/client.md) |
+| In-game agent (optional) | The game running, from an install sculkwire detects; on Linux its Wine or Proton prefix is used. Without `cargo` sculkwire downloads the release build; building from `native/` needs rustup with the `x86_64-pc-windows-msvc` target, and no Windows SDK. See [In-Game Agent](docs/engine.md) |
 | Game files | An installed PC (GDK) copy of Minecraft Bedrock: the Xbox app install on Windows, mcbe-gdk-linux on Linux, or a folder in `SCULKWIRE_GAME_DIRS` |
 | Decision model (optional) | An OpenRouter or ZenMux key, or a local Kev server |
 
@@ -144,6 +147,22 @@ node src/cli.ts api Entity.applyDamage
 node src/cli.ts bench combat --runs 3             # Measure the player skills
 node src/cli.ts doctor                            # Check the machine
 node src/cli.ts --help                            # List all commands
+```
+
+With the game running, the in-game agent has its own commands. Each prints JSON on stdout.
+
+```sh
+sculk engine attach                               # Build or download the DLL, inject it, print its status
+sculk engine status|command|tick|screenshot|player
+sculk game lock [on|off|auto]                     # Input lock; F9 in the game takes over
+sculk game settings [list|get <id>|set <id> <value>]
+sculk world settings [get|set ...]
+sculk game ui [screen|controls|press|key|text|click|scroll]
+sculk player inventory
+sculk container get <x> <y> <z>
+sculk craft match|run
+sculk interact block <x> <y> <z> | interact entity <id>
+sculk screen state|move|act|close
 ```
 
 ## Data Sources

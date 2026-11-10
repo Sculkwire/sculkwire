@@ -1,0 +1,7 @@
+# Cross-build with the linker that ships with rustup: no MSVC link.exe, no Windows SDK, no import
+# libraries. Every Win32 import is declared with `kind = "raw-dylib"`, and `agent-core` defines the few
+# CRT symbols the compiler emits (memcpy & co., _fltused, __chkstk), so `/nodefaultlib` is all the
+# linker needs. cargo reads this file from its working directory: run it with `native/` as cwd.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
+rustflags = ["-C", "link-arg=/nodefaultlib", "-C", "link-arg=/subsystem:console"]

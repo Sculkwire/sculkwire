@@ -20,6 +20,21 @@ jobs:
       - run: npx tsc --noEmit
       - run: npx vitest run
 
+      # The in-game agent DLL and injector, built from native/ with rustup alone (rust-lld, no Windows SDK). The engine
+      # build driver downloads this zip when no cargo is installed and checks it against the .sha256 file. cargo reads
+      # native/.cargo/config.toml from the working directory, so the build runs inside native/.
+      - name: Build the in-game agent
+        shell: bash
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          (cd native && cargo build --release --locked --target x86_64-pc-windows-msvc)
+          version="$(node -p "require('./package.json').version")"
+          zip="sculkwire-agent-$version-x86_64-windows.zip"
+          out=native/target/x86_64-pc-windows-msvc/release
+          (cd "$out" && zip -9 "$GITHUB_WORKSPACE/$zip" sculkwire_agent.dll sculkwire-injector.exe)
+          sha256sum "$zip" | cut -d' ' -f1 > "$zip.sha256"
+          echo "AGENT_ZIP=$zip" >> "$GITHUB_ENV"
+
       - name: Check the tag matches package.json
         shell: bash
         run: |
@@ -39,4 +54,4 @@ jobs:
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --title "Sculkwire $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+        run: gh release create "$GITHUB_REF_NAME" --title "Sculkwire $GITHUB_REF_NAME" --notes-file notes.md --verify-tag "$AGENT_ZIP" "$AGENT_ZIP.sha256"

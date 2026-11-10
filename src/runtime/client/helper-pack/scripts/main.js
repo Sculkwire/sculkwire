@@ -403,6 +403,118 @@ function loadout() {
   return out;
 }
 
+/** A component, or undefined when this game's API level does not have it (a string id is not checked at compile time). */
+function componentOf(holder, id) {
+  try {
+    return holder.getComponent(id);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * One item in the slot shape the host parses: id, count, and everything the Script API shows about it — custom name,
+ * lore, durability and enchantments. `null` for an empty slot. No aux value: the API does not expose one.
+ */
+function itemInfo(item) {
+  if (!item) return null;
+  const out = { item: item.typeId, count: item.amount, enchantments: [] };
+  if (item.nameTag) out.name = item.nameTag;
+  const lore = item.getLore();
+  if (lore.length) out.lore = lore.map((line) => String(line));
+  const durability = componentOf(item, "minecraft:durability");
+  if (durability) out.durability = { damage: durability.damage, max: durability.maxDurability };
+  const enchantable = componentOf(item, "minecraft:enchantable");
+  // `type` is the EnchantmentType, whose `id` is the namespaced enchantment id (minecraft:sharpness).
+  if (enchantable) out.enchantments = enchantable.getEnchantments().map((e) => ({ id: e.type.id, level: e.level }));
+  return out;
+}
+
+/** Slots `from` to `to` - 1 of a container, empties as null. */
+function slotsOf(container, from, to) {
+  const out = [];
+  for (let i = from; i < to; i++) out.push(itemInfo(container?.getItem(i)));
+  return out;
+}
+
+/** One attribute from its component, or undefined when the running game does not expose it as one. */
+function attributeOf(entity, id) {
+  const component = componentOf(entity, id);
+  if (!component || typeof component.currentValue !== "number") return undefined;
+  const out = { current: component.currentValue };
+  if (typeof component.effectiveMin === "number") out.min = component.effectiveMin;
+  if (typeof component.effectiveMax === "number") out.max = component.effectiveMax;
+  if (typeof component.defaultValue === "number") out.default = component.defaultValue;
+  return out;
+}
+
+/** Every attribute the Script API exposes, plus the armour points and toughness the game derives from what is worn. */
+function attributesOf(p, equippable) {
+  const out = {};
+  for (const [name, id] of [
+    ["health", "minecraft:health"],
+    ["hunger", "minecraft:player.hunger"],
+    ["saturation", "minecraft:player.saturation"],
+    ["movement", "minecraft:movement"],
+  ]) {
+    const attribute = attributeOf(p, id);
+    if (attribute) out[name] = attribute;
+  }
+  if (typeof p.level === "number") out.level = { current: p.level };
+  if (typeof p.getTotalXp === "function") out.experience = { current: p.getTotalXp() };
+  if (equippable) {
+    if (typeof equippable.totalArmor === "number") out.armor = { current: equippable.totalArmor };
+    if (typeof equippable.totalToughness === "number") out.armorToughness = { current: equippable.totalToughness };
+  }
+  return out;
+}
+
+/** The player's attributes and whole inventory. No cursor stack: the API does not expose one. */
+function inventory() {
+  const p = world.getAllPlayers()[0];
+  if (!p) throw new Error("no player in the world");
+  const container = componentOf(p, "minecraft:inventory")?.container;
+  const equippable = componentOf(p, "minecraft:equippable");
+  const equipment = (slot) => {
+    try {
+      return itemInfo(equippable?.getEquipment(slot));
+    } catch {
+      return null;
+    }
+  };
+  return {
+    attributes: attributesOf(p, equippable),
+    inventory: {
+      selectedSlot: p.selectedSlotIndex,
+      hotbar: slotsOf(container, 0, 9),
+      inventory: slotsOf(container, 9, 36),
+      armor: { head: equipment("Head"), chest: equipment("Chest"), legs: equipment("Legs"), feet: equipment("Feet") },
+      offhand: equipment("Offhand"),
+      cursor: null,
+    },
+  };
+}
+
+/** What a block's own container holds, by block position; a block without one says why, with a reason the host reads. */
+function containerAt(q) {
+  const { dim, at } = anchor(q);
+  const x = Math.floor(at.x);
+  const y = Math.floor(at.y);
+  const z = Math.floor(at.z);
+  const block = dim.getBlock({ x, y, z });
+  if (!block) throw queryError("no_block", `no loaded block at ${x} ${y} ${z}`);
+  const container = componentOf(block, "minecraft:inventory")?.container;
+  if (!container) throw queryError("no_container", `${block.typeId} at ${x} ${y} ${z} has no container`);
+  return { block: block.typeId, size: container.size, slots: slotsOf(container, 0, container.size) };
+}
+
+/** An error the host can act on: `reason` comes back on the reply beside the message. */
+function queryError(reason, message) {
+  const error = new Error(message);
+  error.reason = reason;
+  return error;
+}
+
 /** Creeper fuses: entity id -> game tick the fuse was lit, from the data-driven entity events. */
 const FUSES = new Map();
 const LIGHT = new Set(["minecraft:start_exploding", "minecraft:start_exploding_forced"]);
@@ -560,7 +672,7 @@ function hurts(q) {
   return { tick: system.currentTick, hurts: HURTS.filter((h) => h.tick > since) };
 }
 
-const HANDLERS = { ping: () => "pong", entities, entity, blocks, block, grid, player, state, stream, impacts, deaths, hurts, loadout };
+const HANDLERS = { ping: () => "pong", entities, entity, blocks, block, grid, player, state, stream, impacts, deaths, hurts, loadout, inventory, container: containerAt };
 
 function sendReply(reply) {
   console.log(`[sculkwire:reply] ${JSON.stringify(reply)}`);
@@ -578,11 +690,12 @@ system.afterEvents.scriptEventReceive.subscribe((ev) => {
     if (result instanceof Promise) {
       result.then(
         (r) => sendReply({ id: q.id, ok: true, result: r }),
-        (e) => sendReply({ id: q.id, ok: false, error: String(e) }),
+        (e) => sendReply({ id: q.id, ok: false, error: String(e), reason: e && e.reason }),
       );
     } else sendReply({ id: q.id, ok: true, result });
   } catch (e) {
-    sendReply({ id: q.id, ok: false, error: String(e) });
+    // `reason` is only there when a handler set one (a block without a container, an unloaded block).
+    sendReply({ id: q.id, ok: false, error: String(e), reason: e && e.reason });
   }
 });
 

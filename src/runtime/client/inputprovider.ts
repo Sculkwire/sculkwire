@@ -1,8 +1,13 @@
 /**
- * The in-process input provider: an extension may register one to give the player controller a second input route
- * next to the keyboard (`input: "engine"` in `player_act` and `sculk bench`). The bridge hands its `input` to the
- * controller, merges its motion stream over the helper's player state, tells it when a game starts and stops, and
- * `player_act` asks it whether the simulation is paused and holds its input lock around actions and play jobs.
+ * The in-process input provider: the second input route next to the keyboard (`input: "engine"` in `player_act` and
+ * `sculk bench`). The bridge hands its `input` to the controller, merges its motion stream over the helper's player
+ * state, tells it when a game starts and stops, and `player_act` asks it whether the simulation is paused and holds its
+ * input lock around actions and play jobs.
+ *
+ * sculkwire installs its own provider, the in-game agent (`src/runtime/engine/provider.ts`), as the built-in one when
+ * that module loads. An extension may replace it through `registerInputProvider`; removing that one falls back to the
+ * built-in provider. There is one provider in use at a time, so the controller, `player_act` and `sculk bench` never
+ * have to choose.
  *
  * Without a provider the keyboard route is the only one: `auto` uses it, `engine` fails, nothing is paused, locked,
  * watched or closed.
@@ -52,25 +57,45 @@ export interface InputProvider {
   close(): void;
 }
 
-let current: InputProvider | undefined;
+/** sculkwire's own provider, and the extension provider that replaces it while installed. */
+let builtin: InputProvider | undefined;
+let extended: InputProvider | undefined;
 let shutdownHooked = false;
 
-/** Install `provider`. Only one can be installed; returns the function that removes it. */
+/** Close whatever is installed when the process shuts down, and only once. */
+function hookShutdown(): void {
+  if (shutdownHooked) return;
+  shutdownHooked = true;
+  onShutdown(() => {
+    extended?.close();
+    builtin?.close();
+  });
+}
+
+/**
+ * Install sculkwire's own provider. Called once when the engine feature loads; an extension's provider replaces it and
+ * falls back to it when removed.
+ */
+export function setBuiltinInputProvider(provider: InputProvider | undefined): void {
+  builtin = provider;
+  if (provider) hookShutdown();
+}
+
+/**
+ * Install an extension's provider, which replaces the built-in one while it is installed. Registering again replaces
+ * the previous extension provider; removing it falls back to the built-in one. Returns the function that removes it.
+ */
 export function registerInputProvider(provider: InputProvider): () => void {
-  if (current) throw new Error(`an input provider is already installed (${current.name})`);
-  current = provider;
-  if (!shutdownHooked) {
-    shutdownHooked = true;
-    onShutdown(() => current?.close());
-  }
+  extended = provider;
+  hookShutdown();
   return () => {
-    if (current === provider) current = undefined;
+    if (extended === provider) extended = undefined;
   };
 }
 
-/** The installed provider, if any. */
+/** The provider in use: an extension's while installed, else sculkwire's own, else none. */
 export function inputProvider(): InputProvider | undefined {
-  return current;
+  return extended ?? builtin;
 }
 
 /** Why `input: "engine"` cannot be used when no provider is installed. */

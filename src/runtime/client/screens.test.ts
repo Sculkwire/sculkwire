@@ -1,18 +1,22 @@
 import { describe, expect, it } from "vitest";
 import type { Decision, DecisionModel, DecisionState, Question } from "../../decision/types.ts";
 import { crc32, deflateSync } from "node:zlib";
+import type { UiControl } from "../engine/ui.ts";
 import {
   currentScreen,
   decodePng,
+  kindOfScreenName,
   LAYOUT,
   localWorldTiles,
   NO_SCREENS,
   pngSize,
   recoverJoin,
+  screensFromUi,
   screensInLog,
   type Pixels,
   type RecoveryIO,
   type ScreenState,
+  type UiRecovery,
 } from "./screens.ts";
 
 /**
@@ -203,6 +207,10 @@ interface FakeGameOptions {
   frozen?: boolean;
   /** No background mouse (Windows). */
   noMouse?: boolean;
+  /** The in-game agent is attached: the recovery reads `ui.screen` and presses controls through it. */
+  ui?: boolean;
+  /** The log names no screens at all, so only `ui.screen` can tell what is up. */
+  quiet?: boolean;
 }
 
 /**
@@ -225,6 +233,7 @@ class FakeGame {
     this.tiles = opts.tiles ?? ["LAN", "LAN", "sculkwire-bridge", "sculkwire-other"];
   }
   log(text: string): void {
+    if (this.opts.quiet && /Created '|Destroyed '|world\.cheatsEnabled: /.test(text)) return;
     const s = Math.floor(this.clock / 1000);
     const ms = String(this.clock % 1000).padStart(3, "0");
     this.pending += `${at(`12:00:${String(s % 60).padStart(2, "0")}:${ms}`, "GUI", text)}\n`;
@@ -253,6 +262,10 @@ class FakeGame {
   }
   key(keys: string): void {
     this.inputs.push(keys);
+    this.react(keys);
+  }
+  /** What each screen does with a key, without recording it: the key route and the agent's `ui.key` share it. */
+  react(keys: string): void {
     if (this.opts.frozen) return;
     switch (this.screen) {
       case "disconnect":
@@ -292,6 +305,10 @@ class FakeGame {
   }
   click(x: number, y: number, count: number): void {
     this.inputs.push(`click ${x.toFixed(3)},${y.toFixed(3)}${count > 1 ? ` x${count}` : ""}`);
+    this.clickAt(x, y, count);
+  }
+  /** What each screen does with a click, without recording it: the mouse route and `ui.click` share it. */
+  clickAt(x: number, y: number, count: number): void {
     if (this.opts.frozen) return;
     if (this.screen === "disconnect" && this.near(x, y, LAYOUT.backToMenu)) this.backToMenu();
     else if (this.screen === "start" && this.near(x, y, this.opts.playButton ?? LAYOUT.play)) {
@@ -309,6 +326,73 @@ class FakeGame {
       this.screen = "play";
       this.world = undefined;
     }
+  }
+  /** The screen name the agent reports for where the fake game is. */
+  uiName(): string {
+    switch (this.screen) {
+      case "disconnect":
+        return "disconnect_screen";
+      case "play":
+        return "play_screen";
+      case "store":
+        return "store_data_driven_screen";
+      case "loading":
+        return "world_loading_progress_screen";
+      case "world":
+        return "hud_screen";
+      case "pause":
+        return "pause_screen";
+      case "options":
+        return "screen_world_controls_and_settings_fullscreen";
+      default:
+        return "start_screen";
+    }
+  }
+  /** The controls `ui.controls` lists for the current screen; a store screen lists one that must never be pressed. */
+  uiControls(): UiControl[] {
+    const rect: [number, number, number, number] = [0, 0, 100, 30];
+    switch (this.screen) {
+      case "disconnect":
+        return [{ name: "button.back", type: "button", rect, text: "Back to menu", enabled: true }];
+      case "start":
+        return [{ name: "button.play", type: "button", rect, text: "Play", enabled: true }];
+      case "pause":
+        return [{ name: "button.save_and_quit", type: "button", rect, text: "Save & Quit", enabled: true }];
+      case "store":
+        return [{ name: "button.buy", type: "button", rect, text: "Buy Minecoins", enabled: true }];
+      default:
+        return [];
+    }
+  }
+  /** `ui.press`: the named control does what pressing it does. A store control is recorded but never acts. */
+  uiPress(name: string): void {
+    this.inputs.push(`ui:press ${name}`);
+    if (this.opts.frozen || this.screen === "store") return;
+    if (name === "button.back") this.backToMenu();
+    else if (name === "button.play") {
+      this.log("world.cheatsEnabled: 0");
+      this.screen = "play";
+    } else if (name === "button.save_and_quit") {
+      this.log("Destroyed 'pause_screen' screen in 0.4ms");
+      this.log("Destroyed 'hud_screen' screen in 0.4ms");
+      this.screen = "play";
+      this.world = undefined;
+    }
+  }
+  uiRoute(): UiRecovery {
+    return {
+      screen: async () => ({ name: this.uiName(), stack: [this.uiName()], modal: false }),
+      controls: async () => this.uiControls(),
+      press: async (name) => this.uiPress(name),
+      key: async (keys) => {
+        this.inputs.push(`ui:key ${keys}`);
+        this.react(keys);
+      },
+      click: async (x, y, count = 1) => {
+        this.inputs.push(`ui:click ${x},${y}${count > 1 ? ` x${count}` : ""}`);
+        this.clickAt(x / 1280, y / 668, count);
+      },
+    };
   }
   backToMenu(): void {
     this.log("Destroyed 'ui://./hbui/index.html' screen in 0.3ms");
@@ -329,6 +413,7 @@ class FakeGame {
       },
       key: async (keys) => this.key(keys),
       ...(this.opts.noMouse ? {} : { click: async (x: number, y: number, count = 1) => this.click(x, y, count) }),
+      ...(this.opts.ui ? { ui: this.uiRoute() } : {}),
       screenshot: async (label) => ({ path: `/tmp/${label}.png`, png: this.screen === "play" ? playScreen(this.tiles) : playScreen([]) }),
       alive: async () => true,
       sleep: async (ms) => {
@@ -472,5 +557,108 @@ describe("join recovery with a decision model as advisor", () => {
     const game = new FakeGame({ start: "start", playButton: { x: 0.9, y: 0.9 }, frozen: true });
     const result = await recover(game, { advisor: model, timeoutMs: 40_000 });
     expect(result.steps.some((s) => s.includes("the screen is store, not start"))).toBe(true);
+  });
+});
+
+describe("screens from the agent's UI", () => {
+  it("reads the stack the game names, with no inference from the log", () => {
+    const start = screensFromUi({ name: "start_screen", stack: ["start_screen"], modal: false }, NO_SCREENS);
+    expect(currentScreen(start)).toBe("start");
+    expect(start.inWorld).toBe(false);
+    const pause = screensFromUi({ name: "pause_screen", stack: ["start_screen", "hud_screen", "pause_screen"], modal: false }, start);
+    expect(currentScreen(pause)).toBe("pause");
+    // A menu over the world is still in the world.
+    expect(pause.inWorld).toBe(true);
+    expect(pause.changes).toBe(start.changes + 1);
+    expect(screensFromUi({ name: "pause_screen", stack: ["hud_screen", "pause_screen"], modal: false }, pause).changes).toBe(pause.changes);
+  });
+
+  it("keeps the world the log opened and knows the store screens by their names", () => {
+    const opened = { ...NO_SCREENS, opened: "sculkwire-bridge" };
+    const loading = screensFromUi({ name: "world_loading_progress_screen", stack: ["world_loading_progress_screen"], modal: false }, opened);
+    expect(loading.opened).toBe("sculkwire-bridge");
+    expect(kindOfScreenName("store_data_driven_screen")).toBe("store");
+    expect(kindOfScreenName("marketplace_screen")).toBe("store");
+    expect(kindOfScreenName("hud_screen")).toBe("world");
+    expect(kindOfScreenName("start.start_screen")).toBe("start");
+    expect(kindOfScreenName("progress.world_loading_progress_screen")).toBe("loading");
+    expect(kindOfScreenName("something_new_screen")).toBe("other");
+  });
+
+  it("reads the namespaced names the agent reports in a running world", () => {
+    expect(kindOfScreenName("play.play_screen")).toBe("play");
+    expect(kindOfScreenName("play_screen")).toBe("play");
+    expect(kindOfScreenName("hud.hud_screen")).toBe("world");
+    expect(kindOfScreenName("store_layout.store_data_driven_screen")).toBe("store");
+    expect(kindOfScreenName("store_inventory.armor_screen")).toBe("store");
+    expect(kindOfScreenName("marketplace.home_screen")).toBe("store");
+    expect(kindOfScreenName("csb.welcome_screen")).toBe("store");
+    expect(kindOfScreenName("csb_welcome_screen")).toBe("store");
+    expect(screensFromUi({ name: "play.play_screen", stack: ["play.play_screen"], modal: false }, NO_SCREENS)).toMatchObject({
+      inWorld: false,
+      stack: [{ kind: "play", name: "play.play_screen" }],
+    });
+    // The overlays the game always keeps are not what the player looks at.
+    expect(screensFromUi({ name: "start_screen", stack: ["debug_screen.debug_screen", "start.start_screen"], modal: false }, NO_SCREENS).stack).toEqual([
+      { kind: "start", name: "start.start_screen" },
+    ]);
+  });
+});
+
+describe("join recovery through the agent's UI", () => {
+  /** A game whose log names no screens at all: only `ui.screen` can tell where it is. */
+  const uiOnly = (opts: FakeGameOptions) => new FakeGame({ ui: true, quiet: true, ...opts });
+  const start = { levelId: "sculkwire-bridge", worldName: "sculkwire-bridge", timeoutMs: 60_000 };
+
+  it("reads the screen from ui.screen and presses the named control", async () => {
+    const game = uiOnly({ start: "disconnect", afterBackToMenu: "rejoin" });
+    const result = await recoverJoin(game.io(), start);
+    expect(result.recovered).toBe(true);
+    expect(game.world).toBe("sculkwire-bridge");
+    expect(game.inputs).toEqual(["ui:press button.back"]);
+    expect(result.steps[0]).toBe("disconnect: Return (or press Back to menu)");
+  });
+
+  it("presses Play by name wherever the button is drawn, then opens the local world tile", async () => {
+    const game = uiOnly({ start: "start", playButton: { x: 0.9, y: 0.9 } });
+    const result = await recoverJoin(game.io(), start);
+    expect(result.recovered).toBe(true);
+    const tile = LAYOUT.worldTile(2);
+    expect(game.inputs).toEqual(["ui:press button.play", `ui:click ${Math.round(1280 * tile.x)},${Math.round(668 * tile.y)} x2`]);
+    expect(game.joinedServer).toBe(false);
+  });
+
+  it("clicks through the agent when the platform has no background mouse", async () => {
+    const game = uiOnly({ start: "play", noMouse: true });
+    const result = await recoverJoin(game.io(), start);
+    expect(result.recovered).toBe(true);
+    expect(game.inputs.every((entry) => /^ui:(press|key|click) /.test(entry))).toBe(true);
+  });
+
+  it("only ever presses Escape on a store screen", async () => {
+    const game = uiOnly({ start: "store", frozen: true });
+    const result = await recoverJoin(game.io(), { ...start, timeoutMs: 30_000 });
+    expect(result.recovered).toBe(false);
+    expect(game.inputs.length).toBeGreaterThan(0);
+    expect(new Set(game.inputs)).toEqual(new Set(["ui:key Escape"]));
+  });
+
+  it("falls back to the log and the keys when the agent's UI stops answering", async () => {
+    const game = new FakeGame({ start: "disconnect", afterBackToMenu: "rejoin", ui: true });
+    const io = game.io();
+    io.ui = {
+      screen: async () => {
+        throw new Error("ui.screen timed out");
+      },
+      controls: async () => [],
+      press: async () => undefined,
+      key: async () => undefined,
+      click: async () => undefined,
+    };
+    const result = await recoverJoin(io, { ...start, screens: screensInLog(game.history()) });
+    expect(result.recovered).toBe(true);
+    expect(result.steps.some((step) => step.startsWith("the agent's UI stopped answering"))).toBe(true);
+    expect(game.inputs.length).toBeGreaterThan(0);
+    expect(game.inputs.every((entry) => !entry.startsWith("ui:"))).toBe(true);
   });
 });

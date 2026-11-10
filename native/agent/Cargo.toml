@@ -1,0 +1,20 @@
+[package]
+name = "sculkwire-agent"
+version = "0.1.0"
+edition = "2021"
+description = "In-game agent DLL for the Minecraft: Bedrock Edition PC (GDK) client: JSON-RPC server, main-thread queue, tick stream, input lock."
+license = "MIT"
+
+[lib]
+name = "sculkwire_agent"
+crate-type = ["cdylib"]
+
+[dependencies]
+agent-core = { path = "../agent-core" }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+
+[features]
+# `debug.mem`: read this process's memory over the socket, for diagnosis. Off by default and never
+# enabled for a published artifact — an agent that can be told to read arbitrary memory is a
+# debugging build, not a shipped one.
+debug-rpc = []

@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { inputProvider, registerInputProvider, type InputProvider } from "./inputprovider.ts";
+import { inputProvider, registerInputProvider, setBuiltinInputProvider, type InputProvider } from "./inputprovider.ts";
 
-function fakeProvider(name: string): InputProvider {
-  return {
+function fakeProvider(name: string): InputProvider & { closed: number } {
+  const provider = {
     name,
+    closed: 0,
     input: {
       prepare: async () => undefined,
       reachable: async () => true,
@@ -19,18 +20,48 @@ function fakeProvider(name: string): InputProvider {
     attach: async () => undefined,
     launched: async () => undefined,
     stopped: async () => undefined,
-    close: () => undefined,
+    close: () => {
+      provider.closed++;
+    },
   };
+  return provider;
 }
 
 describe("input provider registry", () => {
-  it("has none by default, holds one at a time and removes it again", () => {
+  it("is the built-in provider by default and none without one", () => {
     expect(inputProvider()).toBeUndefined();
-    const first = fakeProvider("first");
-    const remove = registerInputProvider(first);
-    expect(inputProvider()).toBe(first);
-    expect(() => registerInputProvider(fakeProvider("second"))).toThrow(/already installed \(first\)/);
+    const agent = fakeProvider("agent");
+    setBuiltinInputProvider(agent);
+    expect(inputProvider()).toBe(agent);
+    setBuiltinInputProvider(undefined);
+    expect(inputProvider()).toBeUndefined();
+  });
+
+  it("lets an extension provider replace the built-in one, and falls back when it is removed", () => {
+    const agent = fakeProvider("agent");
+    const mine = fakeProvider("mine");
+    setBuiltinInputProvider(agent);
+    const remove = registerInputProvider(mine);
+    expect(inputProvider()).toBe(mine);
     remove();
+    expect(inputProvider()).toBe(agent);
+    setBuiltinInputProvider(undefined);
+  });
+
+  it("replaces an earlier extension provider, whose removal changes nothing", () => {
+    const agent = fakeProvider("agent");
+    const first = fakeProvider("first");
+    const second = fakeProvider("second");
+    setBuiltinInputProvider(agent);
+    const removeFirst = registerInputProvider(first);
+    expect(inputProvider()).toBe(first);
+    const removeSecond = registerInputProvider(second);
+    expect(inputProvider()).toBe(second);
+    removeFirst();
+    expect(inputProvider()).toBe(second);
+    removeSecond();
+    expect(inputProvider()).toBe(agent);
+    setBuiltinInputProvider(undefined);
     expect(inputProvider()).toBeUndefined();
   });
 });
