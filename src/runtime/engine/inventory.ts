@@ -611,7 +611,7 @@ function craftMatchText(match: CraftMatch): string {
 /** Output schemas, built from the zod sculkwire depends on. */
 function schemas() {
   // A slot in a container and a slot in a screen are one shape, so both schemas are built from the same definition.
-  const maybeSlot = itemSlotSchema().nullable();
+  const maybeSlot = itemSlotSchema.nullable();
 
   const failureSchema = {
     ok: z.boolean(),

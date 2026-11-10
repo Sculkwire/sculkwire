@@ -270,7 +270,9 @@ export interface ScreenActRequest {
 
 /**
  * The recursive slot shape, one definition shared with `inventory.ts`: a slot inside a screen's container and a slot
- * in the player's inventory are the same thing, so both output schemas use this.
+ * in the player's inventory are the same thing, so both output schemas use this. One instance that refers to itself:
+ * the JSON Schema conversion finds the cycle by identity and writes a `$ref`. A schema built anew at every level
+ * never repeats, and the conversion recurses until the stack overflows.
  */
 export interface SlotSchema {
   item: string;
@@ -283,20 +285,18 @@ export interface SlotSchema {
   contents?: SlotSchema[];
 }
 
-export function itemSlotSchema(): z.ZodType<SlotSchema> {
-  return z.lazy(() =>
-    z.object({
-      item: z.string(),
-      count: z.number(),
-      data: z.number().optional(),
-      name: z.string().optional(),
-      durability: z.object({ damage: z.number(), max: z.number() }).optional(),
-      enchantments: z.array(z.object({ id: z.string(), level: z.number() })),
-      lore: z.array(z.string()).optional(),
-      contents: z.array(itemSlotSchema()).optional(),
-    }),
-  );
-}
+export const itemSlotSchema: z.ZodType<SlotSchema> = z.lazy(() =>
+  z.object({
+    item: z.string(),
+    count: z.number(),
+    data: z.number().optional(),
+    name: z.string().optional(),
+    durability: z.object({ damage: z.number(), max: z.number() }).optional(),
+    enchantments: z.array(z.object({ id: z.string(), level: z.number() })),
+    lore: z.array(z.string()).optional(),
+    contents: z.array(itemSlotSchema).optional(),
+  }),
+);
 
 function invalid(messageText: string): EngineFailure {
   return { ok: false, code: -32602, reason: "invalid_params", message: messageText };
@@ -834,7 +834,7 @@ function schemas() {
     message: z.string().optional(),
   };
 
-  const maybeSlot = itemSlotSchema().nullable();
+  const maybeSlot = itemSlotSchema.nullable();
   const slotRefSchema = z.object({ container: z.string(), slot: z.number() });
 
   const interactSchema = {
