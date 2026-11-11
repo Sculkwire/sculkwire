@@ -38,6 +38,19 @@ With a model configured, each decision also sends the model the threat map as a 
 
 The model's tactic runs when its probability is at least 0.3 and the tactic is possible. The built-in choice runs instead in an emergency (a creeper about to explode, near death next to a mob), when the answer is weak or impossible, and when the model fails or takes longer than 1.5 s. Kill, reach and hit-every-X goals are checked against the game, so the model's `goal_done` only ends goals the checks do not cover. Turn the advisor off for one run with `advisor: false`.
 
+## Measured Effect
+
+Measured on 2026-11-11 on the retail game 1.26.63.1 with local Kev (`kev-0.8b`), `play` with and without the advisor, five runs per cell (fighter loadout, closed arena, midnight, 90 s limit).
+
+| Scenario | Advisor | Won | Time, mean (range) | Damage taken, mean | Advisor latency, median | Answers used | Differed from built-in |
+|---|---|---|---|---|---|---|---|
+| Three zombies | Off | 5/5 | 9.8 s (8.5 to 12.4) | 6.7 | | | |
+| Three zombies | On | 5/5 | 10.1 s (9.3 to 11.2) | 7.3 | 35 ms | 100% | 18% |
+| Creeper | Off | 5/5 | 8.7 s (8.3 to 9.1) | 0 | | | |
+| Creeper | On | 5/5 | 8.4 s (8.0 to 9.0) | 0 | 32 ms | 100% | 0% |
+
+No measurable effect: every difference is inside the run-to-run spread. The runs drove `player_act play` directly, because `sculk bench` never consults the advisor (its `play` goals run on the built-in scores). The sign-in join recovery needs a model with image support, so with Kev it is never asked.
+
 ## Running Kev Locally
 
 Kev needs [uv](https://docs.astral.sh/uv/) and a GPU. The Kev-0.8B server uses about 4.3 GB of VRAM. `sculk doctor` names the uv install command for your OS.
