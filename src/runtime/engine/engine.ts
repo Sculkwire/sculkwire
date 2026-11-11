@@ -1254,7 +1254,11 @@ export class EngineSession {
     const key = id.trim();
     if (!key) return invalid("a setting id cannot be empty");
     if (typeof value === "number" && !Number.isFinite(value)) return invalid("a setting value must be a finite number");
-    const result = await this.#call<Record<string, unknown> | undefined>("settings.set", { id: key, value });
+    let result = await this.#call<Record<string, unknown> | undefined>("settings.set", { id: key, value });
+    // An on/off option takes true or false in the game and 0 or 1 in `options.txt`: accept both, as the file route does.
+    if (!result.ok && result.reason === "invalid_params" && (value === 0 || value === 1) && /true or false/.test(result.message)) {
+      result = await this.#call<Record<string, unknown> | undefined>("settings.set", { id: key, value: value === 1 });
+    }
     if (!result.ok) return result;
     const raw = result.value;
     if (!raw || typeof raw.id !== "string" || raw.value === undefined) return malformed("settings.set", result.value);

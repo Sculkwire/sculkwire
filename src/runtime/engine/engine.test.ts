@@ -842,5 +842,13 @@ describe("engine settings wrapper", () => {
     expect(silent.value).not.toHaveProperty("saved");
     agent.handler = (request) => reply(request, { id: "gfx_viewdistance", previous: 12, value: 20, saved: "yes" });
     expect(await session.settingsSet("gfx_viewdistance", 20)).toMatchObject({ ok: false, reason: "protocol" });
+    // An on/off option given as 0 or 1 (the `options.txt` form) is sent again as true or false.
+    agent.requests.length = 0;
+    agent.handler = (request) =>
+      (request.params as { value: unknown }).value === true ? reply(request, { id: "gfx_fullscreen", previous: false, value: true }) : rpcError(request, -32602, "invalid params: this option takes true or false");
+    const flag = await session.settingsSet("gfx_fullscreen", 1);
+    if (!flag.ok) throw new Error(flag.message);
+    expect(flag.value).toMatchObject({ id: "gfx_fullscreen", previous: false, value: true });
+    expect(agent.requests.map((r) => (r.params as { value: unknown }).value)).toEqual([1, true]);
   });
 });
