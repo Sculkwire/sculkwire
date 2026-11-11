@@ -6,7 +6,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { aimAt, horizontalDistance, yawTo, type Follow, type PlayerController, type PlayerState, type Vec3 } from "../player.ts";
 import { gridFor, type GridCache } from "./grid.ts";
-import { plan, standAt, type PathStep, type PlanResult } from "./planner.ts";
+import { closedIn, plan, standAt, type PathStep, type PlanResult } from "./planner.ts";
 
 export interface NavigateOptions {
   /** Arrive within this many blocks (default 0.7, 2 for an entity). */
@@ -41,6 +41,15 @@ const TICK_MS = 25;
 const STUCK_JUMP_MS = 1000;
 const STUCK_REPLAN_MS = 2000;
 const MAX_REPLANS = 40;
+/**
+ * Wider windows (blocks each way from the player) tried in turn when the plan in the normal one finds no way and its
+ * search reached the window's edge (a wall wider than the window), or a partial path ends where the player stands.
+ */
+const WIDE_HALVES = [40, 64] as const;
+/** Search limit of a plan in a wider window: about 2 s of planning (16 000 blocks took 0.3 s in the tests). */
+const WIDE_MAX_NODES = 120_000;
+/** Legs walked to the closest reachable spot in a row without getting 1 block nearer the target before giving up. */
+const STALE_LEGS = 3;
 /** How long one tap of the walk key lasts when edging off a ledge onto a ladder (about one game tick). */
 const LADDER_TAP_MS = 40;
 
@@ -204,6 +213,8 @@ export async function navigate(pc: PlayerController, target: Vec3 | { x: number;
     return { ok: false, message: `no entity ${opts.look} to look at` };
   }
   let lastPath: PathStep[] = [];
+  /** Legs walked to the closest reachable spot, legs in a row without headway, and the player's nearest distance. */
+  const recover = { legs: 0, stale: 0, best: Number.POSITIVE_INFINITY };
   let stuckRuns = 0;
   let noStart = 0;
   let airborne = 0;
@@ -236,7 +247,7 @@ export async function navigate(pc: PlayerController, target: Vec3 | { x: number;
         continue;
       }
       airborne = 0;
-      const r = await planFrom(grid, s.location, g, goal.hasY, radius);
+      const r = await planWide(grid, s.location, g, goal.hasY, radius);
       if (r.status === "no_start") {
         // In the air or on something the grid does not stand on: let the move finish, then look again.
         if (++noStart > 20) return { ok: false, message: r.message, path: pathOut() };
@@ -245,11 +256,38 @@ export async function navigate(pc: PlayerController, target: Vec3 | { x: number;
         continue;
       }
       noStart = 0;
-      if (r.status === "unreachable") return { ok: false, message: r.message, path: r.path.map(center) };
+      let leg = false;
+      if (r.status === "unreachable") {
+        // No way in any window: walk to the closest spot the search reached and plan again from there (the blocks
+        // beyond may load on the way), as long as the legs bring the player nearer.
+        if (recover.legs === 0 || dist <= recover.best - 1) {
+          recover.best = Math.min(recover.best, dist);
+          recover.stale = 0;
+        } else recover.stale++;
+        const end = r.path[r.path.length - 1];
+        const why = r.closed
+          ? "the target is closed in by blocks on every side"
+          : !r.cut?.edge && !r.cut?.unknown
+            ? "every block the player can reach is known and closed in"
+            : !end || horizontalDistance(s.location, center(end)) <= 1.5
+              ? "the closest spot is where the player stands"
+              : recover.stale >= STALE_LEGS
+                ? `${STALE_LEGS} legs in a row brought the player no nearer`
+                : undefined;
+        if (why) {
+          const w = r.window;
+          const tried = `Tried a window of ${w.max.x - w.min.x + 1} x ${w.max.z - w.min.z + 1} blocks around the player and walked ${recover.legs} leg(s) to the closest spot, getting within ${recover.best.toFixed(1)} blocks of ${goal.label}`;
+          return { ok: false, message: `${r.message}. ${tried}: ${why}`, path: r.path.map(center) };
+        }
+        recover.legs++;
+        leg = true;
+      }
       lastPath = r.path;
       stats.planned += r.path.length - 1;
       if (r.path.length < 2 && r.status === "partial") return { ok: false, message: `${r.message}, and the player is already there`, path: pathOut() };
       const outcome = await followPath(pc, grid, r.path, r.status === "found", goal, radius, opts, stats, deadline, watched, signal, r.provisional ? grid.version : undefined);
+      // Blocks unknown before a leg may have loaded on the way: fetch them again for the next plan.
+      if (leg) grid.forgetUnknown();
       if (outcome === "arrived") continue;
       if (outcome === "timeout") continue;
       // More of the window arrived after a provisional plan: plan again with it (not a replan for the limit).
@@ -282,6 +320,24 @@ const WINDOW_GRACE_MS = 150;
 interface Planned extends PlanResult {
   /** Planned before every section of the window arrived: plan again as they come in. */
   provisional: boolean;
+  /** The window planned in (the goal is outside it for a partial path). */
+  window: { min: Vec3; max: Vec3 };
+  /** No way, and the goal is closed in by blocks on every side (`closedIn`): nothing wider or a walk can help. */
+  closed?: boolean;
+}
+
+/**
+ * Plan in the normal window, then in the wider ones while the plan finds no way and its search reached the window's
+ * edge, or a partial path ends where the player stands. A goal closed in by blocks gives up at once.
+ */
+async function planWide(grid: GridCache, from: Vec3, to: Vec3, hasY: boolean, radius: number): Promise<Planned> {
+  let r = await planFrom(grid, from, to, hasY, radius);
+  if (r.status === "unreachable" && closedIn(grid, { x: to.x, z: to.z, radius, ...(hasY ? { y: to.y } : {}) }, from)) return { ...r, closed: true };
+  for (const half of WIDE_HALVES) {
+    if (!(r.status === "unreachable" && r.cut?.edge) && !(r.status === "partial" && r.path.length < 2)) break;
+    r = await planFrom(grid, from, to, hasY, radius, half);
+  }
+  return r;
 }
 
 /**
@@ -289,7 +345,7 @@ interface Planned extends PlanResult {
  * as soon as the blocks around the player are known (waiting a little for the rest). A plan that finds no way while
  * the window is still arriving waits for all of it and plans again.
  */
-async function planFrom(grid: GridCache, from: Vec3, to: Vec3, hasY: boolean, radius: number): Promise<Planned> {
+async function planFrom(grid: GridCache, from: Vec3, to: Vec3, hasY: boolean, radius: number, half = WINDOW_HALF): Promise<Planned> {
   const clampTo = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
   const fx = Math.floor(from.x);
   const fy = Math.floor(from.y);
@@ -297,8 +353,8 @@ async function planFrom(grid: GridCache, from: Vec3, to: Vec3, hasY: boolean, ra
   const tx = clampTo(Math.floor(to.x), fx - WINDOW_REACH, fx + WINDOW_REACH);
   const tz = clampTo(Math.floor(to.z), fz - WINDOW_REACH, fz + WINDOW_REACH);
   const ty = hasY ? clampTo(Math.floor(to.y), fy - 16, fy + 16) : fy;
-  const min = { x: Math.min(fx - WINDOW_HALF, tx - 4), y: Math.min(fy - WINDOW_DOWN, ty - 3), z: Math.min(fz - WINDOW_HALF, tz - 4) };
-  const max = { x: Math.max(fx + WINDOW_HALF - 1, tx + 4), y: Math.max(fy + WINDOW_UP, ty + 3), z: Math.max(fz + WINDOW_HALF - 1, tz + 4) };
+  const min = { x: Math.min(fx - half, tx - 4), y: Math.min(fy - WINDOW_DOWN, ty - 3), z: Math.min(fz - half, tz - 4) };
+  const max = { x: Math.max(fx + half - 1, tx + 4), y: Math.max(fy + WINDOW_UP, ty + 3), z: Math.max(fz + half - 1, tz + 4) };
   const focus = { x: fx + Math.sign(tx - fx) * 4, y: fy, z: fz + Math.sign(tz - fz) * 4 };
   let done = false;
   const all = grid.ensure(min, max, GRID_MAX_AGE_MS, Date.now(), focus).then(() => {
@@ -309,12 +365,13 @@ async function planFrom(grid: GridCache, from: Vec3, to: Vec3, hasY: boolean, ra
   await Promise.race([all, grid.ensure({ x: fx - NEAR_HALF, y: fy - NEAR_DOWN, z: fz - NEAR_HALF }, { x: fx + NEAR_HALF, y: fy + NEAR_UP, z: fz + NEAR_HALF }, GRID_MAX_AGE_MS, Date.now(), focus)]);
   if (!done) await Promise.race([all, sleep(WINDOW_GRACE_MS)]);
   const goal = { x: to.x, z: to.z, radius, ...(hasY ? { y: to.y } : {}) };
-  let r = plan(grid, from, goal, { bounds: { min, max } });
+  const options = { bounds: { min, max }, ...(half > WINDOW_HALF ? { maxNodes: WIDE_MAX_NODES } : {}) };
+  let r = plan(grid, from, goal, options);
   if (!done && r.status !== "found") {
     await all;
-    r = plan(grid, from, goal, { bounds: { min, max } });
+    r = plan(grid, from, goal, options);
   }
-  return { ...r, provisional: !done };
+  return { ...r, provisional: !done, window: { min, max } };
 }
 
 /** Follow one planned path until the goal, its end, a reason to plan again, or the deadline. */

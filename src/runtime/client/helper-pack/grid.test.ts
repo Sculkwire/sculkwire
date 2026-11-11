@@ -191,4 +191,13 @@ describe("helper block queries at the world's height limits", () => {
     expect(await helper.query({ kind: "block", x: 0, y: -65, z: 0 })).toBeNull();
     await expect(helper.query({ kind: "container", x: 0, y: -65, z: 0 })).rejects.toThrow(/outside the world's height range \(-64 to 319\)/);
   });
+
+  it("keeps the blocks of any of `types` in one scan, and `type` alone as before", async () => {
+    const kinds: Record<string, string> = { "0,0,0": "minecraft:chest", "1,0,0": "minecraft:barrel", "2,0,0": "minecraft:furnace" };
+    const helper = loadHelper((x, y, z) => ({ typeId: kinds[`${x},${y},${z}`] ?? "minecraft:air", expect: "." }));
+    const both = await helper.query<{ typeId: string }[]>({ kind: "blocks", x: 0, y: 0, z: 0, radius: 2, types: ["minecraft:chest", "minecraft:barrel"] });
+    expect(both.map((b) => b.typeId).sort()).toEqual(["minecraft:barrel", "minecraft:chest"]);
+    const one = await helper.query<{ typeId: string }[]>({ kind: "blocks", x: 0, y: 0, z: 0, radius: 2, type: "minecraft:furnace" });
+    expect(one.map((b) => b.typeId)).toEqual(["minecraft:furnace"]);
+  });
 });

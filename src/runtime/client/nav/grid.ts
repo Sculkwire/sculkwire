@@ -67,7 +67,11 @@ const QUERY_SECTIONS = 2;
 interface Section {
   cells: Uint8Array;
   at: number;
+  /** Some of its blocks were unknown to the helper (an unloaded chunk, or outside the world's height). */
+  unknown: boolean;
 }
+
+const UNKNOWN = "u".charCodeAt(0);
 
 /** Statistics of the helper's scans, for the result message, the bench and tests. */
 export interface ScanStats {
@@ -180,7 +184,8 @@ export class GridCache implements BlockGrid {
       if (typeof reply.maxTickMs === "number") this.stats.maxTickMs = Math.max(this.stats.maxTickMs, reply.maxTickMs);
       batch.forEach(([sx, sy, sz], k) => {
         const key = `${sx},${sy},${sz}`;
-        this.#sections.set(key, { cells: decodeRegions(String((reply.boxes as unknown[])[k]), SECTION, SECTION, SECTION), at: now });
+        const cells = decodeRegions(String((reply.boxes as unknown[])[k]), SECTION, SECTION, SECTION);
+        this.#sections.set(key, { cells, at: now, unknown: cells.includes(UNKNOWN) });
         for (const o of this.#overrides.keys()) {
           const [x, y, z] = o.split(",").map(Number) as [number, number, number];
           if (Math.floor(x / SECTION) === sx && Math.floor(y / SECTION) === sy && Math.floor(z / SECTION) === sz) this.#overrides.delete(o);
@@ -198,6 +203,11 @@ export class GridCache implements BlockGrid {
   /** Fetch the sections around one block again (after opening a door, or when stuck). */
   async refresh(at: Vec3, radius = 1): Promise<void> {
     await this.ensure({ x: at.x - radius, y: at.y - radius, z: at.z - radius }, { x: at.x + radius, y: at.y + radius, z: at.z + radius }, 0);
+  }
+
+  /** Forget the sections that held unknown blocks, so the next plan fetches them again (chunks load as the player walks). */
+  forgetUnknown(): void {
+    for (const [key, section] of this.#sections) if (section.unknown) this.#sections.delete(key);
   }
 }
 

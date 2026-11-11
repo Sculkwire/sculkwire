@@ -91,6 +91,7 @@ function blockAt(dim, x, y, z) {
 /**
  * Non-air blocks in the cube of `radius` around the anchor. Rows outside the dimension's height range (below the
  * world floor, above the build limit) are left out, so a cube touching or past them answers what is inside, or [].
+ * `types` (an array of ids) keeps the blocks of any of them, so one scan serves several types; `type` keeps one.
  */
 function blocks(q) {
   const { dim, at } = anchor(q);
@@ -101,13 +102,14 @@ function blocks(q) {
   const range = dim.heightRange;
   const ylo = Math.max(cy - r, range.min);
   const yhi = Math.min(cy + r, range.max - 1);
+  const types = Array.isArray(q.types) ? new Set(q.types.map(String)) : undefined;
   const out = [];
   for (let y = ylo; y <= yhi && out.length < MAX_BLOCKS; y++) {
     for (let x = cx - r; x <= cx + r && out.length < MAX_BLOCKS; x++) {
       for (let z = cz - r; z <= cz + r && out.length < MAX_BLOCKS; z++) {
         const b = blockAt(dim, x, y, z);
         if (!b || b.isAir) continue;
-        if (q.type && b.typeId !== q.type) continue;
+        if (types ? !types.has(b.typeId) : q.type && b.typeId !== q.type) continue;
         out.push(blockInfo(b));
       }
     }

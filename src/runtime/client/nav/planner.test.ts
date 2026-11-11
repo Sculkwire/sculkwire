@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ArrayGrid, decodeRegions, GridCache, sectionOrder, type BlockClass, type BlockGrid } from "./grid.ts";
 import type { PlayerWorld } from "../player.ts";
 import { coastDistance, straightLineClear } from "./navigate.ts";
-import { plan, type PathStep } from "./planner.ts";
+import { closedIn, plan, type PathStep } from "./planner.ts";
 
 /** A test world: solid ground at y = 0 over `w` x `d` blocks, air up to y = 12, unknown outside. */
 class TestGrid implements BlockGrid {
@@ -264,6 +264,32 @@ describe("coastDistance", () => {
   it("is nothing once down, and shorter the lower the player already is", () => {
     expect(coastDistance(0.3, -0.1, 0)).toBe(0);
     expect(coastDistance(0.3, -0.2, 1)).toBeLessThan(coastDistance(0.3, 0.42, 0));
+  });
+});
+
+describe("what stopped a search that found no way", () => {
+  it("reports the window's edge when the reachable blocks run to it", () => {
+    const g = new TestGrid().fill(10, 1, 0, 10, 3, 19, "#");
+    const r = plan(g, at(2, 1, 5), at(15, 1, 5), { bounds: g.bounds });
+    expect(r.status).toBe("unreachable");
+    expect(r.cut).toEqual({ edge: true, unknown: false });
+  });
+
+  it("reports neither when the player is walled in, and unknown blocks next to where it can stand", () => {
+    const g = new TestGrid().fill(6, 1, 6, 12, 2, 6, "#").fill(6, 1, 12, 12, 2, 12, "#").fill(6, 1, 6, 6, 2, 12, "#").fill(12, 1, 6, 12, 2, 12, "#");
+    const closed = plan(g, at(9, 1, 9), at(2, 1, 2), { bounds: g.bounds });
+    expect(closed.status).toBe("unreachable");
+    expect(closed.cut).toEqual({ edge: false, unknown: false });
+    g.set(9, 1, 12, "u");
+    expect(plan(g, at(9, 1, 9), at(2, 1, 2), { bounds: g.bounds }).cut).toEqual({ edge: false, unknown: true });
+  });
+
+  it("tells a goal closed in by blocks from an open one and from one the player is in with", () => {
+    const g = new TestGrid().fill(14, 1, 9, 16, 3, 11, "#").set(15, 1, 10, ".").set(15, 2, 10, ".");
+    expect(closedIn(g, { ...at(15, 1, 10), radius: 0.7 }, at(2, 1, 5))).toBe(true);
+    expect(closedIn(g, { ...at(5, 1, 10), radius: 0.7 }, at(2, 1, 5))).toBe(false);
+    expect(closedIn(g, { ...at(15, 1, 10), radius: 0.7 }, at(15, 1, 10))).toBe(false);
+    expect(closedIn(g, { x: 15.5, z: 10.5, radius: 0.7 }, at(2, 1, 5))).toBe(false);
   });
 });
 

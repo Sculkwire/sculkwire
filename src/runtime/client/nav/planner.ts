@@ -49,6 +49,12 @@ export interface PlanResult {
   cost: number;
   expanded: number;
   message: string;
+  /**
+   * On `unreachable`: what stopped the search. `edge`: it reached within a few blocks of the edge of `bounds` (a wider
+   * window may hold a way); `unknown`: next to blocks the grid does not know (unloaded, or not fetched). Both false:
+   * every block the player can reach is known and closed in.
+   */
+  cut?: { edge: boolean; unknown: boolean };
 }
 
 type StandKind = "ground" | "water" | "ladder";
@@ -405,6 +411,7 @@ export function plan(grid: BlockGrid, start: Vec3, goal: PlanGoal, options: Plan
       message:
         `no way to reach ${goal.x}, ${goal.y ?? "any height"}, ${goal.z} from ${where(first)} within ${maxDrop} block drops, ` +
         `jumps of one block and gaps of up to 3 (searched ${expanded} blocks). The closest reachable spot is ${where(b)}, ${away.toFixed(1)} blocks away`,
+      cut: searchCut(grid, nodes.values(), bounds),
     };
   }
   return {
@@ -414,4 +421,69 @@ export function plan(grid: BlockGrid, start: Vec3, goal: PlanGoal, options: Plan
     expanded,
     message: `the target is outside the known blocks, so the path ends at ${where(b)}, ${away.toFixed(1)} blocks from it`,
   };
+}
+
+/** Blocks from the edge of the window within which a search counts as cut by it (a gap jump spans 4). */
+const EDGE_MARGIN = 4;
+
+/** What stopped an exhausted search: the window's edge, or unknown blocks next to a block it stood on. */
+function searchCut(grid: BlockGrid, nodes: Iterable<Node>, bounds: { min: Vec3; max: Vec3 }): { edge: boolean; unknown: boolean } {
+  const stood: Node[] = [];
+  for (const n of nodes) {
+    if (!n.closed) continue;
+    const { min, max } = bounds;
+    if (n.x < min.x + EDGE_MARGIN || n.x > max.x - EDGE_MARGIN || n.z < min.z + EDGE_MARGIN || n.z > max.z - EDGE_MARGIN || n.y < min.y + 3 || n.y > max.y - 3) {
+      return { edge: true, unknown: false };
+    }
+    stood.push(n);
+  }
+  // Only a search closed in by the window's own blocks gets here, so this looks at a bounded area.
+  for (const n of stood) {
+    for (let dy = -1; dy <= 2; dy++) for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) if (grid.at(n.x + dx, n.y + dy, n.z + dz) === "u") return { edge: false, unknown: true };
+  }
+  return { edge: false, unknown: false };
+}
+
+/** Blocks no player passes: solid blocks and fences or walls. Everything else (unknown aside) lets a player through. */
+function wall(c: BlockClass): boolean {
+  return c === "#" || c === "F";
+}
+
+/**
+ * Whether the goal is closed in: the open blocks around it (within its radius, at its height and the one above) and
+ * every open block connected to them are all known, fewer than `limit`, enclosed by solid blocks, fences and walls,
+ * and do not hold the player's feet. A player can then never get there, however wide the search. Without a goal
+ * height it cannot tell, and says false.
+ */
+export function closedIn(grid: BlockGrid, goal: PlanGoal, start: Vec3, limit = 4096): boolean {
+  if (goal.y === undefined) return false;
+  const r = goal.radius ?? 0.7;
+  const reach = Math.ceil(r);
+  const gx = Math.floor(goal.x);
+  const gy = Math.floor(goal.y);
+  const gz = Math.floor(goal.z);
+  const startKey = `${Math.floor(start.x)},${Math.floor(start.y)},${Math.floor(start.z)}`;
+  const seen = new Set<string>();
+  const todo: [number, number, number][] = [];
+  const visit = (x: number, y: number, z: number): boolean => {
+    const k = `${x},${y},${z}`;
+    if (seen.has(k)) return true;
+    const c = grid.at(x, y, z);
+    if (c === "u") return false;
+    if (wall(c)) return true;
+    seen.add(k);
+    todo.push([x, y, z]);
+    return k !== startKey && seen.size <= limit;
+  };
+  for (let dx = -reach; dx <= reach; dx++) {
+    for (let dz = -reach; dz <= reach; dz++) {
+      if (Math.hypot(gx + dx + 0.5 - goal.x, gz + dz + 0.5 - goal.z) > r + 0.71) continue;
+      for (let dy = 0; dy <= 1; dy++) if (!visit(gx + dx, gy + dy, gz + dz)) return false;
+    }
+  }
+  for (let next = todo.pop(); next; next = todo.pop()) {
+    const [x, y, z] = next;
+    if (!visit(x + 1, y, z) || !visit(x - 1, y, z) || !visit(x, y + 1, z) || !visit(x, y - 1, z) || !visit(x, y, z + 1) || !visit(x, y, z - 1)) return false;
+  }
+  return true;
 }
