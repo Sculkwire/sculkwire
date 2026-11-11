@@ -8,12 +8,13 @@
  *   starts the game unless a launch command is configured.
  */
 import { existsSync } from "node:fs";
-import { readdir, readFile, realpath, stat } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { GameVersion } from "../../core/version.ts";
 import { formatGameVersion } from "../../core/version.ts";
 import { gameDirCandidates, isPreviewGameDir } from "../../gamefiles/detect.ts";
+import { launcherGameDirs, prefixOf, wineAppDataDirs } from "../../gamefiles/wine.ts";
 
 export type InstallKind = "custom" | "mcbe-gdk-installer" | "windows" | "wine-prefix";
 
@@ -235,92 +236,24 @@ async function fromWindows(): Promise<ClientInstall[]> {
   return out;
 }
 
-/** `…/drive_c/users/<u>/AppData/Roaming/Minecraft Bedrock` under the usual Wine/Proton/launcher roots. */
+/**
+ * `…/drive_c/users/<u>/AppData/Roaming/Minecraft Bedrock` under the usual Wine/Proton/launcher roots; the game folder
+ * is the launcher's current one (`launcherGameDirs`).
+ */
 async function fromWinePrefixes(): Promise<ClientInstall[]> {
   if (process.platform === "win32") return [];
-  const home = homedir();
-  const roots = [
-    join(home, ".local", "share"),
-    join(home, ".var", "app"),
-    join(home, "Games"),
-    join(home, ".wine"),
-    join(home, ".steam", "steam", "steamapps", "compatdata"),
-    join(home, "Library", "Application Support"),
-  ];
-  const found: string[] = [];
-  const walk = async (dir: string, depth: number): Promise<void> => {
-    if (depth > 7 || found.length >= 16) return;
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      if (!e.isDirectory() || e.name === "dosdevices" || e.name === "node_modules" || e.name === "sculkwire") continue;
-      const p = join(dir, e.name);
-      if (e.name === "drive_c") {
-        const users = join(p, "users");
-        let names: string[] = [];
-        try {
-          names = await readdir(users);
-        } catch {
-          // no users dir
-        }
-        for (const u of names) {
-          for (const folder of ["Minecraft Bedrock", "Minecraft Bedrock Preview"]) {
-            const appData = join(users, u, "AppData", "Roaming", folder);
-            // Proton links `users/<login>` to `users/steamuser`: count each real folder once.
-            if (!existsSync(join(appData, "Users"))) continue;
-            const real = await realpath(appData);
-            if (!found.some((f) => f === real)) found.push(real);
-          }
-        }
-        continue;
-      }
-      await walk(p, depth + 1);
-    }
-  };
-  for (const r of roots) await walk(r, 0);
   const gdk = installerRoot();
   return Promise.all(
-    found
+    wineAppDataDirs(homedir())
       .filter((a) => !a.startsWith(gdk))
       .map(async (appData) => {
-        const prefix = appData.split(/drive_c/)[0]?.replace(/[\\/]+$/, "") ?? appData;
+        const prefix = prefixOf(appData);
         const base: InstallBase = { kind: "wine-prefix", label: prefix, passesArgs: false, wine: true };
-        const gameDir = await nearbyGameDir(prefix);
+        const gameDir = launcherGameDirs(prefix)[0];
         if (gameDir) base.gameDir = gameDir;
         return fromAppData(appData, base);
       }),
   );
-}
-
-/**
- * Launchers keep the game next to their prefix (Flarial: `<root>/games/release/<version>/`, prefix
- * `<root>/compatdata/pfx`). Search the launcher root a few levels deep; the newest Minecraft.Windows.exe wins.
- */
-async function nearbyGameDir(prefix: string): Promise<string | undefined> {
-  const root = join(prefix, "..", "..");
-  let best: { dir: string; mtime: number } | undefined;
-  const walk = async (dir: string, depth: number): Promise<void> => {
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      if (e.isFile() && e.name === "Minecraft.Windows.exe") {
-        const s = await stat(join(dir, e.name));
-        if (!best || s.mtimeMs > best.mtime) best = { dir, mtime: s.mtimeMs };
-      } else if (e.isDirectory() && depth < 4 && e.name !== "compatdata" && e.name !== "pfx" && e.name !== "drive_c") {
-        await walk(join(dir, e.name), depth + 1);
-      }
-    }
-  };
-  await walk(root, 0);
-  return best?.dir;
 }
 
 /** Every client install found, in preference order. */

@@ -133,7 +133,7 @@ The `play` action of `player_act` picks its tactics with built-in scores and wor
 | Bedrock Dedicated Server | Windows or Linux x64, and acceptance of the [Minecraft EULA](https://www.minecraft.net/eula) |
 | Game client | Minecraft Bedrock for PC on Windows or Linux. On Linux, gamescope and xdotool for window and headless modes. On Windows nothing extra (Windows PowerShell 5.1 ships with Windows); input needs the game window in the foreground. See [Game Client Setup](docs/client.md) |
 | In-game agent (optional) | The game running, from an install sculkwire detects; on Linux its Wine or Proton prefix is used. Without `cargo` sculkwire downloads the release build; building from `native/` needs rustup with the `x86_64-pc-windows-msvc` target, and no Windows SDK. See [In-Game Agent](docs/engine.md) |
-| Game files | An installed PC (GDK) copy of Minecraft Bedrock: the Xbox app install on Windows, mcbe-gdk-linux on Linux, or a folder in `SCULKWIRE_GAME_DIRS` |
+| Game files | An installed PC (GDK) copy of Minecraft Bedrock: the Xbox app install on Windows, mcbe-gdk-linux or any Wine/Proton launcher (BedrockOnLinux, Flarial, Bottles, Lutris, Steam) on Linux, or a folder in `SCULKWIRE_GAME_DIRS` |
 | Decision model (optional) | An OpenRouter or ZenMux key, or a local Kev server |
 
 ## CLI

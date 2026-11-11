@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, posix, resolve, win32 } from "node:path";
+import { wineGameDirs } from "./wine.ts";
 
 export interface GameBuild {
   /** Absolute game directory (contains `Minecraft.Windows.exe`). */
@@ -92,8 +93,9 @@ export function windowsGameDirs(env: NodeJS.ProcessEnv, probe: WindowsGameProbe)
 }
 
 /**
- * Game directories to probe. Linux: the mcbe-gdk-linux default install and its `game-dir` pointer, then
- * `SCULKWIRE_GAME_DIRS` (`:` separated). Windows: `windowsGameDirs`.
+ * Game directories to probe. Linux and macOS: the mcbe-gdk-linux default install and its `game-dir` pointer, the
+ * game folders of every Wine/Proton client install (BedrockOnLinux, Flarial, Bottles, Lutris, Steam: `wineGameDirs`),
+ * then `SCULKWIRE_GAME_DIRS` (`:` separated). Windows: `windowsGameDirs`.
  */
 export function gameDirCandidates(
   env: NodeJS.ProcessEnv = process.env,
@@ -111,6 +113,7 @@ export function gameDirCandidates(
     const target = readFileSync(pointer, "utf8").trim();
     if (target) dirs.push(target);
   }
+  dirs.push(...wineGameDirs(home));
   for (const part of (env.SCULKWIRE_GAME_DIRS ?? "").split(p.delimiter)) if (part.trim()) dirs.push(part.trim());
   return [...new Set(dirs.map((d) => p.resolve(d)))];
 }
