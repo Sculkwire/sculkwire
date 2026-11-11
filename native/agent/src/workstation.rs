@@ -1702,9 +1702,29 @@ fn open_containers() -> Result<Vec<Open>, RpcError> {
     Ok(out)
 }
 
-/// The slots of one container as the inventory tools report them.
-fn slots_of(open: &Open) -> Vec<Value> {
-    (0..open.size).map(|slot| open.item(slot).and_then(inventory::slot).unwrap_or(Value::Null)).collect()
+/// The slots of one container as the inventory tools report them. A bundle's `contents` come from its
+/// dynamic container (`dynamic_container_<bundle_id>`) when the screen has it open: the client's copy of a
+/// bundle stack carries only that id in its user data, not the items.
+fn slots_of(open: &Open, all: &[Open]) -> Vec<Value> {
+    (0..open.size)
+        .map(|slot| {
+            let Some(item) = open.item(slot) else {
+                return Value::Null;
+            };
+            let mut entry = inventory::slot(item).unwrap_or(Value::Null);
+            let inside = inventory::bundle_id(item).and_then(|id| all.iter().find(|other| other.dynamic == Some(id)));
+            if let (Some(inside), Value::Object(fields)) = (inside, &mut entry) {
+                if !fields.contains_key("contents") {
+                    let mut items = slots_of(inside, &[]);
+                    while items.last().is_some_and(Value::is_null) {
+                        items.pop();
+                    }
+                    fields.insert(String::from("contents"), Value::Array(items));
+                }
+            }
+            entry
+        })
+        .collect()
 }
 
 /// An item's count (0 for an empty stack).
@@ -1782,7 +1802,7 @@ pub(crate) fn h_screen_state(core: &'static Core, _params: &Value) -> Result<Val
         let containers = open_containers()?;
         let mut map = Map::new();
         for open in &containers {
-            map.insert(open.key(), Value::Array(slots_of(open)));
+            map.insert(open.key(), Value::Array(slots_of(open, &containers)));
         }
         out.insert(String::from("containers"), Value::Object(map));
         out.insert(String::from("data"), screen_data(kind));
@@ -1813,12 +1833,12 @@ pub(crate) fn h_container_open(core: &'static Core, _params: &Value) -> Result<V
     let slots: Vec<Value> = containers
         .iter()
         .filter(|open| !is_player(open.name) && open.dynamic.is_none())
-        .flat_map(slots_of)
+        .flat_map(|open| slots_of(open, &containers))
         .collect();
     let named = |name: &str| containers.iter().find(|open| open.dynamic.is_none() && named_any(open.name, &[name]));
     let player: Vec<Value> = match named("CombinedHotbarAndInventoryContainer") {
-        Some(combined) => slots_of(combined),
-        None => ["HotbarContainer", "InventoryContainer"].iter().filter_map(|name| named(name)).flat_map(slots_of).collect(),
+        Some(combined) => slots_of(combined, &containers),
+        None => ["HotbarContainer", "InventoryContainer"].iter().filter_map(|name| named(name)).flat_map(|open| slots_of(open, &containers)).collect(),
     };
     let (block, position) = match kind {
         "inventory" | "horse" | "trade" => (Value::Null, Value::Null),
@@ -1925,6 +1945,24 @@ pub(crate) fn h_screen_move(core: &'static Core, params: &Value) -> Result<Value
         return Err(RpcError::invalid_params(message.clone()).with_data(json!({ "message": message, "screenSlots": held })));
     }
     let occupied = count_of(target_item) != 0;
+    // A stack dropped on a bundle, or a bundle on a stack, goes into the bundle (what fits), the way the
+    // inventory screen's own bundle code does it; a bundle dropped on an empty slot moves as any stack.
+    let bundle = if occupied && is_bundle(target_item) {
+        Some(((source, from.1), target_item))
+    } else if occupied && is_bundle(source_item) {
+        Some(((target, to.1), source_item))
+    } else {
+        None
+    };
+    if let Some((items, bundle)) = bundle {
+        let held = items.0.item(items.1).map(count_of).unwrap_or(0);
+        if count.is_some_and(|count| count > held) {
+            return Err(RpcError::invalid_params(format!("the stack going into the bundle holds {held}, not {}", count.unwrap_or(0))));
+        }
+        let (id, moved) = bundle_insert(items, bundle, count)?;
+        let before = screen_now(core).map(|screen| screen.top).unwrap_or_default();
+        return park(core, before, Phase::Request { id, moved: moved as u32, take: false, cursor: false }, None);
+    }
     let (kind, amount) = if occupied && !same_item(source_item, target_item) {
         if count.is_some() {
             return Err(RpcError::invalid_params("the to slot holds another item: drop count to swap the two stacks"));
@@ -3263,6 +3301,119 @@ fn move_through(kind: u8, from: (&Open, usize), to: (&Open, usize), count: u8) -
     Ok(id)
 }
 
+/// The type of the `std::function` target the inventory screen registers for putting a stack into a
+/// bundle (`BundleHelper::registerStateMachine`'s second lambda).
+const BUNDLE_LAMBDA: &[u8] = b".?AV<lambda_1>@?0??registerStateMachine@BundleHelper@@SAXAEAVContainerScreenController@@@Z@";
+/// `insert(managerController, SlotData const& source, ItemStack const& bundle, u32 limit)`: the game's own
+/// bundle insert the lambda reaches. It reads the bundle's `bundle_id`, has the controller make (or find)
+/// the model of the bundle's contents and moves what fits from `source` into it through the controller's
+/// transfer; `limit` is `count | 0x100`, or 0 for the whole stack.
+static BUNDLE_INSERT: AtomicUsize = AtomicUsize::new(0);
+/// The user data key the insert reads the bundle's contents id from.
+const BUNDLE_ID_KEY: &[u8] = b"bundle_id";
+
+/// Resolves the bundle insert: the lambda's type descriptor → its `_Target_type` leaf (`lea rax,[type];
+/// ret`) → the one `_Func_impl` table holding it → the table's call slot → the function it calls that in
+/// turn calls the one function which loads the `bundle_id` key and calls the controller's transfer.
+fn resolve_bundle(image: &Image) {
+    let transfer = MOVE_TRANSFER.load(Ordering::Acquire);
+    if transfer == 0 {
+        return;
+    }
+    let Some(descriptor) = image.type_descriptor(BUNDLE_LAMBDA) else {
+        return;
+    };
+    let mut references = [0usize; 8];
+    let count = image.rip_refs(descriptor, &mut references);
+    let mut leaf: Option<usize> = None;
+    for reference in &references[..count] {
+        let Some((start, register)) = crate::route::lea_at(*reference) else {
+            continue;
+        };
+        if register != 0 || pe::read::<u8>(start + 7) != Some(0xC3) {
+            continue;
+        }
+        if leaf.is_some_and(|known| known != start) {
+            return;
+        }
+        leaf = Some(start);
+    }
+    let Some(slot) = leaf.and_then(|leaf| crate::route::unique_data_slot(image, leaf)) else {
+        return;
+    };
+    // `_Func_impl` slots: copy, move, call, target type, delete, get.
+    let table = slot - 3 * 8;
+    let Some(call) = pe::read::<usize>(table + 2 * 8).filter(|entry| pe::in_image_code(*entry)) else {
+        return;
+    };
+    let mut found_strings = [0usize; 4];
+    let found = image.find_strings(BUNDLE_ID_KEY, &mut found_strings);
+    let strings = &found_strings[..found];
+    let loads_key = |function: usize| {
+        body_of(image, function, 0x10000).is_some_and(|(start, body)| {
+            (0..body.len().saturating_sub(4)).any(|at| rip_target(start, body, at, at + 4).is_some_and(|target| strings.contains(&target)))
+        })
+    };
+    let Some((start, body)) = body_of(image, call, 0x4000) else {
+        return;
+    };
+    let mut found: Option<usize> = None;
+    for callee in pe::callees(image, start, start + body.len()) {
+        let Some((inner_start, inner)) = body_of(image, callee, 0x4000) else {
+            continue;
+        };
+        for insert in pe::callees(image, inner_start, inner_start + inner.len()) {
+            if image.function_start(insert) != Some(insert) || !loads_key(insert) || !calls(image, insert, transfer) {
+                continue;
+            }
+            if found.is_some_and(|known| known != insert) {
+                return;
+            }
+            found = Some(insert);
+        }
+    }
+    if let Some(insert) = found {
+        BUNDLE_INSERT.store(insert, Ordering::Release);
+    }
+}
+
+/// True when the stack is a bundle (`minecraft:bundle` or a dyed one).
+fn is_bundle(item: usize) -> bool {
+    inventory::slot(item).and_then(|slot| slot.get("item").and_then(Value::as_str).map(|name| name.ends_with("bundle"))).unwrap_or(false)
+}
+
+/// Puts what fits of the stack in `source` (at most `limit` items) into `bundle` through the game's own
+/// bundle insert, as the inventory screen does when a stack is dropped on a bundle or a bundle on a stack.
+/// Answers the request's id and the count that left `source`.
+fn bundle_insert(source: (&Open, usize), bundle: usize, limit: Option<u8>) -> Result<(i32, u8), RpcError> {
+    let insert = BUNDLE_INSERT.load(Ordering::Acquire);
+    if insert == 0 || MOVE_TRANSFER.load(Ordering::Acquire) == 0 {
+        return Err(RpcError::anchor("screen.bundle"));
+    }
+    let controller = screen_manager(MOVE_SLOT.load(Ordering::Acquire), "screen.move")?;
+    name_of(source.0.name).ok_or_else(|| RpcError::anchor("screen.container_names"))?;
+    let mut name = source.0.key().into_bytes();
+    name.push(0);
+    let slot = SlotData { name: ConstString::new(&name), index: source.1 as i32, pad: 0 };
+    if !slot_known(controller, &slot as *const SlotData as usize) {
+        return Err(RpcError::invalid_params(format!("the screen's controller has no model of {}", source.0.key())));
+    }
+    let before = source.0.item(source.1).map(count_of).unwrap_or(0);
+    let limit = limit.map_or(0, |count| count as u32 | 0x100);
+    let (id, actions) = in_request(|| {
+        // SAFETY: the game's own bundle insert, called as the inventory screen's bundle lambda calls it: the
+        // open screen's validated manager controller, a slot laid out as the controller's callers build it
+        // (its name outlives the call), the bundle stack the container holds, and a limit.
+        unsafe { transmute::<usize, extern "C" fn(usize, *const SlotData, usize, u32) -> usize>(insert)(controller, &slot, bundle, limit) };
+    })?;
+    let after = source.0.item(source.1).map(count_of).unwrap_or(0);
+    let moved = before.saturating_sub(after);
+    if actions == 0 {
+        return Err(RpcError::invalid_params("the bundle took nothing (it is full, or the item does not go into a bundle)"));
+    }
+    Ok((id, moved))
+}
+
 /// The crafting screen's result preview (`CraftingOutputPreviewContainer`).
 const CRAFTING_PREVIEW: &str = "CraftingOutputPreviewContainer";
 /// One extra result the crafting take hands back (an `ItemInstance`, a leftover such as a bucket).
@@ -4466,6 +4617,7 @@ const MISSING: [&str; 0] = [];
 pub(crate) fn resolve(core: &'static Core) -> Vec<Anchor> {
     resolve_requests(core);
     resolve_screen_actions(core);
+    resolve_bundle(core.image());
     resolve_anvil(core.image());
     resolve_trade2(core.image());
     report()
@@ -4482,6 +4634,7 @@ pub(crate) fn report() -> Vec<Anchor> {
         Anchor { name: SITE_RESPONSE, addr: if RESPONSE_TRAMPOLINE.load(Ordering::Acquire) != 0 { RESPONSE.load(Ordering::Acquire) } else { 0 } },
         Anchor { name: "screen.containers", addr: if containers { RESPONSE.load(Ordering::Acquire) } else { 0 } },
         Anchor { name: "screen.move", addr: MOVE_TRANSFER.load(Ordering::Acquire) },
+        Anchor { name: "screen.bundle", addr: BUNDLE_INSERT.load(Ordering::Acquire) },
     ];
     list.extend(HANDLER_ANCHORS.iter().zip(HANDLERS.iter()).map(|(name, entry)| Anchor { name: *name, addr: entry.load(Ordering::Acquire) }));
     list.extend(MISSING.iter().map(|name: &&str| Anchor { name: *name, addr: 0 }));

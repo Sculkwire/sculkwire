@@ -407,7 +407,7 @@ fn binder_table(image: &Image) -> Option<(usize, usize)> {
 
 /// The start and destination register of a `lea r64, [rip + disp32]` whose displacement field is at
 /// `reference + 3` or `reference + 2` (a reference can be reported at the REX byte or one past it).
-fn lea_at(reference: usize) -> Option<(usize, u8)> {
+pub(crate) fn lea_at(reference: usize) -> Option<(usize, u8)> {
     for start in [reference, reference.wrapping_sub(1)] {
         let Some(code) = pe::bytes(start, 3) else {
             continue;
@@ -448,7 +448,7 @@ fn stores_fingerprint(from: usize, register: u8) -> bool {
 }
 
 /// The address of the one qword in the image's data equal to `value`, when exactly one is.
-fn unique_data_slot(image: &Image, value: usize) -> Option<usize> {
+pub(crate) fn unique_data_slot(image: &Image, value: usize) -> Option<usize> {
     let mut found: Option<usize> = None;
     for section in image.sections() {
         let name = section.name();

@@ -639,6 +639,7 @@ const CONTENTS_DEPTH: usize = 2;
 /// The tag type ids the game's accessors check.
 const TAG_BYTE: u8 = 1;
 const TAG_SHORT: u8 = 2;
+const TAG_INT: u8 = 3;
 const TAG_STRING: u8 = 8;
 const TAG_LIST: u8 = 9;
 const TAG_COMPOUND: u8 = 10;
@@ -736,6 +737,14 @@ fn user_data_fields(entry: &mut Map<String, Value>, compound: usize, depth: usiz
     if let Some(items) = content_list.and_then(|list| contents(list, depth)) {
         entry.insert(String::from("contents"), items);
     }
+}
+
+/// The id of the dynamic container that holds a bundle's items: its user data's `bundle_id` (an int).
+/// The client's copy of a bundle stack carries only this id; the items live in that container, which the
+/// client keeps while a screen showing the bundle is open.
+pub(crate) fn bundle_id(stack: usize) -> Option<u32> {
+    let data = pe::read::<usize>(stack + STACK_USER_DATA).filter(|data| *data != 0)?;
+    typed(data, "bundle_id", TAG_INT).and_then(|tag| pe::read::<i32>(tag + TAG_VALUE)).and_then(|id| u32::try_from(id).ok())
 }
 
 /// The value tag a compound holds under `key`, with the type id its own accessors compare.
