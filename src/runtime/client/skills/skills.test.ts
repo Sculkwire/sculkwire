@@ -182,6 +182,15 @@ describe("advisor", () => {
     const r = adviseTactic(burning, { tactic: choice("fight", 0.95), target: choice("creeper_1", 0.95) });
     expect(r).toMatchObject({ by: "builtin", tactic: { kind: "flee" }, fallback: expect.stringMatching(/^emergency/) });
   });
+
+  it("tells a model tactic that differs from the built-in choice from one that agrees", () => {
+    const same = adviseTactic(scored, { tactic: choice("fight", 0.9), target: choice("zombie_1", 0.9) });
+    expect([same.by, tacticKey(same.tactic) === tacticKey(same.builtin)]).toEqual(["model", true]);
+    const other = adviseTactic(scored, { tactic: choice("fight", 0.9), target: choice("skeleton_1", 0.9) });
+    expect([other.by, other.tactic.target?.id, other.builtin.target?.id]).toEqual(["model", "b", "a"]);
+    const off = adviseTactic(scored, undefined);
+    expect(off.tactic).toBe(off.builtin);
+  });
 });
 
 describe("melee timing", () => {
@@ -352,6 +361,9 @@ describe("play loop", () => {
     expect(Object.keys(model.asked[0] ?? {})).toEqual(["tactic", "target"]);
     expect(r.trace[0]).toMatchObject({ action: "idle", by: "model", state: expect.stringMatching(/Progress: 0 of 2 zombie killed/) });
     expect(r.model).toBe("fake");
+    // Every decision was answered and the model's idle ran each time.
+    expect(r.advice.answered).toBe(r.stats.decisions);
+    expect(r.advice.used).toBe(r.advice.answered);
   });
 
   it("stops on the advisor's goal_done for goals without a check", async () => {

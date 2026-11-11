@@ -54,6 +54,7 @@ function fakeLoop(steps: number, everyMs: number, log: string[] = []): PlayRunne
       message,
       durationMs: 0,
       latency: { medianMs: 0, p90Ms: 0, maxMs: 0 },
+      advice: { answered: 0, used: 0, differed: 0 },
       goalCheck: { kind: "free", known: false, progress: "" },
       stats: { decisions: trace.length, kills: 0, killed: {}, swings: 0, hits: 0, crits: 0, damageTaken: 0, deaths: 0 },
       trace,

@@ -115,6 +115,11 @@ export interface PlayResult {
   durationMs: number;
   /** Advisor latency (zeros without one). */
   latency: { medianMs: number; p90Ms: number; maxMs: number };
+  /**
+   * Decisions the model answered (`answered`), the ones where its tactic ran (`used`), and the ones where that tactic
+   * (kind and target) differs from what the built-in scores would have run (`differed`). All zero without a model.
+   */
+  advice: { answered: number; used: number; differed: number };
   goalCheck: { kind: Goal["kind"]; known: boolean; progress: string };
   stats: PlayStats;
   trace: PlayStep[];
@@ -197,8 +202,19 @@ export function adviseTactic(
   answers: Record<string, Answer> | undefined,
   running?: string,
   minConfidence = PLAY_MIN_CONFIDENCE,
-): { tactic: Tactic; by: "builtin" | "model"; fallback?: string } {
+): { tactic: Tactic; by: "builtin" | "model"; fallback?: string; builtin: Tactic } {
   const builtin = chooseTactic(scored, running);
+  const pick = adviseFrom(scored, answers, running, minConfidence, builtin);
+  return { ...pick, builtin };
+}
+
+function adviseFrom(
+  scored: readonly Tactic[],
+  answers: Record<string, Answer> | undefined,
+  running: string | undefined,
+  minConfidence: number,
+  builtin: Tactic,
+): { tactic: Tactic; by: "builtin" | "model"; fallback?: string } {
   if (!answers) return { tactic: builtin, by: "builtin" };
   if (builtin.score >= EMERGENCY) return { tactic: builtin, by: "builtin", fallback: `emergency: ${builtin.reason}` };
   const a = answers.tactic;
@@ -328,6 +344,7 @@ export async function play(
     if (step.action === "flee" && !result.ok && result.message !== "cancelled") cornerUntil = Date.now() + CORNERED_HOLD_MS;
   };
 
+  const advice = { answered: 0, used: 0, differed: 0 };
   try {
     if (env.deaths) deathTick = (await env.deaths(Number.MAX_SAFE_INTEGER).catch(() => undefined))?.tick;
     while (Date.now() < deadline) {
@@ -413,6 +430,13 @@ export async function play(
         }
       }
       const picked = adviseTactic(scored, answers, running?.key, minConfidence);
+      if (answers) {
+        advice.answered++;
+        if (picked.by === "model") {
+          advice.used++;
+          if (tacticKey(picked.tactic) !== tacticKey(picked.builtin)) advice.differed++;
+        }
+      }
       if (picked.tactic.recover) recovering = true;
       const key = tacticKey(picked.tactic);
       if (running?.key !== key) {
@@ -476,6 +500,7 @@ export async function play(
     message,
     durationMs: Date.now() - started,
     latency: { medianMs: percentile(sorted, 0.5), p90Ms: percentile(sorted, 0.9), maxMs: sorted.at(-1) ?? 0 },
+    advice,
     goalCheck: { kind: goal.kind, known: check.known, progress: check.progress },
     stats: {
       decisions,

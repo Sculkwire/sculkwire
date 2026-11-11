@@ -170,7 +170,8 @@ function playText(p: PlayResult): string {
     `play stopped by ${p.stoppedBy} after ${p.steps} tactic(s) in ${(p.durationMs / 1000).toFixed(1)} s: ${p.message}`,
     `goal (${p.goalCheck.kind}): ${p.goalCheck.progress}`,
     `kills ${s.kills}${killed ? ` (${killed})` : ""}, hits ${s.hits} (${s.crits} critical) of ${s.swings} swings, damage taken ${s.damageTaken}, deaths ${s.deaths}${s.health !== undefined ? `, health ${s.health}` : ""}`,
-    `advisor ${p.model}, ${s.decisions} decisions, advisor latency median ${p.latency.medianMs} ms, p90 ${p.latency.p90Ms} ms`,
+    `advisor ${p.model}, ${s.decisions} decisions, advisor latency median ${p.latency.medianMs} ms, p90 ${p.latency.p90Ms} ms` +
+      (p.advice.answered ? `, answered ${p.advice.answered}, used ${p.advice.used}, differed from the built-in choice ${p.advice.differed}` : ""),
   ];
   for (const t of p.trace.slice(-5)) lines.push(`  ${stepText(t)}`);
   return lines.join("\n");
