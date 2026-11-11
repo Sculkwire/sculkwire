@@ -1,21 +1,26 @@
 /**
- * `fight`: melee like a decent player. Hits a mob from the edge of reach and steps back out of its reach while the
- * swing cools down (Bedrock's 10-tick invulnerability), steps in again as the swing comes ready, sprint-hits with a
- * W-tap so every hit knocks back, jumps for critical hits against a lone mob, keeps a group in front so only one can
- * hit at a time, raises the shield when a hit cannot be avoided, keeps a creeper from lighting its fuse (about 3
- * blocks) and gets out past 7 blocks, shield up, once it burns, shoots a creeper from range when there is a bow, weaves
- * toward archers, waits for a leaping spider to land, and moves on to the next hostile.
+ * `fight`: melee like a skilled player. One loop runs the whole fight: among melee mobs the target changes inside it
+ * without stopping the feet, and the hand strikes whichever mob in reach can take a hit (each mob has its own 10-tick
+ * invulnerability). Against melee mobs (`pack.ts`) it waits for a chasing mob at the edge of reach instead of walking
+ * into a pack, keeps out of the mobs' reach with the feet, and turns or walks out when a mob gets beside or behind.
+ * It keeps an attack clock per mob, and boxed in (`auto`; always near mobs with `guard`) it raises the shield 400 ms
+ * before the next attack is due and swings from behind it only in a window where no mob can attack while
+ * the swing holds the shield open. It jumps in place for critical hits when no attack is due, keeps a creeper from
+ * lighting its fuse (about 3 blocks) and gets out past 7 blocks, shield up, once it burns, shoots a creeper from range
+ * when there is a bow, weaves toward archers, waits for a leaping spider to land, and moves on to the next hostile.
  */
-import { angleDiff, horizontalDistance, yawTo, type EntityInfo, type Loadout, type PlayerController } from "../player.ts";
+import { angleDiff, horizontalDistance, turnDurationMs, yawTo, type EntityInfo, type Follow, type Loadout, type PlayerController, type Vec3 } from "../player.ts";
 import { navigate } from "../nav/navigate.ts";
 import { CROWD_RADIUS, crowdMove, isolated, pickDuelTarget } from "./crowd.ts";
-import { clearRun, CREEPER_START, creeperMove, critSafe, crowdedCreeper, findCover, type FuseMemory, LATENCY_MS, openHeading, readyInMs, shouldBlock, spacing, spiderAirborne, STRIKE_LEAD_S, trackFuse, weaveDeg, whoHit } from "./defense.ts";
-import { gridFor } from "../nav/grid.ts";
+import { clearRun, CLOSE_IN_MARGIN, CLOSE_IN_SETTLE_MS, closeInTicks, CREEPER_MARGIN, CREEPER_STANDING, creeperStandFrom, STEP_TAP_MS, STRUCK_THROW, STRUCK_THROW_MS, CREEPER_START, CREEPER_STOP, creeperMove, critSafe, crowdedCreeper, findCover, type FuseMemory, openHeading, readyInMs, spiderAirborne, trackFuse, weaveDeg } from "./defense.ts";
+import { gridFor, type GridCache } from "../nav/grid.ts";
 import { bestWeaponSlot, bowSlot, hasShield } from "./items.ts";
 import { HIT_COOLDOWN_MS, meleePlan, type PendingSwing, swingOutcome } from "./melee.ts";
-import { isHostile, MELEE_COOLDOWN_MS, meleeReach, mobInfo, shortType } from "./mobs.ts";
-import { combatStats, logEvent } from "./stats.ts";
-import type { SkillResult } from "./types.ts";
+import { isHostile, MELEE_COOLDOWN_MS, meleeReach, mobInfo, shortType, type MobInfo } from "./mobs.ts";
+import { STRIKE_AIM_DEG, AFTER_BLOCK_MS, attackInMs, attackers, ENGINE_LATENCY_MS, GUARD_STEP_OUT_MS, ROOM_NEEDED, KEYBOARD_LATENCY_MS, nextAttackMs, NO_WINDOW_MS, packMove, shieldSwingOk, type PackMob, type Stance, strikeTarget, STRIKE_DIST, STRIKE_REACH } from "./pack.ts";
+import { combatStats, fightText, logEvent, traceFrame, type CombatStats, type TraceEvent, type TraceMob } from "./stats.ts";
+import type { Death } from "./play.ts";
+import type { FightStats, SkillResult } from "./types.ts";
 
 export interface FightArgs {
   /** Entity id, or a type (`zombie`, `minecraft:zombie`). Default: the nearest hostile mob. */
@@ -28,18 +33,26 @@ export interface FightArgs {
   crits?: boolean;
   /** Switch to a closer mob, or the one hitting the player, mid-fight (default true). */
   retarget?: boolean;
+  /**
+   * The shield against melee mobs: `auto` (default: `kite`'s footwork, the shield only boxed in), `kite` (never,
+   * footwork only), `guard` (up whenever a melee mob is within about 3.6 blocks: block, strike in the cooldown,
+   * block). The creeper rule holds in all.
+   */
+  stance?: Stance;
   timeoutMs?: number;
 }
 
 const EYE_HEIGHT = 1.62;
-/** Melee reach in Bedrock survival, from the eye. */
+/** Melee reach in Bedrock survival, from the eye to the hitbox (navigation stops a little inside it). */
 const REACH = 3;
 /** Shortest time between two clicks, so a missed swing is not repeated every frame. */
 const MIN_SWING_GAP_MS = 150;
-/** Forward is let go this long after a sprint hit (W-tap), so the next hit sprints again and knocks back. */
-const WTAP_MS = 120;
-/** A bow is worth drawing on a creeper this far away; closer, the sword. */
-const BOW_MIN_DISTANCE = 5;
+/** A bow is worth drawing on a creeper (or, with the `bow` opener, any hostile) this far away; closer, the sword. */
+export const BOW_MIN_DISTANCE = 5;
+/** Toward a standing creeper the sprint stops this far out: a sprint let go carries the player on for nearly a block. */
+const SPRINT_TO = 5;
+/** The `bow` opener shoots only while no other hostile is this close. */
+export const BOW_OPEN_CLEAR = 6;
 
 export function isEntityId(s: string): boolean {
   return /^-?\d+$/.test(s);
@@ -75,17 +88,24 @@ export async function equipWeapon(pc: PlayerController, signal?: AbortSignal, lo
 
 interface Duel {
   outcome: "dead" | "gone" | "timeout" | "switch";
-  hits: number;
-  crits: number;
-  /** The mob to fight instead (`switch`). */
+  /** The mob to fight next (`switch`, and after a kill when the crowd shows one). */
   next?: EntityInfo;
 }
 
+/**
+ * Against an archer the feet stand within `STRIKE_DIST` and walk in again only past it by this much: still inside the
+ * 3.0 strike reach, so standing never waits where no swing lands.
+ */
+const HOLD_BAND = 0.15;
+/** A crit jump is sent once: the readings show the player off the ground 2 to 4 ticks later. */
+const JUMP_ONCE_MS = 400;
+/** After a switch between duels, the next one waits this long (unless to a burning or close creeper). */
+const SWITCH_HOLD_MS = 600;
 /** How often the fighter looks around for the other mobs (the streamed list comes every tick). */
 const CROWD_POLL_MS = 50;
 /** Health lost this recently means something is hitting the player. */
 const HURT_MS = 800;
-/** A hit shows in the player state this long after it landed (at most): a mob's cooldown is counted from then. */
+/** A hit shows in the player state this long after it landed (at most): a mob's attack clock is counted from then. */
 const HURT_SEEN_LAG_MS = 150;
 /** How much of the fight before a hit the hurt log keeps (against a creeper: back to when its fuse was lit). */
 const FRAME_LOG_MS = 1200;
@@ -95,76 +115,277 @@ const STRUCK_WAIT_MS = 1500;
 /** Running from a fuse: progress is checked this often, and less than `RUN_STUCK` blocks means something blocks the way. */
 const RUN_CHECK_MS = 400;
 const RUN_STUCK = 0.8;
+/** Trace numbers to the centimetre, so a long trace stays small. */
+const round2 = (n: number) => Math.round(n * 100) / 100;
 
+/** What the fight brings, and what it struck. */
 interface Kit {
   shield: boolean;
   bow?: { slot: number; arrows: number };
+  /** Entity id -> type and last health reading of everything this fight's swings struck or its arrows killed. */
+  struck: Map<string, Struck>;
 }
 
-export async function fight(pc: PlayerController, args: FightArgs, signal?: AbortSignal): Promise<SkillResult> {
+export interface Struck {
+  typeId: string;
+  health?: { current: number; max: number };
+}
+
+/**
+ * The player's kills in one fight, by short type. With the helper's death log (`deaths` since the fight started):
+ * every death the player caused. Without one: everything the fight struck that is gone at its end, except a creeper
+ * last seen at full health (it blew up).
+ */
+export function fightKills(deaths: readonly Death[] | undefined, struck: ReadonlyMap<string, Struck>, gone: ReadonlySet<string>): Record<string, number> {
+  const kills: Record<string, number> = {};
+  const add = (typeId: string) => {
+    const t = shortType(typeId);
+    kills[t] = (kills[t] ?? 0) + 1;
+  };
+  if (deaths) {
+    for (const d of deaths) if (d.killer === "minecraft:player") add(d.typeId);
+    return kills;
+  }
+  for (const [id, s] of struck) {
+    if (!gone.has(id)) continue;
+    if (mobInfo(s.typeId).kind === "exploder" && s.health && s.health.current >= s.health.max) continue;
+    add(s.typeId);
+  }
+  return kills;
+}
+
+/** The helper's death log after game tick `since`, when the world offers it. */
+async function deathLog(pc: PlayerController, since: number): Promise<{ tick: number; deaths: Death[] } | undefined> {
+  const r = (await pc.world.query?.("deaths", { since }).catch(() => undefined)) as { tick?: unknown; deaths?: unknown } | undefined;
+  return r && typeof r.tick === "number" && Array.isArray(r.deaths) ? { tick: r.tick, deaths: r.deaths as Death[] } : undefined;
+}
+
+/** The counters a fight reports, read so the fight can report its own share of a `play` run's shared stats. */
+function counters(s: CombatStats) {
+  return { swings: s.swings, hits: s.hits, misses: s.misses, crits: s.crits, hitsTaken: s.hitsTaken, damageTaken: s.damageTaken, blocked: s.blocked };
+}
+
+/** A keyboard click waiting for the struck mob's health reading, and that mob's last hit before it in case it missed. */
+interface Pending extends PendingSwing {
+  id: string;
+  crit: boolean;
+  previous?: number;
+}
+
+/** What lives across the fight's targets: the crowd, the shield, the player's health and the hand. */
+interface FightContext {
+  readonly deadline: number;
+  readonly crits: boolean;
+  readonly retarget: boolean;
+  readonly stance: Stance;
+  readonly all: boolean;
+  /** The type the fight is after (`all` moves on only to these), undefined for any hostile. */
+  readonly wanted?: string;
+  readonly kit: Kit;
+  /** Mobs done with (killed, gone or given up). */
+  readonly skip: Set<string>;
+  /** How late what the fighter does reaches the server, counting the reading's age (`pack.ts`). */
+  readonly latencyMs: number;
+  /** The hostile mobs around, polled in the background, and when. */
+  crowd: EntityInfo[];
+  crowdAt: number;
+  /** The shield is raised (sneak sent), since when. */
+  blocking: boolean;
+  guardSince: number;
+  /** The last crit jump sent. */
+  jumpAt: number;
+  /** The last switch between duels (to or from a creeper or an archer). */
+  switchedAt: number;
+  /** The last block seen, and since when the raised shield has had no window to swing in. */
+  blockedAt: number;
+  noWindowSince?: number;
+  /** Swings from behind the raised shield keep the discipline (`shieldSwingOk`): false for the shield against a leaping spider. */
+  disciplined: boolean;
+  /** `guard` stepped out (no window to swing in) at this time, until its next block. */
+  stepOutSince?: number;
+  /** Free run along the retreat heading, as the footwork last read it. */
+  room: number;
+  lastHealth?: number;
+  lastOffhand?: number;
+  hurtAt: number;
+  /** The last fight frames, logged with each hit the player takes. */
+  frames: { at: number; line: string }[];
+  lastSwing: number;
+  pending?: Pending;
+  airborneSince?: number;
+  /** A duel handed this mob back for the `bow` opener: the loop shoots it without checking again. */
+  openBow?: string;
+  /** Blocks around (walls, holes) for the footwork, cover against archers. */
+  nav?: GridCache;
+  navScan: number;
+}
+
+export async function fight(pc: PlayerController, args: FightArgs, signal?: AbortSignal): Promise<SkillResult & { stats: FightStats }> {
   const h = pc.hands;
   const started = h.now();
-  const deadline = started + (args.timeoutMs ?? 60_000);
+  const stats = combatStats(pc);
+  const before = counters(stats);
   const radius = args.radius ?? 16;
   const byId = args.target !== undefined && isEntityId(args.target);
-  const all = args.all ?? !byId;
   const type = byId ? undefined : args.target;
+  const kit: Kit = { shield: false, struck: new Map() };
+  const ctx: FightContext = {
+    deadline: started + (args.timeoutMs ?? 60_000),
+    crits: args.crits ?? true,
+    retarget: args.retarget ?? true,
+    stance: args.stance ?? "auto",
+    all: args.all ?? !byId,
+    ...(type ? { wanted: typeIdOf(type) } : {}),
+    kit,
+    skip: new Set(),
+    latencyMs: pc.input === "engine" ? ENGINE_LATENCY_MS : KEYBOARD_LATENCY_MS,
+    crowd: [],
+    crowdAt: h.now(),
+    blocking: false,
+    guardSince: Number.NEGATIVE_INFINITY,
+    blockedAt: Number.NEGATIVE_INFINITY,
+    switchedAt: Number.NEGATIVE_INFINITY,
+    jumpAt: Number.NEGATIVE_INFINITY,
+    disciplined: false,
+    room: Number.POSITIVE_INFINITY,
+    hurtAt: Number.NEGATIVE_INFINITY,
+    frames: [],
+    lastSwing: Number.NEGATIVE_INFINITY,
+    ...(pc.world.query ? { nav: gridFor(pc.world) } : {}),
+    navScan: Number.NEGATIVE_INFINITY,
+  };
+  let deathTick: number | undefined;
+  /** This fight's numbers: the controller's counters now minus at the start, and the kills. */
+  const result = async (): Promise<FightStats> => {
+    const now = counters(stats);
+    let kills: Record<string, number>;
+    const deaths = deathTick !== undefined ? await deathLog(pc, deathTick) : undefined;
+    if (deaths) kills = fightKills(deaths.deaths, kit.struck, new Set());
+    else {
+      const gone = new Set<string>();
+      for (const id of kit.struck.keys()) if (!(await pc.world.entity(id).catch(() => null))) gone.add(id);
+      kills = fightKills(undefined, kit.struck, gone);
+    }
+    return {
+      kills,
+      swings: now.swings - before.swings,
+      hits: now.hits - before.hits,
+      misses: now.misses - before.misses,
+      crits: now.crits - before.crits,
+      hitsTaken: now.hitsTaken - before.hitsTaken,
+      damageTaken: Math.round((now.damageTaken - before.damageTaken) * 10) / 10,
+      blocked: now.blocked - before.blocked,
+      timeMs: h.now() - started,
+    };
+  };
   let target = byId ? ((await pc.world.entity(args.target as string)) ?? undefined) : await pickTarget(pc, type, radius);
-  if (!target) return { ok: false, message: byId ? `no entity ${args.target}` : `no ${type ? shortType(typeIdOf(type)) : "hostile mob"} within ${radius} blocks` };
+  if (!target) {
+    const s = await result();
+    return { ok: false, message: `${byId ? `no entity ${args.target}` : `no ${type ? shortType(typeIdOf(type)) : "hostile mob"} within ${radius} blocks`}, ${fightText(s)}`, stats: s };
+  }
+  // The death log's tick now: the player's kills are the deaths after it.
+  deathTick = (await deathLog(pc, Number.MAX_SAFE_INTEGER))?.tick;
   const loadout = await pc.world.loadout?.().catch(() => undefined);
-  const kit: Kit = { shield: hasShield(loadout?.armor), ...(loadout && bowSlot(loadout.hotbar) ? { bow: bowSlot(loadout.hotbar) } : {}) };
+  kit.shield = hasShield(loadout?.armor);
+  const bow = loadout ? bowSlot(loadout.hotbar) : undefined;
+  if (bow) kit.bow = bow;
   const weapon = await equipWeapon(pc, signal, loadout);
-  const done: string[] = [];
-  const skip = new Set<string>();
-  let hits = 0;
-  let crits = 0;
+  // The other hostile mobs around, read in the background for the whole fight: who is closest, who is flanking.
+  let watching = true;
+  const watch = (async () => {
+    while (watching && pc.world.entities) {
+      const list = await pc.world.entities(CROWD_RADIUS + 3).catch(() => undefined);
+      if (list) {
+        ctx.crowd = list.filter((m) => m.typeId !== "minecraft:player" && isHostile(m.typeId) && m.health !== undefined);
+        ctx.crowdAt = h.now();
+      }
+      await h.sleep(CROWD_POLL_MS).catch(() => undefined);
+    }
+  })();
   let arrows = 0;
-  const retarget = args.retarget ?? true;
+  let cancelled = false;
   try {
     while (target) {
-      if (kit.bow && mobInfo(target.typeId).kind === "exploder") {
-        const shot = await archery(pc, target, kit.bow.slot, deadline, signal);
+      const aim = target;
+      const exploder = mobInfo(aim.typeId).kind === "exploder";
+      const opening = ctx.openBow === aim.id;
+      delete ctx.openBow;
+      if (kit.bow && (exploder || (stats.orders?.opener === "bow" && (opening || (await bowOpening(pc, aim, ctx)))))) {
+        // The `bow` opener on any other hostile stops once a second one comes within `BOW_OPEN_CLEAR`.
+        const shot = await archery(pc, target, kit.bow.slot, ctx.deadline, signal, exploder ? undefined : (me) => crowdNear(ctx, me, aim.id));
         arrows += shot.shots;
         if (shot.dead) {
-          skip.add(target.id);
-          done.push(shortType(target.typeId));
-          if (!all) break;
-          target = await pickTarget(pc, type, radius, skip);
+          ctx.skip.add(target.id);
+          kit.struck.set(target.id, { typeId: target.typeId });
+          if (!ctx.all) break;
+          target = await pickTarget(pc, type, radius, ctx.skip);
           continue;
         }
         if (weapon) await equipWeapon(pc, signal);
       }
-      const d = await duel(pc, target, deadline, args.crits ?? true, retarget, kit, signal);
-      hits += d.hits;
-      crits += d.crits;
+      const d = await duel(pc, target, ctx, signal);
       if (d.outcome === "switch" && d.next) {
         target = d.next;
         continue;
       }
-      skip.add(target.id);
       if (d.outcome === "timeout") break;
-      if (d.outcome === "dead") done.push(shortType(target.typeId));
-      if (!all) break;
-      target = await pickTarget(pc, type, radius, skip);
+      if (!ctx.all) break;
+      // The next mob without stopping: the crowd's when it has one, else a fresh look around.
+      target = d.next ?? (await pickTarget(pc, type, radius, ctx.skip));
     }
+  } catch (err) {
+    // Cancelled (preempted by `play`, the request cancelled): still report what the fight did.
+    if (!signal?.aborted) throw err;
+    cancelled = true;
   } finally {
+    watching = false;
+    await watch;
+    delete stats.fighting;
+    // A click still unjudged when the fight ends counts as a miss.
+    if (ctx.pending) {
+      stats.misses++;
+      delete ctx.pending;
+    }
     await h.move({ sneak: false });
     await h.stop();
   }
-  const timedOut = h.now() > deadline;
-  const killed = done.length ? `killed ${done.join(", ")}` : "killed nothing";
-  const with_ = weapon ? ` with ${shortType(weapon)}` : "";
+  const timedOut = h.now() > ctx.deadline;
+  const s = await result();
+  if (cancelled) return { ok: false, message: "cancelled", stats: s };
+  const killed = Object.keys(s.kills).length > 0;
+  const text = fightText(s, weapon ? shortType(weapon) : undefined);
   return {
-    ok: done.length > 0 || (!timedOut && hits > 0),
-    message: `${killed}${with_}: ${hits} hit(s), ${crits} critical${arrows ? `, ${arrows} arrow(s)` : ""}, in ${((h.now() - started) / 1000).toFixed(1)} s${timedOut ? ", timed out" : ""}`,
+    ok: killed || (!timedOut && s.hits > 0),
+    message: `${text}${arrows ? `, ${arrows} arrow(s)` : ""}${timedOut ? ", timed out" : ""}`,
+    stats: s,
   };
+}
+
+/** Another hostile than `target` within `BOW_OPEN_CLEAR` of the player, from the crowd the fight polls. */
+function crowdNear(ctx: FightContext, me: Vec3, target: string): boolean {
+  return ctx.crowd.some((m) => m.id !== target && horizontalDistance(me, m.location) < BOW_OPEN_CLEAR);
+}
+
+/** The `bow` opener applies: the target is farther than `BOW_MIN_DISTANCE` and no other hostile is within `BOW_OPEN_CLEAR`. */
+async function bowOpening(pc: PlayerController, target: EntityInfo, ctx: FightContext): Promise<boolean> {
+  const me = (await pc.world.state(200)).location;
+  if (horizontalDistance(me, target.location) <= BOW_MIN_DISTANCE) return false;
+  const around = (await pc.world.entities?.(BOW_OPEN_CLEAR + 1).catch(() => undefined)) ?? ctx.crowd;
+  return !around.some((m) => m.id !== target.id && isHostile(m.typeId) && horizontalDistance(me, m.location) < BOW_OPEN_CLEAR);
 }
 
 /**
  * Shoot a creeper while it is farther than `BOW_MIN_DISTANCE`, walking backward to keep the distance. Returns when
  * it is dead, gone, or too close for the bow.
  */
-async function archery(pc: PlayerController, target: EntityInfo, slot: number, deadline: number, signal?: AbortSignal): Promise<{ dead: boolean; shots: number }> {
+async function archery(
+  pc: PlayerController,
+  target: EntityInfo,
+  slot: number,
+  deadline: number,
+  signal?: AbortSignal,
+  stop?: (me: Vec3) => boolean,
+): Promise<{ dead: boolean; shots: number }> {
   const h = pc.hands;
   let shots = 0;
   if (!(await h.selectSlot(slot, signal))) return { dead: false, shots };
@@ -174,7 +395,7 @@ async function archery(pc: PlayerController, target: EntityInfo, slot: number, d
       if (!e) return { dead: shots > 0, shots };
       const s = await pc.world.state(200);
       const dist = horizontalDistance(s.location, e.location);
-      if (dist < BOW_MIN_DISTANCE || h.now() > deadline || signal?.aborted) return { dead: false, shots };
+      if (dist < BOW_MIN_DISTANCE || h.now() > deadline || signal?.aborted || stop?.(s.location)) return { dead: false, shots };
       // Back away while drawing (slowed, but it keeps the gap), unless the creeper is still far.
       await h.walk(dist < 9 ? yawTo(s.location, e.location) + 180 : undefined, false);
       const r = await pc.shoot({ entity: target.id, shots: 1, timeoutMs: 3000 }, signal);
@@ -187,68 +408,84 @@ async function archery(pc: PlayerController, target: EntityInfo, slot: number, d
   }
 }
 
-/** One target until it dies, disappears or time runs out. */
-async function duel(pc: PlayerController, target: EntityInfo, deadline: number, critsWanted: boolean, retarget: boolean, kit: Kit, signal?: AbortSignal): Promise<Duel> {
+/**
+ * Fight `first` and, among melee mobs, whoever the hand should strike next, until the target dies (the next one
+ * from the crowd is returned in `next`), disappears or time runs out. A turn to or from a creeper or an archer
+ * returns `switch`, which sets that one up; the feet keep going either way.
+ */
+async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, signal?: AbortSignal): Promise<Duel> {
   const h = pc.hands;
   const stats = combatStats(pc);
-  const attacks = stats.attacks;
-  const info = mobInfo(target.typeId);
-  const f = await h.follow(target.id);
-  if (!f) return { outcome: "gone", hits: 0, crits: 0 };
-  // The other hostile mobs around, read in the background: who is closest, who is flanking.
-  let crowd: EntityInfo[] = [];
-  let crowdAt = h.now();
-  let watching = true;
-  const watch = (async () => {
-    while (watching && pc.world.entities) {
-      const list = await pc.world.entities(CROWD_RADIUS + 3).catch(() => undefined);
-      if (list) {
-        crowd = list.filter((m) => m.typeId !== "minecraft:player" && isHostile(m.typeId) && m.health !== undefined);
-        crowdAt = h.now();
-      }
-      await h.sleep(CROWD_POLL_MS).catch(() => undefined);
-    }
-  })();
-  let lastHealth: number | undefined;
-  let hurtAt = Number.NEGATIVE_INFINITY;
-  /** The last fight frames, logged with each hit the player takes. */
-  const frames: { at: number; line: string }[] = [];
-  const exploder = info.kind === "exploder";
-  // No jumping against a creeper (a jump lets it close in) or a spider (it leaps at the player).
-  const crits = critsWanted && !exploder && !info.climbs;
+  const nextAttack = stats.nextAttack;
+  const kit = ctx.kit;
+  const followed = await h.follow(first.id);
+  if (!followed) {
+    ctx.skip.add(first.id);
+    return { outcome: "gone" };
+  }
+  let f: Follow = followed;
+  let target = first;
+  let info: MobInfo = mobInfo(target.typeId);
+  let exploder = info.kind === "exploder";
   // Aim at the middle of the body: low for spiders and other small mobs, chest height for zombies and skeletons.
-  const aimHeight = info.climbs ? 0.45 : 1.0;
-  h.track(f, aimHeight, 10);
-  let hits = 0;
-  let critHits = 0;
-  let lastHit = Number.NEGATIVE_INFINITY;
-  let lastSwing = Number.NEGATIVE_INFINITY;
-  /** A keyboard click waiting for the target's health reading, and the last hit before it in case it missed. */
-  let pending: (PendingSwing & { crit: boolean; lastHit: number }) | undefined;
-  let airborneSince: number | undefined;
-  let wtapUntil = 0;
-  let strafe = Math.random() < 0.5 ? 1 : -1;
-  let strafeUntil = h.now() + 800 + Math.random() * 800;
+  let aimHeight = info.climbs ? 0.45 : 1.0;
   /** Each creeper's fuse as the fight takes it, shared with the later duels of this `play` run. */
   const fuseOf = (id: string): FuseMemory => {
     let m = stats.creepers.get(id);
     if (!m) stats.creepers.set(id, (m = {}));
     return m;
   };
-  const fuse = fuseOf(target.id);
-  /** A swing that struck the target. */
-  const landed = (at: number, crit: boolean) => {
-    lastHit = at;
-    // The struck creeper is thrown back: its close reading no longer says it stopped to swell.
-    fuse.struckAt = at;
-    delete fuse.closeAt;
-    hits++;
+  let fuse = fuseOf(target.id);
+  let hits = 0;
+  /** Ticks this duel has run. */
+  let duelTicks = 0;
+  h.track(f, aimHeight, 10);
+  stats.fighting = target.id;
+  /** The yaw the camera holds while the pack is turned in front, instead of tracking the target. */
+  let facing: number | undefined;
+  /** Turn to another melee mob inside the loop: the feet keep going, the camera moves over. */
+  const turnTo = async (next: EntityInfo): Promise<boolean> => {
+    const nf = await h.follow(next.id);
+    if (!nf) return false;
+    f.stop();
+    f = nf;
+    target = next;
+    info = mobInfo(next.typeId);
+    exploder = info.kind === "exploder";
+    aimHeight = info.climbs ? 0.45 : 1.0;
+    fuse = fuseOf(next.id);
+    hits = 0;
+    facing = undefined;
+    h.track(f, aimHeight, 10);
+    stats.fighting = next.id;
+    return true;
+  };
+  const healthOf = (id: string) => (id === target.id ? f.last.health?.current : ctx.crowd.find((m) => m.id === id)?.health?.current);
+  /** What happened this tick, for the trace (only while tracing is on). */
+  let ev: TraceEvent[] | undefined;
+  /** A swing that struck `id` (the target or another hostile mob in the way). */
+  const landed = (id: string, typeId: string, at: number, crit: boolean, health?: { current: number; max: number }) => {
+    stats.struckAt.set(id, at);
     stats.hits++;
-    stats.struck.set(target.id, target.typeId);
-    if (crit) {
-      critHits++;
-      stats.crits++;
+    stats.struck.set(id, typeId);
+    kit.struck.set(id, { typeId, ...(health ? { health } : {}) });
+    ev?.push("hit");
+    if (mobInfo(typeId).kind === "exploder") {
+      // The struck creeper is thrown back: its close reading no longer says it stopped to swell.
+      const fm = fuseOf(id);
+      fm.struckAt = at;
+      delete fm.closeAt;
     }
+    if (id === target.id) hits++;
+    if (crit) {
+      stats.crits++;
+      ev?.push("crit");
+    }
+  };
+  /** A swing that struck nothing (or nothing hostile), or a click whose hit never showed. */
+  const missed = () => {
+    stats.misses++;
+    ev?.push("miss");
   };
   /** Turned away from a burning creeper and sprinting, toward `runHeading`. */
   let running = false;
@@ -256,39 +493,75 @@ async function duel(pc: PlayerController, target: EntityInfo, deadline: number, 
   let runTurn = 0;
   let runCheck = { at: 0, x: 0, z: 0 };
   let runHeading = 0;
-  let blocking = false;
+  let strafe = Math.random() < 0.5 ? 1 : -1;
+  let strafeUntil = h.now() + 800 + Math.random() * 800;
+  /** The last tap of a step in to a creeper. */
+  let stepTapAt = Number.NEGATIVE_INFINITY;
+  /** A close-in on a lit creeper: forward until `until`, held as the strike attempt until its swing goes out. */
+  let closeIn: { id: string; until: number } | undefined;
+  /** The creeper whose burning fuse the escape was chosen on. */
+  let fled: { id: string; back: boolean } | undefined;
+  /** Against an archer: standing at the strike distance (see `HOLD_BAND`). */
+  let standing = false;
   let moved = { at: h.now(), x: Number.NaN, z: Number.NaN };
   let lastPath = Number.NEGATIVE_INFINITY;
   /** Against an archer: the cover spot being run to, the ones already reached, and when the grid was last read. */
   let cover: { x: number; y: number; z: number } | undefined;
   const usedCover = new Set<string>();
   let coverScan = Number.NEGATIVE_INFINITY;
-  // The blocks around: walls and holes for the footwork, cover against an archer.
-  const nav = pc.world.query ? gridFor(pc.world) : undefined;
-  const grid = info.kind === "ranged" ? nav : undefined;
-  let navScan = Number.NEGATIVE_INFINITY;
+  const nav = ctx.nav;
   const block = async (on: boolean) => {
-    if (on === blocking) return;
-    blocking = on;
+    if (on === ctx.blocking) return;
+    ctx.blocking = on;
+    if (on) ctx.guardSince = h.now();
     await h.move({ sneak: on });
   };
+  const fits = (m: EntityInfo) => !ctx.skip.has(m.id) && (ctx.wanted ? m.typeId === ctx.wanted : isHostile(m.typeId)) && (m.health === undefined || m.health.current > 0);
   try {
     for (;;) {
       if (f.failure) throw f.failure;
+      ev = stats.trace ? [] : undefined;
       if (f.gone) {
-        // A mob gone right after a click died of it (a creeper may have blown up instead).
-        if (pending && !exploder) landed(pending.at, pending.crit);
+        // A mob gone right after a click died of it (a creeper may have blown up instead, unless its health showed 0).
+        const p = ctx.pending;
+        if (p && p.id === target.id) {
+          if (!exploder || (f.last.health !== undefined && f.last.health.current <= 0)) landed(p.id, target.typeId, p.at, p.crit);
+          else missed();
+          delete ctx.pending;
+        }
         // A creeper that is gone without a kill blew up: what the fight saw before it.
-        if (exploder && !(f.last.health && f.last.health.current <= 0)) logEvent(stats, `creeper gone after ${hits} hits`, ...frames.map((fr) => `  ${fr.at - h.now()} ${fr.line}`));
-        return { outcome: hits > 0 ? "dead" : "gone", hits, crits: critHits };
+        if (exploder && !(f.last.health && f.last.health.current <= 0)) logEvent(stats, `creeper gone after ${hits} hits`, ...ctx.frames.map((fr) => `  ${fr.at - h.now()} ${fr.line}`));
+        ctx.skip.add(target.id);
+        const outcome = hits > 0 ? "dead" : "gone";
+        if (!ctx.all) return { outcome };
+        // The next one from the crowd: a melee mob is turned to inside the loop, anything else set up by the fight.
+        const me = (await pc.world.state()).location;
+        const next = ctx.crowd.filter(fits).sort((a, b) => horizontalDistance(me, a.location) - horizontalDistance(me, b.location))[0];
+        if (!next) return { outcome };
+        if (mobInfo(next.typeId).kind !== "melee" || exploder) return { outcome, next };
+        if (!(await turnTo(next))) return { outcome };
+        await h.sleep(25, signal);
+        continue;
       }
       const now = h.now();
-      if (now > deadline) return { outcome: "timeout", hits, crits: critHits };
+      if (now > ctx.deadline) return { outcome: "timeout" };
       // Where the client has the player now (the keyboard route's stream shows it 150 to 250 ms late).
       const s = pc.camera.present(await pc.world.state());
-      const lost = s.health !== undefined && lastHealth !== undefined && s.health < lastHealth ? lastHealth - s.health : 0;
-      if (lost > 0) hurtAt = now;
-      if (s.health !== undefined) lastHealth = s.health;
+      const lost = s.health !== undefined && ctx.lastHealth !== undefined && s.health < ctx.lastHealth ? ctx.lastHealth - s.health : 0;
+      if (lost > 0) {
+        ctx.hurtAt = now;
+        stats.hitsTaken++;
+        stats.damageTaken += lost;
+        ev?.push("hurt");
+      }
+      if (s.health !== undefined) ctx.lastHealth = s.health;
+      // The off-hand item's durability went up: the raised shield took a hit.
+      const blockedNow = s.offhandDamage !== undefined && ctx.lastOffhand !== undefined && s.offhandDamage > ctx.lastOffhand;
+      if (blockedNow) {
+        stats.blocked++;
+        ev?.push("block");
+      }
+      if (s.offhandDamage !== undefined) ctx.lastOffhand = s.offhandDamage;
       const e = f.last;
       const dist = horizontalDistance(s.location, e.location);
       const dist3 = Math.hypot(e.location.x - s.location.x, e.location.y - s.location.y, e.location.z - s.location.z);
@@ -298,21 +571,26 @@ async function duel(pc: PlayerController, target: EntityInfo, deadline: number, 
       // The reported velocity is instant (blocks per tick); the follow's estimate smooths over 0.6 s.
       const vel = e.velocity ?? f.velocity();
       const closing = dist > 0.01 ? ((vel.x * (s.location.x - e.location.x) + vel.z * (s.location.z - e.location.z)) / dist) * 20 : 0;
-      if (s.onGround) airborneSince = undefined;
-      else airborneSince ??= now;
-      if (nav && now - navScan > 5000) {
-        navScan = now;
+      if (s.onGround) delete ctx.airborneSince;
+      else ctx.airborneSince ??= now;
+      if (nav && now - ctx.navScan > 5000) {
+        ctx.navScan = now;
         void nav.ensure({ x: s.location.x - 12, y: s.location.y - 2, z: s.location.z - 12 }, { x: s.location.x + 12, y: s.location.y + 3, z: s.location.z + 12 }, 30_000).catch(() => undefined);
       }
       /** Free run toward a heading on the blocks known around (all open while none are). */
       const clear = (yaw: number) => (nav ? clearRun(nav, s.location, yaw) : 6);
-      // With others around: the closest mob, or the one hitting the player, is the one to fight. The crowd's
-      // positions are carried forward by their velocity since the poll; the target's come from the follow.
-      const ticks = (now - crowdAt) / 50;
-      const polled = crowd.map((m) =>
-        m.id === target.id ? { ...m, location: e.location } : m.velocity ? { ...m, location: { x: m.location.x + m.velocity.x * ticks, y: m.location.y, z: m.location.z + m.velocity.z * ticks } } : m,
-      );
+      // The crowd's positions are carried forward by their velocity since the poll; the target's come from the follow.
+      const ticks = (now - ctx.crowdAt) / 50;
+      const polled = ctx.crowd
+        .filter((m) => !ctx.skip.has(m.id) || m.id === target.id)
+        .map((m) => (m.id === target.id ? { ...m, location: e.location } : m.velocity ? { ...m, location: { x: m.location.x + m.velocity.x * ticks, y: m.location.y, z: m.location.z + m.velocity.z * ticks } } : m));
       const mobs = polled.some((m) => m.id === target.id) ? polled : [...polled, { ...target, location: e.location }];
+      // Standing order `bow` (from `play`'s adviser): a far target with nothing close is shot first. The fight's loop
+      // runs the bow and comes back to the duel; without the order nothing here changes.
+      if (stats.orders?.opener === "bow" && kit.bow && !exploder && dist > BOW_MIN_DISTANCE && !mobs.some((m) => m.id !== target.id && horizontalDistance(s.location, m.location) < BOW_OPEN_CLEAR)) {
+        ctx.openBow = target.id;
+        return { outcome: "switch", next: target };
+      }
       // What the footwork steers around: a creeper widely (its fuse lights within 3), the others by their reach.
       const avoid = mobs.map((m) => ({ location: m.location, ...(mobInfo(m.typeId).kind === "exploder" ? { clearance: CREEPER_START + 1 } : {}) }));
       // The other creepers around: remember when they came close or lit, for a later duel against them.
@@ -321,53 +599,118 @@ async function duel(pc: PlayerController, target: EntityInfo, deadline: number, 
         const d = horizontalDistance(s.location, m.location);
         const v = m.velocity;
         const c = v && d > 0.01 ? ((v.x * (s.location.x - m.location.x) + v.z * (s.location.z - m.location.z)) / d) * 20 : 0;
-        trackFuse(fuseOf(m.id), now, d, c, m.ignited, mobInfo(m.typeId).fuseMs, v ? Math.hypot(v.x, v.z) * 20 : Math.abs(c), m.fuseTicks !== undefined ? m.fuseTicks * 50 + (m.ageMs ?? 0) + now - crowdAt : undefined);
+        trackFuse(fuseOf(m.id), now, d, c, m.ignited, mobInfo(m.typeId).fuseMs, v ? Math.hypot(v.x, v.z) * 20 : Math.abs(c), m.fuseTicks !== undefined ? m.fuseTicks * 50 + (m.ageMs ?? 0) + now - ctx.crowdAt : undefined);
       }
-      // The melee mobs: their box reach toward the player, and how long until each can attack again.
+      // The melee mobs as the pack footwork reads them: reach toward the player, attack clock, invulnerability.
       const near = mobs
-        .filter((m) => mobInfo(m.typeId).kind === "melee")
-        .map((m) => {
+        .filter((m) => mobInfo(m.typeId).kind === "melee" && (m.health === undefined || m.health.current > 0))
+        .map((m): PackMob & { m: EntityInfo; info: MobInfo } => {
           const mi = mobInfo(m.typeId);
           const dx = s.location.x - m.location.x;
           const dz = s.location.z - m.location.z;
           const d = Math.hypot(dx, dz);
           const v = m.id === target.id ? vel : m.velocity;
-          return { m, id: m.id, info: mi, dist: d, mobReach: meleeReach(mi, dx, dz), closing: v && d > 0.01 ? ((v.x * dx + v.z * dz) / d) * 20 : 0, coolMs: 0 };
+          const bearing = yawTo(s.location, m.location);
+          const off = angleDiff(view, bearing);
+          const hittableMs = Math.max(0, (stats.struckAt.get(m.id) ?? Number.NEGATIVE_INFINITY) + HIT_COOLDOWN_MS - now);
+          // The hand can strike it once its invulnerability is over and the view is on it: the camera's turn for that
+          // angle (150 to 450 ms), plus the view's latency.
+          const turnMs = Math.abs(off) > STRIKE_AIM_DEG ? turnDurationMs(Math.abs(off), 10) + pc.camera.latencyMs : 0;
+          return {
+            m,
+            info: mi,
+            id: m.id,
+            dist: d,
+            bearing,
+            offViewDeg: off,
+            mobReach: meleeReach(mi, dx, dz),
+            strikeInMs: Math.max(hittableMs, turnMs),
+            closing: v && d > 0.01 ? ((v.x * dx + v.z * dz) / d) * 20 : 0,
+            speed: mi.speed,
+            dueMs: Math.max(0, (nextAttack.get(m.id) ?? Number.NEGATIVE_INFINITY) - now),
+            ...(nextAttack.has(m.id) ? { overdueMs: Math.max(0, now - (nextAttack.get(m.id) as number)) } : {}),
+            hittableMs,
+            ...(mi.axe ? { axe: true } : {}),
+          };
         })
         .sort((a, b) => a.dist - b.dist);
-      if (lost > 0) {
-        // An arrow may have done it when an archer has the player in range: then no melee mob is credited.
-        const archer = mobs.some((m) => mobInfo(m.typeId).kind === "ranged" && horizontalDistance(s.location, m.location) <= mobInfo(m.typeId).range);
-        const by = archer ? undefined : whoHit(near);
-        if (by) attacks.set(by, now - HURT_SEEN_LAG_MS);
-        logEvent(stats, `hurt ${lost.toFixed(1)} -> ${s.health} in duel ${shortType(target.typeId)}, credited ${by ? shortType(near.find((n) => n.id === by)?.m.typeId ?? "?") : "none"}`, ...frames.map((fr) => `  ${fr.at - now} ${fr.line}`));
+      // An attack seen (a hit taken or blocked): the mob that made it restarts its clock. An arrow may have made a
+      // hit when an archer has the player in range: then no melee mob is credited.
+      if (lost > 0 || blockedNow) {
+        const archer = lost > 0 && mobs.some((m) => mobInfo(m.typeId).kind === "ranged" && horizontalDistance(s.location, m.location) <= mobInfo(m.typeId).range);
+        const by = archer ? [] : attackers(near, !(lost > 0));
+        for (const id of by) nextAttack.set(id, nextAttackMs(now - HURT_SEEN_LAG_MS, !(lost > 0), near.find((n) => n.id === id)?.info.cooldownMs ?? MELEE_COOLDOWN_MS));
+        if (blockedNow) ctx.blockedAt = now;
+        if (lost > 0) logEvent(stats, `hurt ${lost.toFixed(1)} -> ${s.health} fighting ${shortType(target.typeId)}, credited ${by.map((id) => shortType(near.find((n) => n.id === id)?.m.typeId ?? "?")).join(", ") || "none"}`, ...ctx.frames.map((fr) => `  ${fr.at - now} ${fr.line}`));
       }
-      for (const n of near) n.coolMs = Math.max(0, (attacks.get(n.id) ?? Number.NEGATIVE_INFINITY) + (n.info.cooldownMs ?? MELEE_COOLDOWN_MS) - now);
-      if (retarget && mobs.length > 1) {
+      if (ctx.retarget && mobs.length > 1) {
         const lit = new Set([...stats.creepers].filter(([, c]) => c.fuseSince !== undefined).map(([id]) => id));
-        const pick = pickDuelTarget(s.location, target.id, mobs, now - hurtAt < HURT_MS, lit);
-        const next = pick !== target.id ? mobs.find((m) => m.id === pick) : undefined;
-        if (next) return { outcome: "switch", next, hits, crits: critHits };
+        const pick = pickDuelTarget(s.location, target.id, mobs, now - ctx.hurtAt < HURT_MS, lit);
+        const picked = pick !== target.id ? mobs.find((m) => m.id === pick) : undefined;
+        const kind = (m: EntityInfo) => mobInfo(m.typeId).kind;
+        // To or from a creeper or an archer: that duel sets itself up. Among melee mobs: the one the hand should strike.
+        // Not on the duel's first tick: a switch back and forth then would spin without the clock moving.
+        // And not within `SWITCH_HOLD_MS` of the last switch, unless it is to a burning or close creeper: two duels that
+        // pick each other would flip every tick, and the feet with them.
+        const urgent = picked !== undefined && kind(picked) === "exploder" && (lit.has(picked.id) || horizontalDistance(s.location, picked.location) < 4);
+        if (picked && duelTicks > 0 && (kind(picked) !== "melee" || info.kind !== "melee") && (urgent || now - ctx.switchedAt >= SWITCH_HOLD_MS)) {
+          ctx.switchedAt = now;
+          return { outcome: "switch", next: picked };
+        }
+        if (info.kind === "melee") {
+          const want = strikeTarget(near, target.id, ctx.latencyMs);
+          const next = want !== target.id ? near.find((n) => n.id === want)?.m : undefined;
+          if (next && (await turnTo(next))) {
+            await h.sleep(25, signal);
+            continue;
+          }
+        }
       }
-      const group = crowdMove(s.location, { id: target.id, location: e.location }, mobs);
-      const ready = readyInMs(now, lastHit, HIT_COOLDOWN_MS);
-      if (now > strafeUntil) {
-        strafe = -strafe;
-        strafeUntil = now + 700 + Math.random() * 900;
-      }
-      const blocked = s.lookingAtEntity !== undefined && s.lookingAtEntity.id !== target.id && s.lookingAtEntity.distance < dist + 0.5;
-      const backHeading = toward + 180 - 30 * strafe;
-      /** Swinging is allowed this frame (a creeper only on `strike`, a spider only once it is down). */
+      const ready = readyInMs(now, stats.struckAt.get(target.id) ?? Number.NEGATIVE_INFINITY, HIT_COOLDOWN_MS);
+      const blockedLine = s.lookingAtEntity !== undefined && s.lookingAtEntity.id !== target.id && s.lookingAtEntity.distance < dist + 0.5;
+      /** Swinging at the target is allowed this frame (a creeper only on `strike`, a spider only once it is down). */
       let mayStrike = true;
-      /** The footwork chosen this frame, for the hurt log. */
+      /** The footwork chosen this frame, and why. */
       let foot: string;
+      let why = "";
+      const group = exploder ? crowdMove(s.location, { id: target.id, location: e.location }, mobs) : undefined;
 
       if (exploder) {
         const burnedMs = e.fuseTicks !== undefined ? e.fuseTicks * 50 + (e.ageMs ?? 0) + now - f.lastWall : undefined;
         const lit = trackFuse(fuse, now, dist3, closing, e.ignited, info.fuseMs, Math.hypot(vel.x, vel.z) * 20, burnedMs);
-        const move = creeperMove({ dist: dist3, lit, fuseMs: lit ? now - (fuse.fuseSince ?? now) : 0, readyInMs: ready, hasShield: kit.shield, closing, running });
-        mayStrike = move === "strike";
+        // Its reach as a centre distance: where the eye is `STRIKE_REACH` from the aim point on its body.
+        const dyEye = e.location.y + aimHeight - s.location.y - EYE_HEIGHT;
+        const reach = Math.sqrt(Math.max(0, STRIKE_REACH * STRIKE_REACH - dyEye * dyEye)) + dist3 - dist;
+        // Lit and still slowing: where it will stand once its walk has coasted out, from the box gap it lit at.
+        const stand = lit && closing > CREEPER_STANDING ? creeperStandFrom(dist, closing, e.location.x - s.location.x, e.location.z - s.location.z) + dist3 - dist : undefined;
+        const struckAgoMs = stats.struckAt.has(target.id) ? now - (stats.struckAt.get(target.id) as number) : undefined;
+        const move = creeperMove({
+          dist: dist3,
+          lit,
+          fuseMs: lit ? now - (fuse.fuseSince ?? now) : 0,
+          readyInMs: ready,
+          hasShield: kit.shield,
+          closing,
+          // Once the escape was chosen on this fuse it stays the one decision: no strike or step back into it.
+          running: running || (lit && fled?.id === target.id),
+          ...(lit && fled?.id === target.id && fled.back ? { backingOff: true } : {}),
+          reach,
+          lineBlocked: blockedLine,
+          roomBehind: clear(toward + 180),
+          ...(struckAgoMs !== undefined ? { struckAgoMs } : {}),
+          ...(stand !== undefined ? { stand } : {}),
+          ...(lit && closeIn?.id === target.id ? { committed: true } : {}),
+        });
+        if (!lit && fled?.id === target.id) fled = undefined;
+        else if (lit && (move === "run" || move === "block") && !(fled?.id === target.id && fled.back)) fled = { id: target.id, back: move === "run" };
+        // A strike attempt on a lit creeper holds until the swing went out or the move gives it up.
+        if (closeIn && (closeIn.id !== target.id || (move !== "step" && move !== "strike"))) closeIn = undefined;
+        mayStrike = move === "strike" || move === "step";
         foot = move;
+        // One set of feet for both kinds: the pack's keep-out rule (no melee mob gets the player in its reach) holds
+        // while the creeper is the target too, except for the strike itself and the escape from the fuse.
+        const pack = near.length > 0 ? packMove({ mobs: near, stance: "kite", hasShield: false, latencyMs: ctx.latencyMs, view, room: clear }) : undefined;
+        const keepOut = pack?.foot === "retreat" ? pack.heading : undefined;
         // Running from the fuse faces away from the creeper; everything else faces it.
         if (move !== "run" && running) {
           running = false;
@@ -375,83 +718,142 @@ async function duel(pc: PlayerController, target: EntityInfo, deadline: number, 
         }
         await block(move === "block");
         if (move === "run") {
-          // Turn away and sprint: backing off (about 3.3 blocks a second in the bench) is too slow to get from 3 to 7
-          // blocks within the fuse. The way is the open one (no wall, hole or water on the blocks known), around the
-          // other mobs rather than through them. Stuck all the same (a mob or a block the grid missed), turn 75
-          // degrees aside, and to the other side if that does not help either.
-          if (!running) {
-            running = true;
-            runTurn = 0;
-            runCheck = { at: now, x: s.location.x, z: s.location.z };
-            h.look({ widthDeg: 20, aim: () => ({ yaw: runHeading, pitch: 5 }) });
-          } else if (now - runCheck.at > RUN_CHECK_MS) {
-            if (Math.hypot(s.location.x - runCheck.x, s.location.z - runCheck.z) < RUN_STUCK) runTurn = runTurn === 0 ? 75 * strafe : -runTurn;
-            runCheck = { at: now, x: s.location.x, z: s.location.z };
+          // Back straight off, the view kept on the creeper, at full backward input from this tick: backward is as fast
+          // as forward (4.32), needs no turn, and with the hit's knockback puts the creeper past 7 blocks (the fuse goes
+          // out) about 0.8 s after the hit. Live, turning round to sprint moved the player only 1.5 to 2 blocks in the
+          // first second (the turn, no forward push while turning) and lost the creeper. The way back is the open one
+          // nearest straight back, leaning only as far as walls and the other mobs require.
+          // Backward or sideways (strafing is as fast), along the open heading; a hit's knockback gives 2 blocks free.
+          const back = openHeading({ me: s.location, desired: toward + 180, spreadDeg: 90, mobs: avoid, clear, previous: runHeading });
+          const need = CREEPER_STOP + CREEPER_MARGIN - dist - (struckAgoMs !== undefined && struckAgoMs < STRUCK_THROW_MS ? STRUCK_THROW : 0);
+          if (!running && clear(back) >= Math.min(need, 5.5)) {
+            runHeading = back;
+            await h.walk(back, false);
+          } else {
+            // Not enough free run behind: turn toward the open heading straight away and sprint. Stuck all the same (a
+            // mob or a block the grid missed), turn 75 degrees aside, and to the other side if that does not help either.
+            if (!running) {
+              running = true;
+              runTurn = 0;
+              runCheck = { at: now, x: s.location.x, z: s.location.z };
+              h.look({ widthDeg: 20, aim: () => ({ yaw: runHeading, pitch: 5 }) });
+            } else if (now - runCheck.at > RUN_CHECK_MS) {
+              if (Math.hypot(s.location.x - runCheck.x, s.location.z - runCheck.z) < RUN_STUCK) runTurn = runTurn === 0 ? 75 * strafe : -runTurn;
+              runCheck = { at: now, x: s.location.x, z: s.location.z };
+            }
+            runHeading = openHeading({ me: s.location, desired: toward + 180 + runTurn, spreadDeg: 120, mobs: avoid, clear, previous: runHeading });
+            await h.walk(runHeading, Math.abs(angleDiff(view, runHeading)) < 40);
           }
-          runHeading = openHeading({ me: s.location, desired: toward + 180 + runTurn, spreadDeg: 120, mobs: avoid, clear, previous: runHeading });
-          await h.walk(runHeading, Math.abs(angleDiff(view, runHeading)) < 40);
-        } else if (now < wtapUntil) await h.walk(undefined);
+        }
         // Backing off (the swing cooling down, or shielding from the blast): nearly straight back (a diagonal gains
         // too little on a creeper), leaning away from the other mobs when there are some.
         else if (move === "retreat" || move === "block") {
-          const lean = group ? Math.max(-25, Math.min(25, angleDiff(toward + 180, group.heading))) : -30 * strafe;
+          const lean = group ? Math.max(-25, Math.min(25, angleDiff(toward + 180, group.heading))) : 0;
           await h.walk(openHeading({ me: s.location, desired: toward + 180 + lean, spreadDeg: 60, mobs: avoid, clear }), false);
         }
-        // A creeper that comes on by itself is met standing: walking into it on top of the input latency
-        // would carry the player inside its fuse range. With other melee mobs in the way or about to reach the
-        // player, back off from them instead: the creeper (2.5 to 2.8 blocks a second) outruns zombies (2.3), so it
-        // comes out ahead of them, and the player (4.3 backward) keeps clear of both.
-        else if (move === "approach" && group && crowdedCreeper(near, target.id, dist)) await h.walk(openHeading({ me: s.location, desired: group.heading, spreadDeg: 60, mobs: avoid, clear }), false);
+        // A melee mob about to have the player in its reach: back off from it, as the pack's footwork does.
+        else if (keepOut !== undefined && move !== "strike") {
+          foot = `${move} keep-out`;
+          await h.walk(openHeading({ me: s.location, desired: keepOut, spreadDeg: 60, mobs: avoid, clear }), false);
+        }
+        // A creeper that comes on by itself is met standing: walking into it on top of the input latency would carry
+        // the player inside its fuse range. With other melee mobs around it is waited for standing too (the keep-out
+        // rule above backs off from them when they come close): it outruns zombies (2.5 to 2.8 blocks a second against
+        // 2.3) and leads them by about a block, so it is struck first, and the backward escape outruns them all.
+        else if (move === "approach" && group && crowdedCreeper(near, target.id, dist)) await h.walk(undefined);
         // A creeper that waits or backs off is closed in on, sprinting while it is more than 4 blocks away. With the
         // fuse reported, an unlit creeper is safe to walk up to at any distance; without the report one standing
         // within 4.5 blocks may be swelling, and one just struck may have lit as the hit landed, so neither is.
         else if (move === "approach") {
           const guessing = e.ignited === undefined;
-          const walkIn = closing < 1 && (!guessing || (dist > 4.5 && !(fuse.struckAt !== undefined && now - fuse.struckAt < STRUCK_WAIT_MS)));
-          await h.walk(walkIn ? toward : undefined, walkIn && dist > 4 && Math.abs(angleDiff(view, toward)) < 40);
+          const walkIn = closing < CREEPER_STANDING && (!guessing || (dist > 4.5 && !(fuse.struckAt !== undefined && now - fuse.struckAt < STRUCK_WAIT_MS)));
+          // Sprinting only while far: a sprint let go carries the player on for nearly a block.
+          await h.walk(walkIn ? toward : undefined, walkIn && dist > SPRINT_TO && Math.abs(angleDiff(view, toward)) < 40);
         }
+        // In reach: stand still and strike, so the run starts from where the strike stood.
         else if (move === "strike") await h.walk(undefined);
+        // A standing creeper just beyond reach with the swing ready: walk (never sprint) in to it; the next tick in
+        // reach is `strike`, which lets go of forward at once.
+        else if (move === "step") {
+          if (lit) {
+            // Close the difference to where it will stand, while it still slows: forward for as many ticks as the gap
+            // needs, then let go; the swing goes out the first tick the reading is inside reach. A new close-in only
+            // after the reading caught up with the last one.
+            if (!closeIn || now - closeIn.until >= CLOSE_IN_SETTLE_MS) {
+              const gap = Math.min(dist3, stand ?? dist3) - reach + CLOSE_IN_MARGIN;
+              closeIn = { id: target.id, until: now + closeInTicks(gap) * 50 };
+            }
+            await h.walk(now < closeIn.until ? toward : undefined, false);
+          } else {
+            // A standing unlit creeper: a tap, forward this tick only, the next after the reading caught up.
+            const tap = now - stepTapAt >= STEP_TAP_MS;
+            if (tap) stepTapAt = now;
+            await h.walk(tap ? toward : undefined, false);
+          }
+        }
         else await h.walk(group ? openHeading({ me: s.location, desired: group.heading, spreadDeg: 60, mobs: avoid, clear }) : toward + 90 * strafe, false);
-      } else {
-        const airborne = info.climbs === true && spiderAirborne(vel.y, e.location.y - s.location.y);
-        const self = near.find((n) => n.id === target.id);
-        foot = spacing({
-          dist,
-          readyInMs: ready,
-          mobReach: self?.mobReach ?? 1,
-          closing: Math.max(closing, info.kind === "melee" ? info.speed : 0),
-          ...(self ? { mobCoolMs: self.coolMs } : {}),
+      } else if (info.kind === "melee") {
+        const stance = stats.orders?.stance ?? ctx.stance;
+        // `guard` steps out until its next block once its clocks left no window to swing in.
+        if (ctx.stepOutSince !== undefined && (ctx.blockedAt > ctx.stepOutSince || now - ctx.stepOutSince > 2 * GUARD_STEP_OUT_MS)) delete ctx.stepOutSince;
+        const mv = packMove({
+          mobs: near,
+          stance,
+          ...(stance === "guard" && ctx.stepOutSince !== undefined ? { stepOut: true } : {}),
+          hasShield: kit.shield,
+          ...(ctx.blocking ? { guardMs: now - ctx.guardSince } : {}),
+          ...(Number.isFinite(ctx.lastSwing) ? { swingAgoMs: now - ctx.lastSwing } : {}),
+          latencyMs: ctx.latencyMs,
+          view,
+          room: clear,
+          targetId: target.id,
         });
-        const nearest = near[0];
-        const stuck = Math.hypot(s.location.x - moved.x, s.location.z - moved.z) < 0.15 && now - moved.at > 500;
-        await block(
-          (airborne && dist < 3.5 && kit.shield) ||
-            shouldBlock({
-              hasShield: kit.shield,
-              readyInMs: ready,
-              cornered: stuck,
-              ...(nearest
-                ? {
-                    melee: {
-                      dist: nearest.dist,
-                      mobReach: nearest.mobReach,
-                      closing: Math.max(0, nearest.closing),
-                      offViewDeg: angleDiff(view, yawTo(s.location, nearest.m.location)),
-                      coolMs: nearest.coolMs,
-                      ...(nearest.info.axe ? { axe: true } : {}),
-                    },
-                  }
-                : {}),
-            }),
-        );
+        // A leaping spider is waited for behind the shield, and struck once it is down.
+        const airborne = info.climbs === true && spiderAirborne(vel.y, e.location.y - s.location.y);
         if (airborne) mayStrike = !(Math.abs(vel.y) > 0.25);
-        if (now < wtapUntil) await h.walk(undefined);
-        // With others around, back off to the side while the swing cools down (so they line up in front); with the
-        // swing ready, stand and let the target walk into reach, which is longer than its own.
-        else if (group && (group.reason === "flanked" || foot === "retreat" || (foot === "hold" && ready > LATENCY_MS))) await h.walk(openHeading({ me: s.location, desired: group.heading, spreadDeg: 60, mobs: avoid, clear }), false);
-        else if (foot === "retreat") await h.walk(openHeading({ me: s.location, desired: backHeading, spreadDeg: 45, mobs: avoid, clear }), false);
-        else if (dist > REACH + 0.5) {
+        foot = mv.foot;
+        why = mv.reason;
+        ctx.room = mv.room;
+        await block(mv.shield || (airborne && dist < 3.5 && kit.shield));
+        ctx.disciplined = mv.shield;
+        if (mv.face !== undefined) {
+          // A new yaw only when it moved: every new aim restarts the camera's turn.
+          if (facing === undefined || Math.abs(angleDiff(facing, mv.face)) > 10) {
+            const yaw = mv.face;
+            facing = yaw;
+            h.look({ widthDeg: 20, aim: () => ({ yaw, pitch: 10 }) });
+          }
+        } else if (facing !== undefined) {
+          facing = undefined;
+          h.track(f, aimHeight, 10);
+        }
+        await h.walk(mv.heading, mv.sprint && !ctx.blocking);
+        if (mv.foot === "advance") {
+          if (!(Math.hypot(s.location.x - moved.x, s.location.z - moved.z) < 0.3)) moved = { at: now, x: s.location.x, z: s.location.z };
+          else if (now - moved.at > 600 && s.onGround) {
+            await h.jump(120);
+            ev?.push("jump");
+          }
+          // The straight walk is blocked (a wall, a ledge, a hole): find a way over the blocks, then fight on.
+          const ledge = Math.abs(e.location.y - s.location.y) > 1.2;
+          if (pc.world.query && now - moved.at > (ledge ? 700 : 1500) && now - lastPath > 2500) {
+            lastPath = now;
+            await block(false);
+            await navigate(pc, { entity: target.id }, { radius: REACH - 0.2, timeoutMs: Math.min(8000, Math.max(1000, ctx.deadline - now)) }, signal);
+            h.track(f, aimHeight, 10);
+            moved = { at: h.now(), x: Number.NaN, z: Number.NaN };
+          }
+        } else moved = { at: now, x: s.location.x, z: s.location.z };
+      } else {
+        // Standing within the strike distance, walking in again only past it plus `HOLD_BAND`, so the feet do not flip
+        // between the two every tick at the edge.
+        standing = dist <= STRIKE_DIST || (standing && dist <= STRIKE_DIST + HOLD_BAND);
+        foot = standing ? "hold" : "advance";
+        await block(false);
+        ctx.disciplined = false;
+        if (dist > REACH + 0.5) {
           // From cover to cover toward an archer when the blocks around give some, else weave so its arrows miss.
+          const grid = nav;
           if (grid && dist > 6) {
             if (now - coverScan > 1500) {
               coverScan = now;
@@ -467,120 +869,201 @@ async function duel(pc: PlayerController, target: EntityInfo, deadline: number, 
             }
             cover ??= findCover(grid, s.location, e.location, usedCover);
           } else cover = undefined;
-          const heading = cover ? yawTo(s.location, cover) : toward + weaveDeg(now, dist, info) + (blocked ? 60 : 0);
-          await h.walk(heading, dist > 3.5 && !blocked && !blocking && Math.abs(angleDiff(view, heading)) < 40);
+          const heading = cover ? yawTo(s.location, cover) : toward + weaveDeg(now, dist, info) + (blockedLine ? 60 : 0);
+          await h.walk(heading, dist > 3.5 && !blockedLine && Math.abs(angleDiff(view, heading)) < 40);
           if (!(Math.hypot(s.location.x - moved.x, s.location.z - moved.z) < 0.3)) moved = { at: now, x: s.location.x, z: s.location.z };
-          else if (now - moved.at > 600 && s.onGround) await h.jump(120);
-          // The straight walk is blocked (a wall, a ledge, a hole): find a way over the blocks, then fight on.
+          else if (now - moved.at > 600 && s.onGround) {
+            await h.jump(120);
+            ev?.push("jump");
+          }
           const ledge = Math.abs(e.location.y - s.location.y) > 1.2;
           if (pc.world.query && now - moved.at > (ledge ? 700 : 1500) && now - lastPath > 2500) {
             lastPath = now;
-            await block(false);
-            await navigate(pc, { entity: target.id }, { radius: REACH - 0.2, timeoutMs: Math.min(8000, Math.max(1000, deadline - now)) }, signal);
+            await navigate(pc, { entity: target.id }, { radius: REACH - 0.2, timeoutMs: Math.min(8000, Math.max(1000, ctx.deadline - now)) }, signal);
             h.track(f, aimHeight, 10);
             moved = { at: h.now(), x: Number.NaN, z: Number.NaN };
           }
-        } else if (foot === "advance") await h.walk(toward, !blocking && Math.abs(angleDiff(view, toward)) < 30);
-        else await h.walk(ready > LATENCY_MS ? toward + 90 * strafe : undefined, false);
-        if (dist <= REACH + 0.5 && !(Math.hypot(s.location.x - moved.x, s.location.z - moved.z) < 0.15)) moved = { at: now, x: s.location.x, z: s.location.z };
+        } else {
+          await h.walk(standing ? undefined : toward, false);
+          moved = { at: now, x: s.location.x, z: s.location.z };
+        }
       }
 
-      // Hand: hit when the target is in reach and its invulnerability is over, jumping first for a critical hit.
-      // The helper's crosshair reading lags 50 to 100 ms, so it only counts while the camera is still on the target.
-      // On the engine route the streamed view is one tick old. On the keyboard it is 150 to 250 ms old (tens of degrees
-      // at close range), while the click lands after the mouse steps already sent: there the predicted view decides.
+      // Hand: strike a hostile mob under the crosshair within reach whose invulnerability is over, jumping in place
+      // first for a critical hit when no attack is due. The helper's crosshair reading lags 50 to 100 ms: on the
+      // engine route the streamed view is one tick old, so any mob under it counts; on the keyboard it is 150 to 250
+      // ms old (tens of degrees at close range), so only the target counts, by the predicted view.
       const camError = pc.camera.error();
       const aimError = pc.input === "engine" ? camError.observed : camError.predicted;
       const tolerance = Math.max(5, (Math.atan2(0.4, eyeDist) * 180) / Math.PI);
-      const aimedAt = s.lookingAtEntity?.id === target.id && s.lookingAtEntity.distance <= REACH + 0.2 && aimError <= tolerance * 2;
-      // With the view on the target, the distance decides. Reach is to the hitbox, about 0.3 blocks short of the aim
-      // point. A creeper walking in is taken where it will be when the swing lands.
-      const lead = exploder ? Math.max(0, closing) * STRIKE_LEAD_S : 0;
-      const aimedClose = eyeDist - lead <= REACH + 0.3 && aimError <= tolerance;
-      // A keyboard click is judged by the target's health reading.
-      if (pending) {
-        const outcome = swingOutcome(pending, now, e.health?.current);
+      const hittable = (id: string) => now - (stats.struckAt.get(id) ?? Number.NEGATIVE_INFINITY) >= HIT_COOLDOWN_MS;
+      const look = s.lookingAtEntity;
+      // A swing lands only within `STRIKE_REACH` of the eye (to the aim point) where the mob will be when it lands: the
+      // mob's closing carried forward by the input latency. A creeper only once it is inside at the send (a lead sent the
+      // first swing at 3.11 and missed; it is still walking in, so it is deeper when the click runs).
+      const landsIn = (eye: number, closingSpeed: number, isCreeper: boolean) => eye - (isCreeper ? 0 : (Math.max(0, closingSpeed) * ctx.latencyMs) / 1000) <= STRIKE_REACH;
+      const eyeTo = (m: EntityInfo) => Math.hypot(m.location.x - s.location.x, m.location.y + 1.0 - s.location.y - EYE_HEIGHT, m.location.z - s.location.z);
+      const lookedAt = pc.input === "engine" && look && look.id !== target.id ? near.find((n) => n.id === look.id) : undefined;
+      const other = lookedAt && landsIn(eyeTo(lookedAt.m), lookedAt.closing, false) ? lookedAt.m : undefined;
+      const inStrike = landsIn(eyeDist, closing, exploder);
+      const aimedAt = look?.id === target.id && inStrike && aimError <= tolerance * 2;
+      // With the view on the target (before the helper's crosshair reading shows it), the distance decides.
+      const aimedClose = inStrike && aimError <= tolerance;
+      // A keyboard click is judged by the struck mob's health reading.
+      const p = ctx.pending;
+      if (p) {
+        const outcome = swingOutcome(p, now, healthOf(p.id));
         if (outcome === "hit") {
-          landed(pending.at, pending.crit);
-          pending = undefined;
-        } else if (outcome === "miss") pending = undefined;
+          const mt = p.id === target.id ? target.typeId : (mobs.find((m) => m.id === p.id)?.typeId ?? target.typeId);
+          landed(p.id, mt, p.at, p.crit);
+          delete ctx.pending;
+        } else if (outcome === "miss") {
+          missed();
+          delete ctx.pending;
+        }
         // Probably a miss: the hand may swing again before the invulnerability a hit would have started is over.
-        else if (outcome === "doubt" && lastHit === pending.at) lastHit = pending.lastHit;
+        else if (outcome === "doubt" && stats.struckAt.get(p.id) === p.at) {
+          if (p.previous === undefined) stats.struckAt.delete(p.id);
+          else stats.struckAt.set(p.id, p.previous);
+        }
       }
+      // A swing lowers the raised shield for 650 ms: from behind it only when no covered mob can attack meanwhile.
+      // With no such window for `NO_WINDOW_MS`, one strike right after a block, shield down (see `NO_WINDOW_MS`).
+      const windowNow = !ctx.blocking || !ctx.disciplined || shieldSwingOk(near, ctx.latencyMs);
+      if (windowNow) delete ctx.noWindowSince;
+      else ctx.noWindowSince ??= now;
+      const stalled = ctx.noWindowSince !== undefined ? now - ctx.noWindowSince : 0;
+      // `guard` steps out after `GUARD_STEP_OUT_MS` behind the shield without a swing (the windows its clocks leave are
+      // too rare or too short to strike in), when there is room.
+      const unswung = ctx.blocking && ctx.disciplined ? now - Math.max(ctx.lastSwing, ctx.guardSince) : 0;
+      if ((stats.orders?.stance ?? ctx.stance) === "guard" && unswung >= GUARD_STEP_OUT_MS && ctx.room >= ROOM_NEEDED && ctx.stepOutSince === undefined) ctx.stepOutSince = now;
+      const forced = !windowNow && stalled >= NO_WINDOW_MS && ctx.room < ROOM_NEEDED && now - ctx.blockedAt <= AFTER_BLOCK_MS;
+      const shieldOpen = windowNow || forced;
+      const onTarget = shieldOpen && mayStrike && (aimedAt || aimedClose) && hittable(target.id);
+      const strikeAt = onTarget ? target : shieldOpen && other && hittable(other.id) ? other : undefined;
+      // Critical hits only when no melee mob can attack before the falling swing (the jump leaves the player unable to
+      // swing for its rise), never from behind the shield, and in place: a jump forward lands in the mob's reach.
+      const critsNow = ctx.crits && !exploder && !info.climbs && !ctx.blocking && isolated(s.location, target.id, mobs) && critSafe(near.map((n) => ({ ...n, closing: Math.max(n.closing, n.speed), coolMs: n.dueMs })));
       const plan = meleePlan({
         now,
-        lastHit,
+        lastHit: stats.struckAt.get((strikeAt ?? target).id) ?? Number.NEGATIVE_INFINITY,
         onGround: s.onGround,
         vy: s.velocity.y,
-        ...(airborneSince !== undefined ? { airborneSince } : {}),
-        inReach: mayStrike && (aimedAt || aimedClose),
+        ...(ctx.airborneSince !== undefined ? { airborneSince: ctx.airborneSince } : {}),
+        inReach: strikeAt !== undefined,
         // Jump for a crit only facing the target, so the fall is not wasted turning.
-        nearReach: eyeDist <= REACH + 0.8 && aimError <= 15,
-        // Crits only against a lone mob, and only when no melee mob can hit the player before the falling swing: the
-        // jump leaves the player unable to swing for its rise.
-        crits: crits && !blocking && isolated(s.location, target.id, mobs) && critSafe(near.map((n) => ({ ...n, closing: Math.max(n.closing, n.info.speed) }))),
+        nearReach: eyeDist <= STRIKE_REACH + 0.6 && aimError <= 15,
+        crits: critsNow,
       });
-      if (plan === "jump") await h.jump(120);
-      else if ((plan === "swing" || plan === "crit") && now - lastSwing >= MIN_SWING_GAP_MS) {
-        // The shield goes down for the swing.
-        await block(false);
-        const sprinting = s.sprinting || h.movement().sprint;
+      if (plan === "jump") {
+        // One jump per crit: the plan says `jump` until the readings show the player off the ground.
+        if (now - ctx.jumpAt >= JUMP_ONCE_MS) {
+          ctx.jumpAt = now;
+          await h.walk(undefined);
+          await h.jump(120);
+          ev?.push("jump");
+        }
+      } else if ((plan === "swing" || plan === "crit") && strikeAt && now - ctx.lastSwing >= MIN_SWING_GAP_MS) {
+        if (forced) {
+          await block(false);
+          delete ctx.noWindowSince;
+        }
         const crit = !s.onGround && s.velocity.y < 0;
         const struck = await h.swing();
-        lastSwing = now;
+        ctx.lastSwing = now;
+        // The strike attempt on a creeper ends with its swing.
+        closeIn = undefined;
         stats.swings++;
+        ev?.push("swing");
         if (struck === undefined) {
           // The keyboard: judged by the target's health reading (see `swingOutcome`). Until then a melee mob is
           // taken as struck, so the footwork backs off while the swing cools down. A creeper is not: a strike that
           // missed must not send the player back as if it had landed, so the next swing follows as it walks in.
-          if (e.health === undefined) {
-            if (aimedAt || aimedClose) landed(now, crit);
-          } else {
-            pending = { at: now, health: e.health.current, crit, lastHit };
-            if (!exploder) lastHit = now;
+          const health = healthOf(strikeAt.id);
+          if (health === undefined) landed(strikeAt.id, strikeAt.typeId, now, crit);
+          else {
+            // A click still unjudged is dropped: its hit never showed.
+            if (ctx.pending) missed();
+            const previous = stats.struckAt.get(strikeAt.id);
+            ctx.pending = { id: strikeAt.id, at: now, health, crit, ...(previous !== undefined ? { previous } : {}) };
+            if (mobInfo(strikeAt.typeId).kind !== "exploder") stats.struckAt.set(strikeAt.id, now);
           }
-          if (sprinting) wtapUntil = now + WTAP_MS;
         } else {
-          // The swing struck another mob in the way: it still counts for the kill tally.
-          const other = struck ? mobs.find((m) => m.id === struck && m.id !== target.id) : undefined;
-          if (other) {
-            stats.hits++;
-            stats.struck.set(other.id, other.typeId);
-          }
-          if (struck === target.id) {
-            landed(now, crit);
-            if (sprinting) wtapUntil = now + WTAP_MS;
-          }
+          const hit = struck ? mobs.find((m) => m.id === struck) : undefined;
+          if (hit) landed(hit.id, hit.typeId, now, crit, hit.id === target.id ? f.last.health : hit.health);
+          else missed();
         }
       }
       const mv = h.movement();
       const others = [
         ...near
           .filter((n) => n.id !== target.id)
-          .map((n) => `${shortType(n.m.typeId)} ${n.dist.toFixed(2)}/${n.mobReach.toFixed(2)} cool ${Math.round(n.coolMs)} off ${Math.round(angleDiff(view, yawTo(s.location, n.m.location)))}`),
+          .map((n) => `${shortType(n.m.typeId)} ${n.dist.toFixed(2)}/${n.mobReach.toFixed(2)} due ${Math.round(n.dueMs)} off ${Math.round(n.offViewDeg)}`),
         ...mobs.filter((m) => m.id !== target.id && mobInfo(m.typeId).kind === "exploder").map((m) => `${shortType(m.typeId)} ${horizontalDistance(s.location, m.location).toFixed(2)}`),
       ];
-      frames.push({
+      const self = near.find((n) => n.id === target.id);
+      ctx.frames.push({
         at: now,
         line:
-          `${shortType(target.typeId)} d ${dist.toFixed(2)}/${(near.find((n) => n.id === target.id)?.mobReach ?? 0).toFixed(2)} closing ${closing.toFixed(1)} ready ${Math.round(ready)} ` +
-          `cool ${Math.round(near.find((n) => n.id === target.id)?.coolMs ?? 0)}${e.ignited ? " ignited" : ""}${fuse.fuseSince !== undefined ? ` fuse ${now - fuse.fuseSince}` : ""} ` +
-          `${foot}${group ? ` group ${group.reason}` : ""} plan ${plan}${blocking ? " block" : ""} ` +
+          `${shortType(target.typeId)} d ${dist.toFixed(2)}/${(self?.mobReach ?? 0).toFixed(2)} closing ${closing.toFixed(1)} ready ${Math.round(ready)} ` +
+          `due ${Math.round(self?.dueMs ?? 0)}${e.ignited ? " ignited" : ""}${fuse.fuseSince !== undefined ? ` fuse ${now - fuse.fuseSince}` : ""} ` +
+          `${foot}${why ? ` (${why})` : ""}${group ? ` group ${group.reason}` : ""} plan ${plan}${ctx.blocking ? " block" : ""} ` +
           `move ${mv.forward.toFixed(1)}/${mv.strafe.toFixed(1)}${mv.sprint ? " sprint" : ""} hp ${s.health ?? "?"} ` +
-          `aim ${camError.observed.toFixed(1)}/${camError.predicted.toFixed(1)}/${tolerance.toFixed(1)} lat ${Math.round(pc.camera.latencyMs)}${pending ? ` pending ${now - pending.at}` : ""} ` +
-          `eye ${eyeDist.toFixed(2)} look ${s.lookingAtEntity ? `${s.lookingAtEntity.id === target.id ? "target" : shortType(s.lookingAtEntity.typeId)} ${s.lookingAtEntity.distance.toFixed(2)}` : "none"}` +
+          `aim ${camError.observed.toFixed(1)}/${camError.predicted.toFixed(1)}/${tolerance.toFixed(1)} lat ${Math.round(pc.camera.latencyMs)}${ctx.pending ? ` pending ${now - ctx.pending.at}` : ""} ` +
+          `eye ${eyeDist.toFixed(2)} look ${look ? `${look.id === target.id ? "target" : shortType(look.typeId)} ${look.distance.toFixed(2)}` : "none"}` +
           `${others.length ? ` | ${others.join(", ")}` : ""}`,
       });
-      while (frames.length > 0 && (frames[0]?.at ?? now) < now - (exploder ? CREEPER_FRAME_LOG_MS : FRAME_LOG_MS)) frames.shift();
+      if (stats.trace) {
+        const trackedMobs = mobs.map((m): TraceMob => {
+          const n = near.find((x) => x.id === m.id);
+          const d = n?.dist ?? horizontalDistance(s.location, m.location);
+          const v = m.id === target.id ? vel : m.velocity;
+          const c = n?.closing ?? (v && d > 0.01 ? ((v.x * (s.location.x - m.location.x) + v.z * (s.location.z - m.location.z)) / d) * 20 : 0);
+          return {
+            id: m.id,
+            type: shortType(m.typeId),
+            dist: round2(d),
+            reach: round2(n?.mobReach ?? mobInfo(m.typeId).range),
+            coolMs: Math.round(n ? attackInMs(n) : 0),
+            offViewDeg: Math.round(angleDiff(view, yawTo(s.location, m.location)) * 10) / 10,
+            closing: round2(c),
+            target: m.id === target.id,
+          };
+        });
+        traceFrame(stats, now, {
+          x: round2(s.location.x),
+          z: round2(s.location.z),
+          ...(s.health !== undefined ? { hp: s.health } : {}),
+          onGround: s.onGround,
+          mobs: trackedMobs,
+          foot,
+          ...(group ? { group: group.reason } : {}),
+          plan,
+          readyMs: Math.round(ready),
+          shield: ctx.blocking,
+          aimErr: Math.round(aimError * 10) / 10,
+          aimTol: Math.round(tolerance * 10) / 10,
+          fwd: round2(mv.forward),
+          strafe: round2(mv.strafe),
+          sprint: mv.sprint,
+          ...(ev?.length ? { ev } : {}),
+          ...(lost > 0 ? { lost: Math.round(lost * 10) / 10 } : {}),
+        });
+      }
+      while (ctx.frames.length > 0 && (ctx.frames[0]?.at ?? now) < now - (exploder ? CREEPER_FRAME_LOG_MS : FRAME_LOG_MS)) ctx.frames.shift();
+      if (now > strafeUntil) {
+        strafe = -strafe;
+        strafeUntil = now + 700 + Math.random() * 900;
+      }
+      duelTicks++;
       await h.sleep(25, signal);
     }
   } finally {
-    watching = false;
+    // The last health reading of the target, for the kill count without a death log.
+    const mine = kit.struck.get(target.id);
+    if (mine && f.last.health) mine.health = f.last.health;
     // A creeper duel that ends any other way (a switch, a timeout, the tactic preempted): what it saw last.
-    if (exploder && !f.gone) logEvent(stats, `creeper duel ended after ${hits} hits, ${stats.swings} swings in the run`, ...frames.map((fr) => `  ${fr.at - h.now()} ${fr.line}`));
+    if (exploder && !f.gone) logEvent(stats, `creeper duel ended after ${hits} hits, ${stats.swings} swings in the run`, ...ctx.frames.map((fr) => `  ${fr.at - h.now()} ${fr.line}`));
     f.stop();
-    await watch;
-    await h.move({ sneak: false });
-    await h.stop();
   }
 }

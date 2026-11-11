@@ -1,7 +1,7 @@
 /**
- * Defensive melee decisions, as pure functions the fight loop and the tests share: when the next swing is ready,
- * where to stand between swings (hit, step back out of the mob's reach, step in again as the swing comes ready),
- * when to raise the shield, and how to react to a creeper's fuse.
+ * Defensive decisions, as pure functions the fight loop and the tests share: when the next swing is ready, whether a
+ * jump for a critical hit is safe, how to react to a creeper's fuse, which way is open, and cover from archers. The
+ * footwork and shield against melee mobs are in `pack.ts`.
  *
  * Bedrock values: the player reaches 3 blocks; a struck mob ignores hits for 10 ticks; zombies, spiders and most
  * other melee mobs attack with a box reach (see `mobs.ts`, 1.4 to 1.98 blocks for a zombie) at most once a second; a
@@ -15,18 +15,113 @@ import { angleDiff, type Vec3 } from "../player.ts";
 import { HIT_COOLDOWN_MS } from "./melee.ts";
 import type { MobInfo } from "./mobs.ts";
 
-/** Player melee reach, centre of the player to the target's hitbox. */
-export const PLAYER_REACH = 3;
-/** Extra room kept outside a mob's reach between swings (its lunge, its hitbox and our input latency). */
-export const SAFE_MARGIN = 0.9;
-/** Input to the game's tick plus the state's age: how late what the fighter does lands. */
+/**
+ * Player melee reach as a horizontal centre distance on level ground: measured on retail a swing struck at 3.0 and never
+ * at 3.1 (see `STRIKE_REACH` in `pack.ts` for the table).
+ */
+export const PLAYER_REACH = 3.0;
+/**
+ * Ready to swing with a standing creeper (closing under `CREEPER_STANDING`) this far beyond reach: step in to it, a
+ * tick or two at a walk, rather than wait. One that walks in is met standing still: live, sprinting in at one closing
+ * at 2.5 blocks a second carried the player to 2.2 after the strike (the momentum, the knockback 3 ticks late), and
+ * the run from there lost every creeper (0 of 10), where striking standing at 2.9 to 3.1 and running from there won.
+ */
+export const STEP_IN = 0.3;
+/**
+ * The step in to a standing creeper is a tap: forward for one tick, then let go, and the next tap only after the
+ * reading caught up (2 ticks old) and the coast ended. Held, the step overshot live: forward stayed down until the
+ * reading showed reach, and the momentum carried the player from 3.1 to 2.24.
+ */
+export const STEP_TAP_MS = 250;
+/**
+ * A creeper lights its fuse when the gap between its box and the player's (both 0.6 wide) is under this (its data
+ * value), then coasts to a stop: along an axis that is a centre distance of 3.1, at 45 degrees 3.35. Live
+ * (2026-11-11): along the z axis it was struck at 2.92 to 2.99 still walking; from the side (bench `mixed`) it stood at
+ * 3.08 to 3.16, outside the 2.99 reach. The "lights at 2.9, not at 3.1" measured earlier was along an axis.
+ */
+export const CREEPER_LIGHT_GAP = 2.5;
+/** How far a creeper walking at 2.5 blocks a second coasts after it lights (live about 0.25, the simulator 0.15). */
+export const CREEPER_COAST = 0.2;
+
+/** The centre distance a creeper lights at, coming from the direction (dx, dz) relative to the player. */
+export function creeperLightDist(dx: number, dz: number): number {
+  const d = Math.hypot(dx, dz);
+  if (d < 1e-6) return CREEPER_LIGHT_GAP + 0.6;
+  const ux = Math.abs(dx) / d;
+  const uz = Math.abs(dz) / d;
+  const gap = (r: number) => Math.hypot(Math.max(0, r * ux - 0.6), Math.max(0, r * uz - 0.6));
+  let lo = 0;
+  let hi = 6;
+  for (let k = 0; k < 30; k++) {
+    const mid = (lo + hi) / 2;
+    if (gap(mid) < CREEPER_LIGHT_GAP) lo = mid;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/** Where a lit creeper will stand, seen before it slows: its light distance for the bearing, less the coast. */
+export function creeperStand(dx: number, dz: number): number {
+  return creeperLightDist(dx, dz) - CREEPER_COAST;
+}
+
+/**
+ * A creeper's walk keeps this share of its speed each tick once it stops pushing: live (2026-11-11, `mixed`) it began to
+ * slow at 3.2 to 3.3 and stood at 3.08 to 3.16, about 0.15 of coast from 2.5 blocks a second.
+ */
+export const CREEPER_SLOW_KEEP = 0.546;
+/** Below this closing speed (blocks a second) the reading shows a lit creeper already slowing. */
+export const CREEPER_SLOWING = 2;
+
+/**
+ * Where a lit creeper still moving will stand. Once the reading shows it slowing, from that reading: the rest of its
+ * coast at `CREEPER_SLOW_KEEP` (the light distance's spread and the bearing drop out). Before, from the bearing.
+ */
+export function creeperStandFrom(dist: number, closing: number, dx: number, dz: number): number {
+  if (closing < CREEPER_SLOWING) return dist - (closing / 20) * (CREEPER_SLOW_KEEP / (1 - CREEPER_SLOW_KEEP));
+  return Math.min(dist, creeperStand(dx, dz));
+}
+
+/**
+ * What a few ticks of forward input gain from standing, the coast included: fitted to the live tap frames of
+ * 2026-11-11 (one tick and its coast took the reading from 3.09 to 2.98) and the walk's ramp (about 0.1 blocks the
+ * first tick, 0.16 the second, about 0.1 of coast).
+ */
+export const CLOSE_IN_GAIN = [0.11, 0.27, 0.43];
+/** The most a close-in covers: a lit creeper standing farther than this outside reach is left to the escape. */
+export const CLOSE_IN_MAX = 0.45;
+
+/** A close-in aims this far inside reach: the predicted stand is off by a few hundredths. */
+export const CLOSE_IN_MARGIN = 0.06;
+/**
+ * A further close-in only this long after the last one's input ended: the reading is 2 ticks old and the coast takes
+ * about one more. Live, taps 250 ms apart were too slow for the 0.1 to 0.35 a lit creeper stood outside reach.
+ */
+export const CLOSE_IN_SETTLE_MS = 100;
+/** Ticks of forward input that close `gap` blocks (at least 1, at most `CLOSE_IN_GAIN.length`). */
+export function closeInTicks(gap: number): number {
+  const n = CLOSE_IN_GAIN.findIndex((g) => g >= gap);
+  return n < 0 ? CLOSE_IN_GAIN.length : n + 1;
+}
+
+/** A struck creeper is past 7 blocks about this long after the hit (knockback plus the backward walk). */
+export const STRUCK_ESCAPE_MS = 800;
+/** A creeper struck this recently is counted as thrown `STRUCK_THROW` blocks farther by its knockback. */
+export const STRUCK_THROW_MS = 600;
+export const STRUCK_THROW = 2;
+/** A creeper closing slower than this (blocks a second) stands: swelling, or waiting. */
+export const CREEPER_STANDING = 0.5;
+/** Input to the game's tick plus the state's age: how late what the fighter does lands (the creeper footwork's margin). */
 export const LATENCY_MS = 120;
-/** Backward walking speed, blocks per second (forward sprint is 5.6). */
-export const BACKPEDAL_SPEED = 4.3;
+/** Walking speed backward, blocks per second (measured 4.32, the same in every direction). */
+export const BACKPEDAL_SPEED = 4.32;
 /** A creeper blast hurts out to 2 × power blocks. */
 export const BLAST_RADIUS = 6;
-/** A shield raised this long before the hit lands is up in time. */
-export const SHIELD_RAISE_MS = 250;
+/**
+ * The server must have seen the sneak this long before a hit for the raised shield to block it (measured on retail:
+ * a lead of 6 to 9 ticks blocked 12 hits of 12, 1 to 5 ticks blocked none of 22). The input latency comes on top.
+ */
+export const SHIELD_RAISE_MS = 300;
 
 /**
  * Milliseconds until the next swing can land (0 when ready). Bedrock has no attack-strength cooldown, so every
@@ -37,93 +132,9 @@ export function readyInMs(now: number, lastHit: number, cooldownMs = HIT_COOLDOW
   return Math.max(0, lastHit + cooldownMs - now);
 }
 
-export type Footwork = "advance" | "hold" | "retreat";
-
-export interface SpacingInput {
-  /** Horizontal distance to the target's centre. */
-  dist: number;
-  /** Milliseconds until our next swing can land. */
-  readyInMs: number;
-  /** The target's attack reach (centre to centre). */
-  mobReach: number;
-  /** How fast it closes in, blocks per second (its chase speed when unknown). */
-  closing: number;
-  /** Milliseconds until the target can attack again (its `cooldown_time` since its last hit), 0 when it can now. */
-  mobCoolMs?: number;
-  reach?: number;
-}
-
-/**
- * Where to go relative to a melee target. While the swing is cooling down, stay out of its reach: back off when it
- * would get in (and be able to attack) before the swing is ready. A mob that has just attacked waits its cooldown, so
- * the player can stand inside its reach until then. Once the swing is (nearly) ready, step in to the edge of our
- * reach, which is longer than a zombie's, so the swing lands first and the knockback pushes it out again.
- */
-export function spacing(i: SpacingInput): Footwork {
-  const reach = i.reach ?? PLAYER_REACH;
-  const safe = i.mobReach + SAFE_MARGIN;
-  const closing = Math.max(0.5, i.closing);
-  const cool = i.mobCoolMs ?? 0;
-  // How long until it can hurt the player: in reach and its attack ready, counting our latency.
-  const untilHit = Math.max(((i.dist - i.mobReach) / closing) * 1000, cool) - LATENCY_MS;
-  // Close enough to swing as soon as it is ready, without walking into its reach.
-  const strike = Math.max(safe - 0.2, reach - 0.3);
-  if (i.readyInMs > LATENCY_MS) {
-    if (untilHit < i.readyInMs || (i.dist < safe && cool <= i.readyInMs + LATENCY_MS)) return "retreat";
-    return "hold";
-  }
-  return i.dist > strike ? "advance" : "hold";
-}
-
-export interface ShieldInput {
-  hasShield: boolean;
-  /**
-   * Nearest melee mob that can hit the player now: distance, reach, closing speed, how far off the view it is
-   * (degrees, the shield covers the front half), how long until its attack is ready, and whether it swings an axe.
-   */
-  melee?: { dist: number; mobReach: number; closing: number; offViewDeg?: number; coolMs?: number; axe?: boolean };
-  /** Our next swing (0 when ready). */
-  readyInMs: number;
-  /** The player is boxed in or failed to get away (a wall behind). */
-  cornered?: boolean;
-  /** A creeper's fuse: how long until it blows and how far it is. */
-  creeper?: { fuseLeftMs: number; dist: number };
-}
-
-/** The shield covers attacks from within this many degrees of the view. */
-export const SHIELD_ARC_DEG = 90;
-
 /** Time needed to get from `dist` out of the blast by walking backward. */
 export function escapeMs(dist: number, speed = BACKPEDAL_SPEED): number {
   return Math.max(0, ((BLAST_RADIUS + 0.5 - dist) / speed) * 1000) + LATENCY_MS;
-}
-
-/**
- * Raise the shield when a hit is coming that footwork cannot avoid: a creeper that will blow before the player is
- * out of the blast, or, with the player cornered (it could not back off), a melee mob in front in (or a step from)
- * its reach with its attack ready, while our swing is not ready. A player who can back off does that instead: the
- * bench showed a shield raised 100 to 200 ms before a zombie's hit does not block it, and sneaking slows the player
- * to below a zombie's chase speed. Never against an axe, which disables the shield.
- */
-export function shouldBlock(i: ShieldInput): boolean {
-  if (!i.hasShield) return false;
-  if (i.creeper && i.creeper.dist < BLAST_RADIUS + 0.5 && i.creeper.fuseLeftMs <= escapeMs(i.creeper.dist) + SHIELD_RAISE_MS) return true;
-  const m = i.melee;
-  if (!m || m.axe) return false;
-  if (m.offViewDeg !== undefined && Math.abs(m.offViewDeg) >= SHIELD_ARC_DEG) return false;
-  if ((m.coolMs ?? 0) > SHIELD_RAISE_MS + LATENCY_MS) return false;
-  const inReach = m.dist <= m.mobReach + 0.3;
-  const soon = ((m.dist - m.mobReach) / Math.max(0.5, m.closing)) * 1000 < SHIELD_RAISE_MS;
-  return (inReach || soon) && i.readyInMs > SHIELD_RAISE_MS && i.cornered === true;
-}
-
-/**
- * Which melee mob just hit the player: the one mob whose reach covers the player (plus `slack` for the state's age),
- * or undefined when none or several could have.
- */
-export function whoHit(mobs: readonly { id: string; dist: number; mobReach: number }[], slack = 0.35): string | undefined {
-  const could = mobs.filter((m) => m.dist <= m.mobReach + slack);
-  return could.length === 1 ? could[0]?.id : undefined;
 }
 
 /** A melee mob as the fight sees it: distance and reach (centre to centre), closing speed and its attack cooldown. */
@@ -153,7 +164,8 @@ export function critSafe(mobs: readonly MeleeThreat[]): boolean {
 }
 
 /** `run`: turn away from a burning creeper and sprint out of its fuse range. */
-export type CreeperMove = "strike" | "retreat" | "run" | "block" | "approach" | "hold";
+/** `step`: walk in to a creeper just beyond reach with the swing ready, and strike as it comes inside. */
+export type CreeperMove = "strike" | "step" | "retreat" | "run" | "block" | "approach" | "hold";
 
 export interface CreeperInput {
   /** Centre-to-centre 3D distance. */
@@ -170,19 +182,24 @@ export interface CreeperInput {
   reach?: number;
   /** Already turned away and sprinting from its fuse: no turning back for a strike. */
   running?: boolean;
+  /** The escape on this fuse is under way walking back: with room it carries on, the shield never raised mid-run. */
+  backingOff?: boolean;
+  /** Milliseconds since the player's last hit on it; undefined: not struck lately. */
+  struckAgoMs?: number;
+  /** Where it will stand once its walk has coasted out (`creeperStandFrom`), when it is lit and still moving. */
+  stand?: number;
+  /** A strike attempt on it has started and its swing has not gone out yet. */
+  committed?: boolean;
+  /** Free run straight back from it (`clearRun`), blocks; undefined: open. */
+  roomBehind?: number;
+  /** Another mob stands in the line to it (under the crosshair, nearer): a swing would strike that one instead. */
+  lineBlocked?: boolean;
 }
 
 /** Sprinting speed, blocks per second: a burning creeper is outrun facing away from it. */
 export const SPRINT_SPEED = 5.6;
 /** Turning the camera around (away from the creeper, or back to it for the shield). */
 export const TURN_MS = 150;
-/**
- * A creeper walking in is struck this many seconds ahead: the swing lands about a tick after it is sent, and the
- * streamed reading is already carried forward to now (KeyboardFix's engine bench with 25 ms readings: the old 0.15 s
- * lead, sized for 200 to 250 ms old readings, sent every swing 0.4 blocks early and missed 35 of 35). One that comes
- * within 3 blocks stops and lights its fuse.
- */
-export const STRIKE_LEAD_S = 0.06;
 
 /**
  * The creeper lights its fuse within this (measured: a creeper held still lit with the player 2.9 blocks away and not
@@ -299,32 +316,58 @@ export function crowdedCreeper(near: readonly { id: string; dist: number; mobRea
 export const SHIELD_WITHIN = 5;
 
 /**
- * A burning creeper in reach is still struck while this much fuse is left: the knockback throws it 2 to 3 blocks, and
- * the turn and sprint from there take about this long to get out of the blast.
- */
-export const LIT_STRIKE_LEFT_MS = 700;
-
-/**
- * Against a creeper: close in and strike it as it comes into reach (`STRIKE_LEAD_S` ahead, the sprint knockback
- * throws it back), and back off only while the swing cools down with it in reach, or once its fuse burns (the
- * helper's report). A burning creeper still in reach with the swing ready is struck first, the knockback gaining the
- * run a few blocks, while enough fuse is left. Then turn away and sprint out past 7 blocks, which puts the fuse out.
- * Only when that can no longer work before the blast and the creeper is within `SHIELD_WITHIN`, raise the shield
- * toward it: the shield saves the player, but the creeper still blows up (a lost kill, and the blast hurts the other
- * mobs around).
+ * Against a creeper: strike it once it is inside reach (where a swing lands: no swing goes out beyond it), standing
+ * still; one that walks in is met standing. An unlit creeper standing just beyond reach (up to `STEP_IN`) is stepped
+ * to by taps. A lit one is judged by where it will stand (`creeperStandFrom`: the box gap it lit at, then its coast):
+ * inside reach, wait for it; up to `CLOSE_IN_MAX` outside, close in with a few ticks forward while it still slows. A
+ * swing at a lit creeper goes out while a hit leaves the run time (`STRUCK_ESCAPE_MS`); a mob passing through the line
+ * is waited out. Back off while the swing cools down with it in reach, or once the strike is no longer possible: walk
+ * straight back past 7 blocks, which puts the fuse out, and once chosen the escape stays the decision for that fuse.
+ * Only when the run cannot get out before the blast (and never in an escape with room after a hit on this fuse) and
+ * the creeper is within `SHIELD_WITHIN`, raise the shield toward it: the shield saves the player, but the creeper
+ * still blows up (a lost kill, and the blast hurts the other mobs around).
  */
 export function creeperMove(i: CreeperInput): CreeperMove {
   const reach = i.reach ?? PLAYER_REACH;
   const left = (i.fuseLengthMs ?? 1500) - i.fuseMs;
-  const strike = i.readyInMs <= LATENCY_MS && i.dist - Math.max(0, i.closing ?? 0) * STRIKE_LEAD_S <= reach + 0.2;
+  const ready = i.readyInMs <= LATENCY_MS && !i.lineBlocked;
+  const strike = ready && i.dist <= reach;
+  // A standing creeper just beyond reach: the walk in at walking speed, and the input latency.
+  const step = ready && !strike && (i.closing ?? 0) < CREEPER_STANDING && i.dist <= reach + STEP_IN;
   if (i.lit) {
     if (i.dist > CREEPER_STOP + CREEPER_MARGIN) return "hold";
-    if (strike && !i.running && left > LIT_STRIKE_LEFT_MS) return "strike";
-    if (i.hasShield && i.dist < SHIELD_WITHIN && left < Math.max(escapeMs(i.dist, SPRINT_SPEED), SHIELD_RAISE_MS + LATENCY_MS) + TURN_MS) return "block";
+    // A swing at a lit creeper while a hit still leaves time for the run (a struck creeper is past 7 about 0.8 s after
+    // the hit); a miss then falls back on the shield, which blocks the blast.
+    const hitAllows = left > STRUCK_ESCAPE_MS + LATENCY_MS;
+    // Another mob passing through the line with the creeper about in reach: stand and wait for the line to clear (the
+    // swing only goes out at the creeper itself) rather than give the strike up while the fuse allows it.
+    if (i.lineBlocked && i.readyInMs <= LATENCY_MS && !i.running && hitAllows && i.dist <= reach + CLOSE_IN_MAX) return "strike";
+    if (ready && !i.running && hitAllows) {
+      if (strike) return "strike";
+      // Where it will stand once its walk has coasted out (`creeperStandFrom`): inside reach, stand and strike as it comes;
+      // just outside, close the difference with a few ticks forward while it still slows (`closeInTicks`). Once a
+      // strike attempt started (`committed`) it stays with it until the swing went out or the fuse budget is used up.
+      const stand = Math.min(i.dist, i.stand ?? i.dist);
+      if (stand <= reach) return "strike";
+      if (stand <= reach + CLOSE_IN_MAX || (i.committed && i.dist <= reach + 2 * CLOSE_IN_MAX)) return "step";
+    }
+    // The shield only when the run cannot get out of the blast before it: with room behind the run is the backward
+    // walk (no turn), and a creeper struck in the last 600 ms counts as thrown `STRUCK_THROW` farther (live, the
+    // escape from 2.24 after a hit was shielded on the old estimate, and the creeper was thrown to about 5 meanwhile).
+    // Without room, the turn and the sprint.
+    const roomy = (i.roomBehind ?? Number.POSITIVE_INFINITY) >= Math.min(CREEPER_STOP + CREEPER_MARGIN - i.dist, 5.5);
+    const thrown = i.struckAgoMs !== undefined && i.struckAgoMs < STRUCK_THROW_MS ? STRUCK_THROW : 0;
+    const escape = roomy ? escapeMs(i.dist + thrown, BACKPEDAL_SPEED) : escapeMs(i.dist + thrown, SPRINT_SPEED) + TURN_MS;
+    // An escape after a hit on this fuse, with room behind, is never cut short for the shield: raising it slows the walk
+    // to a sneak (1.3 blocks a second) right where the run was gaining 4.3, and the knockback has the creeper about 5
+    // off by then. An escape without a hit (the swing missed) still raises it when the walk cannot make it.
+    if (i.backingOff && roomy && i.struckAgoMs !== undefined && i.struckAgoMs <= i.fuseMs) return "run";
+    if (i.hasShield && i.dist < SHIELD_WITHIN && left < Math.max(escape, SHIELD_RAISE_MS + LATENCY_MS)) return "block";
     return "run";
   }
   if (strike) return "strike";
-  if (i.readyInMs > LATENCY_MS) return i.dist < reach + 0.6 ? "retreat" : "hold";
+  if (step) return "step";
+  if (!ready) return i.dist < reach + 0.6 ? "retreat" : "hold";
   return "approach";
 }
 

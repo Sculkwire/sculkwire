@@ -8,7 +8,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { NO_INPUT_PROVIDER } from "./inputprovider.ts";
 import type { PlayerInput } from "./launcher.ts";
 import { moveToAction, navigate } from "./nav/navigate.ts";
-import { eat, fight, flee, useOn, type EatArgs, type FightArgs, type FleeArgs, type UseOnArgs } from "./skills/index.ts";
+import { eat, fight, flee, useOn, type EatArgs, type FightArgs, type FightStats, type FleeArgs, type UseOnArgs } from "./skills/index.ts";
 import { shortType } from "./skills/mobs.ts";
 
 export interface Vec3 {
@@ -31,6 +31,8 @@ export interface PlayerState {
   gameMode: string;
   selectedSlot: number;
   health?: number;
+  /** Durability damage of the off-hand item (a shield loses durability with each hit it blocks), when the helper reports it. */
+  offhandDamage?: number;
   holding?: { typeId: string; amount: number };
   lookingAtBlock?: { typeId: string; location: Vec3; face: string };
   lookingAtEntity?: { id: string; typeId: string; distance: number };
@@ -125,6 +127,8 @@ export interface ActionResult {
   durationMs: number;
   /** The input route that carried the action out. */
   input?: InputKind;
+  /** What a `fight` did: kills by type, swings, hits, misses, critical hits, hits taken, damage taken and its time. */
+  fight?: FightStats;
 }
 
 const EYE_HEIGHT = 1.62;
@@ -1026,6 +1030,9 @@ export class EngineBackend implements InputBackend {
   readonly look: (pitch: number, yaw: number) => Promise<void>;
   readonly #engine: EngineInput;
   #move: MoveVector = { ...STILL };
+  /** The movement last asked for, and the update loop sending it while one is in flight. */
+  #want: MoveVector = { ...STILL };
+  #sending?: Promise<void>;
   #sentAt = Number.NEGATIVE_INFINITY;
   #keepalive?: NodeJS.Timeout;
   #failure?: EngineInputError;
@@ -1101,23 +1108,51 @@ export class EngineBackend implements InputBackend {
     if (this.#failure) throw this.#failure;
   }
 
+  /**
+   * Hold `move` from now on, without waiting for the agent's answer (a frame or a tick): a control loop that changes
+   * its feet every tick would otherwise run at the round trip's pace. One update is in flight at a time; what is asked
+   * meanwhile replaces the waiting one, so only the newest movement is sent and never a stale one. A failure
+   * surfaces on the next call.
+   */
   async move(move: MoveVector): Promise<void> {
-    const same =
-      move.forward === this.#move.forward && move.strafe === this.#move.strafe && move.jump === this.#move.jump && move.sneak === this.#move.sneak && move.sprint === this.#move.sprint;
-    if (same && Date.now() - this.#sentAt < MOVE_REFRESH_MS) return;
-    const next = { ...move };
-    await this.#do(() => this.#engine.move(next));
-    this.#move = next;
-    this.#sentAt = Date.now();
-    const still = !next.forward && !next.strafe && !next.jump && !next.sneak && !next.sprint;
-    if (still) this.#stopKeepalive();
-    else this.#keepalive ??= this.#startKeepalive();
+    if (this.#failure) throw this.#failure;
+    this.#want = { ...move };
+    this.#kick();
+  }
+
+  /** Start the update loop unless one runs. */
+  #kick(): void {
+    if (this.#sending) return;
+    const sending = this.#pump().finally(() => {
+      if (this.#sending === sending) this.#sending = undefined;
+    });
+    this.#sending = sending;
+  }
+
+  /** Send the newest wanted movement until what was sent is what is wanted (repeated every `MOVE_REFRESH_MS`). */
+  async #pump(): Promise<void> {
+    try {
+      for (;;) {
+        const next = this.#want;
+        const m = this.#move;
+        const same = next.forward === m.forward && next.strafe === m.strafe && next.jump === m.jump && next.sneak === m.sneak && next.sprint === m.sprint;
+        if (same && Date.now() - this.#sentAt < MOVE_REFRESH_MS) return;
+        await this.#engine.move(next);
+        this.#move = next;
+        this.#sentAt = Date.now();
+        const still = !next.forward && !next.strafe && !next.jump && !next.sneak && !next.sprint;
+        if (still) this.#stopKeepalive();
+        else this.#keepalive ??= this.#startKeepalive();
+      }
+    } catch (err) {
+      this.#fail(err);
+    }
   }
 
   #startKeepalive(): NodeJS.Timeout {
     const timer = setInterval(() => {
       if (Date.now() - this.#sentAt < MOVE_REFRESH_MS - 20) return;
-      void this.move(this.#move).catch(() => undefined);
+      this.#kick();
     }, MOVE_REFRESH_MS / 2);
     timer.unref?.();
     return timer;
@@ -1166,6 +1201,9 @@ export class EngineBackend implements InputBackend {
     this.#stopKeepalive();
     this.#stopRenewal();
     this.#buttons.clear();
+    // Let the update in flight land first, so it cannot hold movement again after the release.
+    this.#want = { ...STILL };
+    await this.#sending;
     this.#move = { ...STILL };
     this.#sentAt = Number.NEGATIVE_INFINITY;
     const keys = [...this.#keys];
@@ -1760,7 +1798,7 @@ export class PlayerController {
       const r = await this.#runAction(action, signal ? AbortSignal.any([signal, stop.signal]) : stop.signal);
       if (!stop.signal.aborted || signal?.aborted) return r;
       await this.releaseAll();
-      return taken();
+      return { ...taken(), ...(r.fight ? { fight: r.fight } : {}) };
     } finally {
       off();
     }
@@ -1768,7 +1806,14 @@ export class PlayerController {
 
   async #runAction(action: PlayerAction, signal?: AbortSignal): Promise<ActionResult> {
     const started = this.#clock.now();
-    const result = (ok: boolean, message: string, input: InputKind): ActionResult => ({ action: action.action, ok, message, durationMs: this.#clock.now() - started, input });
+    const result = (ok: boolean, message: string, input: InputKind, fight?: FightStats): ActionResult => ({
+      action: action.action,
+      ok,
+      message,
+      durationMs: this.#clock.now() - started,
+      input,
+      ...(fight ? { fight } : {}),
+    });
     const text = (err: unknown) => (err instanceof Error ? err.message : String(err));
     if (signal?.aborted) return result(false, "cancelled", this.#backend.kind);
     await this.#begin();
@@ -1776,7 +1821,9 @@ export class PlayerController {
       const kind = this.#backend.kind;
       try {
         const r = await this.#act(action, signal);
-        return result(r.ok, r.message, kind);
+        // A skill that reports its numbers when cancelled returns instead of throwing: let go as a throw would.
+        if (signal?.aborted) await this.releaseAll();
+        return result(r.ok, r.message, kind, r.stats);
       } catch (err) {
         await this.releaseAll();
         if (signal?.aborted) return result(false, "cancelled", kind);
@@ -1787,7 +1834,8 @@ export class PlayerController {
         const note = `engine input failed (${err.message}), finished with keyboard input`;
         try {
           const r = await this.#act(action, signal);
-          return result(r.ok, `${r.message} (${note})`, "keyboard");
+          if (signal?.aborted) await this.releaseAll();
+          return result(r.ok, `${r.message} (${note})`, "keyboard", r.stats);
         } catch (again) {
           await this.releaseAll();
           if (signal?.aborted) return result(false, "cancelled", "keyboard");
@@ -1799,7 +1847,7 @@ export class PlayerController {
     }
   }
 
-  async #act(action: PlayerAction, signal?: AbortSignal): Promise<{ ok: boolean; message: string }> {
+  async #act(action: PlayerAction, signal?: AbortSignal): Promise<{ ok: boolean; message: string; stats?: FightStats }> {
     const result = (ok: boolean, message: string) => ({ ok, message });
     switch (action.action) {
       case "move_to":

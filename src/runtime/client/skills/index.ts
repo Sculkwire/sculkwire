@@ -7,4 +7,4 @@ export { eat, type EatArgs } from "./eat.ts";
 export { fight, type FightArgs } from "./fight.ts";
 export { flee, type FleeArgs } from "./flee.ts";
 export { useOn, type UseOnArgs } from "./useon.ts";
-export type { SkillResult } from "./types.ts";
+export type { FightStats, SkillResult } from "./types.ts";

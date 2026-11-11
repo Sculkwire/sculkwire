@@ -5,6 +5,8 @@ import { checkGoal, parseGoal } from "./goal.ts";
 import { armorPoints, bestFoodSlot, bestWeaponSlot } from "./items.ts";
 import { CRIT_GIVE_UP_MS, HIT_CONFIRM_MS, HIT_COOLDOWN_MS, HIT_DOUBT_MS, meleePlan, swingOutcome, type MeleeInput } from "./melee.ts";
 import { play, type Death } from "./play.ts";
+import { fightKills, type Struck } from "./fight.ts";
+import { combatStats, MAX_TRACE_FRAMES, resetStats, traceFights, traceFrame, type TraceFrame } from "./stats.ts";
 import { chooseTactic, scoreTactics, tacticKey } from "./tactics.ts";
 import { ThreatTracker, type ThreatMap } from "./threat.ts";
 import { escapeYaw } from "./flee.ts";
@@ -154,11 +156,16 @@ describe("tactic scores", () => {
     expect(chooseTactic(scoreTactics(mapOf([mob("a", "cow", 0, 4)]), killHostiles)).kind).toBe("idle");
   });
 
-  it("keeps the running tactic unless another is clearly better, and honours the allow list", () => {
+  it("keeps the running tactic unless another is clearly better, keeps one fight across targets, and honours the allow list", () => {
     const m = mapOf([mob("a", "zombie", 0, 3), mob("b", "zombie", 0, 3.5)]);
     const scored = scoreTactics(m, killHostiles);
-    expect(tacticKey(chooseTactic(scored, "fight:b"))).toBe("fight:b");
-    expect(tacticKey(chooseTactic(scored))).toBe("fight:a");
+    // A fight moves from mob to mob by itself: one tactic, started on the best-scored target.
+    expect(tacticKey(chooseTactic(scored, "fight"))).toBe("fight");
+    expect(chooseTactic(scored, "fight").target?.id).toBe("a");
+    const cows = mapOf([mob("a", "cow", 0, 4), mob("b", "cow", 0, 4.5)]);
+    const use = scoreTactics(cows, parseGoal("hit every cow near you once with the held item"));
+    expect(tacticKey(chooseTactic(use, "use_on:b"))).toBe("use_on:b");
+    expect(tacticKey(chooseTactic(use))).toBe("use_on:a");
     const noFight = scoreTactics(m, killHostiles, { allowed: new Set(["flee", "idle"]) });
     expect(noFight.map((t) => t.kind)).toEqual(["idle"]);
   });
@@ -251,10 +258,12 @@ describe("flee direction", () => {
 });
 
 /**
- * A fake game: the crosshair stays on the first entity, every click on it takes `damage` health, and a mob at 0
- * dies (removed, with a death record killed by the player).
+ * A fake game where nothing moves (so its mobs stand within the measured 3.0 strike reach): the crosshair stays on the
+ * first entity, every click on it takes `damage` health, and a mob at 0
+ * dies (removed, with a death record killed by the player). `deathQuery` answers the helper's `deaths` query on the
+ * world, as the fight reads it.
  */
-function fakeGame(entities: EntityInfo[], state: PlayerState = me(), damage = 20) {
+function fakeGame(entities: EntityInfo[], state: PlayerState = me(), damage = 20, deathQuery = false) {
   const deaths: Death[] = [];
   const clicks: number[] = [];
   let tick = 0;
@@ -292,6 +301,14 @@ function fakeGame(entities: EntityInfo[], state: PlayerState = me(), damage = 20
     impacts: async () => ({ tick: 0, impacts: [] }),
     entities: async () => structuredClone(entities),
     loadout: async () => loadout,
+    ...(deathQuery
+      ? {
+          query: async (kind: string, params?: Record<string, unknown>) => {
+            if (kind !== "deaths") throw new Error(`no ${kind} query in this fake`);
+            return { tick, deaths: deaths.filter((d) => d.tick > Number(params?.since ?? -1)) };
+          },
+        }
+      : {}),
   };
   const env = {
     controller: new PlayerController(world),
@@ -299,18 +316,20 @@ function fakeGame(entities: EntityInfo[], state: PlayerState = me(), damage = 20
     loadout: async () => loadout,
     deaths: async (since: number) => ({ tick, deaths: deaths.filter((d) => d.tick > since) }),
   };
-  return { env, clicks, state, entities };
+  /** A death the helper logged now (not by this fight). */
+  const logDeath = (d: Omit<Death, "tick">) => deaths.push({ tick: ++tick, ...d });
+  return { env, clicks, state, entities, logDeath };
 }
 
 describe("play loop", () => {
   it("kills every hostile and stops on the built-in goal check", async () => {
-    const game = fakeGame([mob("-11", "zombie", 0, 2.5), mob("-12", "zombie", 0, 3)]);
+    const game = fakeGame([mob("-11", "zombie", 0, 2.5), mob("-12", "zombie", 0, 2.8)]);
     const r = await play({ action: "play", goal: "kill the hostile mobs near you", durationMs: 15_000 }, game.env);
     expect(r).toMatchObject({ stoppedBy: "goal_done", goalCheck: { kind: "kill", known: true } });
-    expect(r.stats).toMatchObject({ kills: 2, killed: { zombie: 2 }, hits: 2, deaths: 0 });
+    expect(r.stats).toMatchObject({ kills: 2, killed: { zombie: 2 }, hits: 2, misses: 0, hitsTaken: 0, blocked: 0, deaths: 0 });
+    // One fight for both: it moves on to the next hostile by itself.
     expect(r.trace.map((t) => [t.action, t.target?.id])).toEqual([
       ["fight", "-11"],
-      ["fight", "-12"],
       // Idles while the goal check confirms nothing is left.
       ["idle", undefined],
     ]);
@@ -334,6 +353,49 @@ describe("play loop", () => {
 
   it("rejects unknown tactics in allow", async () => {
     await expect(play({ action: "play", goal: "g", allow: ["fly"] }, fakeGame([]).env)).rejects.toThrow(/unknown play tactic/);
+  });
+});
+
+describe("fight results", () => {
+  it("counts the player's kills from the death log, else what the fight struck that is gone", () => {
+    const struck = new Map<string, Struck>([
+      ["a", { typeId: "minecraft:husk", health: { current: 2, max: 20 } }],
+      ["b", { typeId: "minecraft:husk", health: { current: 6, max: 20 } }],
+      ["c", { typeId: "minecraft:creeper", health: { current: 20, max: 20 } }],
+      ["d", { typeId: "minecraft:zombie" }],
+    ]);
+    // Husk a died of the last blow before the fight turned to husk b; the creeper blew up.
+    const deaths: Death[] = [
+      { tick: 5, id: "a", typeId: "minecraft:husk", killer: "minecraft:player" },
+      { tick: 9, id: "b", typeId: "minecraft:husk", killer: "minecraft:player" },
+      { tick: 9, id: "c", typeId: "minecraft:creeper", cause: "entityExplosion" },
+    ];
+    expect(fightKills(deaths, struck, new Set())).toEqual({ husk: 2 });
+    expect(fightKills(undefined, struck, new Set(["a", "b", "c"]))).toEqual({ husk: 2 });
+    expect(fightKills(undefined, struck, new Set(["a", "b", "c", "d"]))).toEqual({ husk: 2, zombie: 1 });
+  });
+
+  it("reports kills from the helper's death log since the fight started, and every swing as a hit or a miss", async () => {
+    const game = fakeGame([mob("-41", "zombie", 0, 2.5), mob("-42", "zombie", 0, 2.8)], me(), 20, true);
+    // Killed before the fight: not its kill.
+    game.logDeath({ id: "-40", typeId: "minecraft:zombie", killer: "minecraft:player" });
+    const r = await game.env.controller.run({ action: "fight", timeoutMs: 10_000 });
+    expect(r.fight).toMatchObject({ kills: { zombie: 2 }, hits: 2, hitsTaken: 0, damageTaken: 0 });
+    expect(r.fight?.swings).toBe(game.clicks.length);
+    expect((r.fight?.hits ?? 0) + (r.fight?.misses ?? 0)).toBe(r.fight?.swings);
+    expect(r.message).toMatch(/^killed 2 zombie with iron_sword: /);
+  });
+
+  it("keeps tracing on across resetStats, capped at MAX_TRACE_FRAMES", () => {
+    const pc = fakeGame([]).env.controller;
+    const frame: Omit<TraceFrame, "t"> = { x: 0, z: 0, onGround: true, mobs: [], foot: "hold", plan: "wait", readyMs: 0, shield: false, aimErr: 0, aimTol: 5, fwd: 0, strafe: 0, sprint: false };
+    expect(combatStats(pc).trace).toBeUndefined();
+    traceFights(pc, true);
+    for (let i = 0; i < MAX_TRACE_FRAMES + 5; i++) traceFrame(combatStats(pc), pc.hands.now(), frame);
+    expect(combatStats(pc).trace).toHaveLength(MAX_TRACE_FRAMES);
+    expect(resetStats(pc).trace).toEqual([]);
+    traceFights(pc, false);
+    expect(resetStats(pc).trace).toBeUndefined();
   });
 });
 

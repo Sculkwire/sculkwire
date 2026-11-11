@@ -144,9 +144,12 @@ export function scoreTactics(map: ThreatMap, goal: Goal, ctx: ScoreContext = {})
   return out.sort((a, b) => b.score - a.score);
 }
 
-/** Identity of a tactic: kind and target. */
+/**
+ * Identity of a tactic: kind and target. A fight is one: it moves from mob to mob by itself, so a better-scored target
+ * does not restart it.
+ */
 export function tacticKey(t: { kind: TacticKind; target?: { id: string } }): string {
-  return t.target ? `${t.kind}:${t.target.id}` : t.kind;
+  return t.target && t.kind !== "fight" ? `${t.kind}:${t.target.id}` : t.kind;
 }
 
 /** The best tactic, but the running one stays while it is still offered and within `HYSTERESIS` of the best. */

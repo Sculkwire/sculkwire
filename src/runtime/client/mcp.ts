@@ -7,12 +7,14 @@ import { z } from "zod";
 import { formatDiagnostic, summarize, type Diagnostic } from "../../core/diagnostic.ts";
 import { dataDir } from "../../core/paths.ts";
 import { onShutdown } from "../../core/shutdown.ts";
-import { bridge, type BridgeStatus } from "./bridge.ts";
+import { bridge, WORLD_WAIT_MAX_S, WORLD_WAIT_MS, type BridgeStatus } from "./bridge.ts";
 import { inputProvider } from "./inputprovider.ts";
 import { engine, type EngineResult } from "../engine/engine.ts";
 import { type EntityInfo, type Loadout, type PlayerAction } from "./player.ts";
 import { play, PLAY_DEFAULT_DURATION_MS, PLAY_DEFAULT_STEP_MS, PLAY_MAX_DURATION_MS, type Death, type PlayAction, type PlayResult } from "./skills/play.ts";
 import { TACTICS } from "./skills/tactics.ts";
+import { STANCES } from "./skills/pack.ts";
+import type { FightStats } from "./skills/types.ts";
 import { pauseOnTakeover, playJobs, runActions, stepText, type PlayJobInfo } from "./jobs.ts";
 import { DIFFICULTIES, type Difficulty } from "./world.ts";
 import { FOREGROUND_MESSAGE } from "./windows.ts";
@@ -146,7 +148,7 @@ function statusText(s: BridgeStatus): string {
   return parts.join("; ");
 }
 
-type ActionResultOut = { action: string; ok: boolean; message: string; durationMs: number; input?: "engine" | "keyboard" };
+type ActionResultOut = { action: string; ok: boolean; message: string; durationMs: number; input?: "engine" | "keyboard"; fight?: FightStats };
 type Extra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
 /** Longest a `player_job wait` blocks, under the 30 s many MCP clients allow one call. */
@@ -168,7 +170,7 @@ function playText(p: PlayResult): string {
   const lines = [
     `play stopped by ${p.stoppedBy} after ${p.steps} tactic(s) in ${(p.durationMs / 1000).toFixed(1)} s: ${p.message}`,
     `goal (${p.goalCheck.kind}): ${p.goalCheck.progress}`,
-    `kills ${s.kills}${killed ? ` (${killed})` : ""}, hits ${s.hits} (${s.crits} critical) of ${s.swings} swings, damage taken ${s.damageTaken}, deaths ${s.deaths}${s.health !== undefined ? `, health ${s.health}` : ""}`,
+    `kills ${s.kills}${killed ? ` (${killed})` : ""}, hits ${s.hits} (${s.crits} critical) and ${s.misses} misses of ${s.swings} swings, took ${s.hitsTaken} hits for ${s.damageTaken} damage, blocked ${s.blocked}, deaths ${s.deaths}${s.health !== undefined ? `, health ${s.health}` : ""}`,
     `${s.decisions} decisions`,
   ];
   for (const t of p.trace.slice(-5)) lines.push(`  ${stepText(t)}`);
@@ -214,11 +216,14 @@ export function register(server: McpServer): void {
         "in the foreground and stops when the user switches away. Only " +
         "the chosen install's game is managed, so a game the user plays from another launcher is left alone. A Regolith " +
         "project whose profile runs filters is built with rgl first and the built packs are deployed. The result lists " +
-        "each deployed pack folder and its absolute path. Returns once the world is loaded, in 1-2 minutes. If the world " +
+        "each deployed pack folder and its absolute path. Returns once the world is loaded, in 1-2 minutes (the call " +
+        "blocks for the whole wait). If the world " +
         "join races Microsoft sign-in and the game stops on \"You need to authenticate to Microsoft services\", it " +
         "walks the menus back into the test world without relaunching, and game_status reports joinRecovery. When sculkwire " +
         "cannot start the game itself it returns right away with manualSteps for the user, and game_status shows when " +
-        "the game is ready.",
+        "the game is ready. When the world does not load within worldWaitSeconds the game is stopped, unless " +
+        "keepOnTimeout is set: then the result is not ready, manualSteps says how to enter the world, and game_status " +
+        "turns ready once it is in.",
       inputSchema: {
         project: z.string().optional().describe("Add-on project or pack directory to activate in the world. A Regolith project whose profile runs filters is built with rgl and its built packs are deployed"),
         deploy: z.boolean().optional().describe("Copy the project's packs into development_*_packs, also over the project's sculkwire_* folder an earlier launch left. Default true. Packs rgl already exported are reused, but a fresh rgl build is always deployed. Off: only folders that already serve a pack's uuid are used"),
@@ -236,6 +241,17 @@ export function register(server: McpServer): void {
         width: z.number().int().min(320).max(3840).optional(),
         height: z.number().int().min(240).max(2160).optional(),
         fps: z.number().int().min(10).max(240).optional().describe("Frame rate in window and headless modes (default 60)"),
+        worldWaitSeconds: z
+          .number()
+          .int()
+          .min(10)
+          .max(WORLD_WAIT_MAX_S)
+          .optional()
+          .describe(`How long to wait for the game to start, and then for the world to load (seconds each; default ${WORLD_WAIT_MS / 1000}, at most ${WORLD_WAIT_MAX_S}). The call blocks that long at most`),
+        keepOnTimeout: z
+          .boolean()
+          .optional()
+          .describe("When the wait runs out, keep the game running and return a not-ready status with the step to enter the world (Play, then the test world) instead of stopping the game; sculkwire keeps waiting for 30 min and game_status turns ready once the world is in. Default false"),
       },
       outputSchema: statusSchema,
     },
@@ -253,6 +269,8 @@ export function register(server: McpServer): void {
           ...(a.width ? { width: a.width } : {}),
           ...(a.height ? { height: a.height } : {}),
           ...(a.fps ? { fps: a.fps } : {}),
+          ...(a.worldWaitSeconds ? { timeoutMs: a.worldWaitSeconds * 1000 } : {}),
+          ...(a.keepOnTimeout ? { keepOnTimeout: true } : {}),
         });
         return ok(statusText(s), s);
       } catch (err) {
@@ -555,6 +573,10 @@ export function register(server: McpServer): void {
       all: z.boolean().optional().describe("Go on to the next hostile (of the type) after a kill. Default true unless target is an id"),
       radius: z.number().min(1).max(64).optional().describe("Only targets within this many blocks (default 16)"),
       crits: z.boolean().optional().describe("Jump for critical hits (default true)"),
+      stance: z
+        .enum(STANCES)
+        .optional()
+        .describe("Shield against melee mobs: auto (default) is footwork, with the shield only when boxed in (under 1 block of free run behind); kite never raises it; guard keeps it up with a melee mob within about 3.6 blocks, strikes in the window after a block and steps out when no window opens"),
       timeoutMs: z.number().int().min(500).max(300_000).optional().describe("Default 60000"),
     }),
     z.object({
@@ -584,6 +606,7 @@ export function register(server: McpServer): void {
         .array(z.enum(TACTICS))
         .optional()
         .describe(`Tactics play may use, from ${TACTICS.join(", ")}. Default all. idle is always allowed`),
+      stance: z.enum(STANCES).optional().describe("The fights' shield stance, as fight's stance (default auto)"),
     }),
   ]);
 
@@ -598,9 +621,14 @@ export function register(server: McpServer): void {
         "attack (walks into range first), shoot a projectile at a moving entity (leads it along the ballistic arc " +
         "and reports hit or miss from the game's impact log), use or " +
         "mine with the held item, change hotbar slot, jump, sneak, hold keys. Skills run whole behaviors: fight " +
-        "(melee with the best weapon, keeps reach, sprint-hits with a W-tap, jumps for critical hits, strafes, backs " +
-        "off from a creeper about to blow, then takes the next hostile), flee (sprints away from threats), eat (best " +
-        "food in the hotbar) and use_on (hits each entity of a type once with the held item). " +
+        "(melee with the best weapon in one loop over a whole group: it waits for chasing mobs at the edge of reach " +
+        "instead of walking into them, strikes whichever mob in reach can take a hit, gives ground whenever a mob would " +
+        "get it in reach, and when boxed in (under 1 block of free run behind) raises the shield 400 ms " +
+        "before the attack due by that mob's attack clock and strikes only in the window after a block (stance auto, kite or guard), " +
+        "jumps in place for critical hits, backs off from a creeper about to blow, then takes the next hostile; its result " +
+        "counts kills by type, swings, hits, misses, critical hits, hits taken, damage taken, hits blocked and the time), " +
+        "flee (sprints away from threats), eat (best food in the hotbar) and use_on (hits each entity of a type once with " +
+        "the held item). " +
         "Pass several actions to run them in order in one call; it " +
         "stops at the first failure unless continueOnError. Returns each action's result and the player's final state. " +
         "Input goes as keyboard and mouse: on Linux into gamescope's own display (xdotool), on Windows through the " +
@@ -617,12 +645,13 @@ export function register(server: McpServer): void {
         "stops with \"the user took control (F9)\" and a play job pauses until F9 gives control back or player_job stop. " +
         "The `play` action pursues a goal on its own: every 250 ms it reads a threat map (hostile mobs, their " +
         "distance, speed and creeper fuses, plus health, food, armor, weapon and food in the hotbar), checks the goal " +
-        "and picks a tactic (fight a mob, flee, eat, goto, use the held item on a mob, idle) with built-in scores. " +
+        "and picks a tactic (fight, flee, eat, goto, use the held item on a mob, idle) with built-in scores; a fight " +
+        "is one continuing step that moves from mob to mob by itself. " +
         "Kill goals (kill N of a type, kill every hostile near), reach goals and hit-every-X goals are checked against " +
         "the game and end the run when met; any other goal cannot be verified, so it runs until the time limit " +
         "(durationMs). `play` runs in the background and the call returns at once with a job id. " +
-        "Follow it with player_job (status, wait, stop), which returns the stop reason, kills, hits, critical hits, " +
-        "damage taken and a trace of every tactic once it ends. `play` must be the last action. Only one play job runs at a time, a new one " +
+        "Follow it with player_job (status, wait, stop), which returns the stop reason, kills, hits, misses, critical hits, " +
+        "hits taken, damage taken, hits blocked and a trace of every tactic once it ends. `play` must be the last action. Only one play job runs at a time, a new one " +
         "stops the old one, and other actions are refused while one runs. The keyboard route needs game_launch with " +
         "display window or headless on Linux, or any display on Windows; with the in-game agent attached, the engine " +
         "route also drives a Linux desktop-mode game (input auto or engine; keyboard is refused there).",
@@ -635,7 +664,29 @@ export function register(server: McpServer): void {
           .describe("Input route. auto (default): the engine route (the attached in-game agent, or an extension's input provider) when it answers, else keyboard and mouse. engine fails when no provider can be used"),
       },
       outputSchema: {
-        results: z.array(z.object({ action: z.string(), ok: z.boolean(), message: z.string(), durationMs: z.number(), input: z.enum(["engine", "keyboard"]).optional() })),
+        results: z.array(
+          z.object({
+            action: z.string(),
+            ok: z.boolean(),
+            message: z.string(),
+            durationMs: z.number(),
+            input: z.enum(["engine", "keyboard"]).optional(),
+            fight: z
+              .object({
+                kills: z.record(z.string(), z.number()).describe("Short mob type -> kills by the player"),
+                swings: z.number(),
+                hits: z.number(),
+                misses: z.number().describe("Swings that struck nothing"),
+                crits: z.number(),
+                hitsTaken: z.number().describe("Health drops the fight saw"),
+                damageTaken: z.number(),
+                blocked: z.number().describe("Hits the raised shield took (needs the helper's off-hand durability reading)"),
+                timeMs: z.number(),
+              })
+              .optional()
+              .describe("fight only: what this fight did"),
+          }),
+        ),
         state: playerStateSchema,
         job: z.string().optional().describe("Id of the play job this call started"),
         status: z.literal("running").optional(),

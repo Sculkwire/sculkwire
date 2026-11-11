@@ -22,15 +22,19 @@ const SWITCH_CLOSER = 0.8;
 /** A mob this close while the player is getting hurt is the one hitting: switch to it. */
 const HITTING_RANGE = 2.5;
 /** No crits with another mob this close: the jump lets it hit freely. */
-export const ISOLATED_RADIUS = 4;
+export const ISOLATED_RADIUS = 4.5;
 /** A creeper this close comes first: only the creeper footwork keeps its fuse from finishing. */
 export const CREEPER_FIRST = 5;
+/** A creeper target is kept this much farther out than `CREEPER_FIRST` takes one. */
+const CREEPER_HOLD_MARGIN = 0.5;
+/** An unlit creeper this much farther than the nearest other mob is behind it: that one is fought first. */
+const BEHIND_MARGIN = 1;
 /** A creeper target is kept while it is this close, even with others nearer (its fuse burns until the player is past 7). */
 const CREEPER_KEEP = 7.5;
 
 /**
- * The mob to fight now: a creeper within `CREEPER_FIRST` (or one whose fuse burns, `lit`, within `CREEPER_KEEP`)
- * before anything else, a creeper target kept as long; else the current target, unless another is clearly closer,
+ * The mob to fight now: a creeper within `CREEPER_FIRST` with no other mob a block or more nearer (or one whose fuse
+ * burns, `lit`, within `CREEPER_KEEP`) before anything else, a creeper target kept as long; else the current target, unless another is clearly closer,
  * or the player is getting hurt and another is within hitting range and closer than the target. An unlit creeper
  * farther out is not kept: backing off from the zombies in front of it would never end.
  */
@@ -38,8 +42,12 @@ export function pickDuelTarget(me: Vec3, currentId: string, mobs: readonly Mob[]
   const dist = (m: Mob) => horizontalDistance(me, m.location);
   const current = mobs.find((m) => m.id === currentId);
   const creeper = (m: Mob) => m.typeId === "minecraft:creeper";
-  const first = (m: Mob) => creeper(m) && dist(m) < (lit.has(m.id) ? CREEPER_KEEP : CREEPER_FIRST);
-  if (current && first(current)) return currentId;
+  // An unlit creeper with another mob a block or more nearer waits its turn: that one is struck first (the creeper
+  // footwork cannot strike the mobs in front of it), and the creeper comes first once it is the nearest or lit.
+  const nearestOther = Math.min(...mobs.filter((m) => !creeper(m)).map(dist), Number.POSITIVE_INFINITY);
+  const first = (m: Mob, margin = 0) => creeper(m) && (lit.has(m.id) ? dist(m) < CREEPER_KEEP : dist(m) < CREEPER_FIRST + margin && dist(m) < nearestOther + BEHIND_MARGIN);
+  // A creeper target is kept a little farther than one is taken, so the choice does not flip at the edge.
+  if (current && first(current, CREEPER_HOLD_MARGIN)) return currentId;
   const near = mobs.filter(first).sort((a, b) => dist(a) - dist(b))[0];
   if (near) return near.id;
   const closest = [...mobs].sort((a, b) => dist(a) - dist(b))[0];

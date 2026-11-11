@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clearRun, creeperLit, creeperMove, critSafe, crowdedCreeper, escapeMs, findCover, type FuseMemory, lineBlocked, openHeading, readyInMs, SHIELD_RAISE_MS, shouldBlock, spacing, spiderAirborne, trackFuse, untilMobHitMs, weaveDeg, whoHit } from "./defense.ts";
+import { clearRun, closeInTicks, creeperLightDist, creeperLit, creeperMove, creeperStand, critSafe, crowdedCreeper, findCover, type FuseMemory, lineBlocked, openHeading, readyInMs, spiderAirborne, trackFuse, untilMobHitMs, weaveDeg } from "./defense.ts";
 import { pickDuelTarget } from "./crowd.ts";
 import { bowSlot, hasShield } from "./items.ts";
 import { HIT_COOLDOWN_MS } from "./melee.ts";
@@ -18,28 +18,6 @@ describe("swing timing", () => {
   });
 });
 
-describe("spacing", () => {
-  const zombie = { mobReach: 2, closing: 2.3 };
-  it("steps back out of a zombie's reach while the swing cools down", () => {
-    expect(spacing({ ...zombie, dist: 2.2, readyInMs: 400 })).toBe("retreat");
-    // It would be in reach before the swing is ready.
-    expect(spacing({ ...zombie, dist: 2.9, readyInMs: 450 })).toBe("retreat");
-  });
-  it("holds when the swing will be ready before the zombie gets in", () => {
-    expect(spacing({ ...zombie, dist: 3.4, readyInMs: 200 })).toBe("hold");
-  });
-  it("steps in to the edge of reach once the swing is ready, and holds there", () => {
-    expect(spacing({ ...zombie, dist: 3.6, readyInMs: 0 })).toBe("advance");
-    expect(spacing({ ...zombie, dist: 2.7, readyInMs: 0 })).toBe("hold");
-    expect(spacing({ ...zombie, dist: 3.6, readyInMs: 100 })).toBe("advance");
-  });
-  it("stands inside the reach of a zombie that has just attacked, until its 1 s cooldown is nearly over", () => {
-    expect(spacing({ ...zombie, dist: 1.8, readyInMs: 300, mobCoolMs: 800 })).toBe("hold");
-    expect(spacing({ ...zombie, dist: 1.8, readyInMs: 300, mobCoolMs: 350 })).toBe("retreat");
-    expect(spacing({ ...zombie, dist: 2.6, readyInMs: 450, mobCoolMs: 700 })).toBe("hold");
-  });
-});
-
 describe("box reach", () => {
   it("matches melee_box_attack: the mob's box grown 0.8 on x and z against the player's", () => {
     expect(boxReach(0.6)).toBeCloseTo(1.4);
@@ -55,56 +33,53 @@ describe("box reach", () => {
     // No box: the plain range.
     expect(meleeReach(mobInfo("phantom"), 1, 1)).toBe(2);
   });
-  it("credits a hit to the one melee mob whose reach covers the player, and to none when several could have", () => {
-    expect(whoHit([{ id: "a", dist: 1.5, mobReach: 1.4 }, { id: "b", dist: 3, mobReach: 1.4 }])).toBe("a");
-    expect(whoHit([{ id: "a", dist: 1.5, mobReach: 1.4 }, { id: "b", dist: 1.6, mobReach: 1.98 }])).toBeUndefined();
-    expect(whoHit([{ id: "a", dist: 2.5, mobReach: 1.4 }])).toBeUndefined();
-  });
 });
-
-describe("shield timing", () => {
-  it("never blocks without a shield", () => {
-    expect(shouldBlock({ hasShield: false, readyInMs: 400, melee: { dist: 1.5, mobReach: 2, closing: 2 } })).toBe(false);
-  });
-  it("blocks a mob in reach only when the player cannot back off, and lowers it for a ready swing", () => {
-    expect(shouldBlock({ hasShield: true, readyInMs: 400, cornered: true, melee: { dist: 1.8, mobReach: 2, closing: 2 } })).toBe(true);
-    // Backing off beats blocking: the shield comes up too late and sneaking is slower than a zombie.
-    expect(shouldBlock({ hasShield: true, readyInMs: 400, melee: { dist: 1.8, mobReach: 2, closing: 2 } })).toBe(false);
-    expect(shouldBlock({ hasShield: true, readyInMs: 100, cornered: true, melee: { dist: 1.8, mobReach: 2, closing: 2 } })).toBe(false);
-    expect(shouldBlock({ hasShield: true, readyInMs: 400, cornered: true, melee: { dist: 3.5, mobReach: 2, closing: 2 } })).toBe(false);
-  });
-  it("blocks a mob about to reach a cornered player", () => {
-    expect(shouldBlock({ hasShield: true, readyInMs: 400, cornered: true, melee: { dist: 2.4, mobReach: 2, closing: 2.5 } })).toBe(true);
-    expect(shouldBlock({ hasShield: true, readyInMs: 400, melee: { dist: 2.4, mobReach: 2, closing: 2.5 } })).toBe(false);
-  });
-  it("does not block a mob beside or behind the player (the shield covers the front half), one still cooling down, or an axe", () => {
-    const m = { dist: 1.8, mobReach: 2, closing: 2 };
-    expect(shouldBlock({ hasShield: true, readyInMs: 400, cornered: true, melee: { ...m, offViewDeg: 40 } })).toBe(true);
-    expect(shouldBlock({ hasShield: true, readyInMs: 400, cornered: true, melee: { ...m, offViewDeg: 120 } })).toBe(false);
-    expect(shouldBlock({ hasShield: true, readyInMs: 400, cornered: true, melee: { ...m, coolMs: 700 } })).toBe(false);
-    expect(shouldBlock({ hasShield: true, readyInMs: 400, cornered: true, melee: { ...m, axe: true } })).toBe(false);
-    expect(mobInfo("vindicator").axe).toBe(true);
-  });
-  it("blocks a creeper blast that comes before the player is out of range", () => {
-    const dist = 3;
-    const need = escapeMs(dist);
-    expect(shouldBlock({ hasShield: true, readyInMs: 0, creeper: { fuseLeftMs: need + SHIELD_RAISE_MS - 10, dist } })).toBe(true);
-    expect(shouldBlock({ hasShield: true, readyInMs: 0, creeper: { fuseLeftMs: need + SHIELD_RAISE_MS + 200, dist } })).toBe(false);
-    expect(shouldBlock({ hasShield: true, readyInMs: 0, creeper: { fuseLeftMs: 100, dist: 7 } })).toBe(false);
-  });
-});
-
 describe("creeper fuse reaction", () => {
   const base = { lit: false, fuseMs: 0, readyInMs: 0, hasShield: true };
-  it("strikes from the edge of reach and backs off while the swing cools down", () => {
-    expect(creeperMove({ ...base, dist: 3.1 })).toBe("strike");
-    expect(creeperMove({ ...base, dist: 3.1, readyInMs: 400 })).toBe("retreat");
+  it("strikes inside the measured 3.0 reach, steps in to a standing creeper just beyond it, and backs off while the swing cools down", () => {
+    // Unlit and standing: ready / cooling at 2.9, 3.05, 3.2, 3.5.
+    const standing = [2.9, 3.05, 3.2, 3.5].map((dist) => [creeperMove({ ...base, dist }), creeperMove({ ...base, dist, readyInMs: 400 })]);
+    expect(standing).toEqual([
+      ["strike", "retreat"],
+      ["step", "retreat"],
+      ["step", "retreat"],
+      ["approach", "retreat"],
+    ]);
+    // Walking in at 2.5 blocks a second: met standing still, struck once inside reach, never stepped to.
+    const walking = [2.9, 3.05, 3.2, 3.5].map((dist) => creeperMove({ ...base, dist, closing: 2.5 }));
+    expect(walking).toEqual(["strike", "approach", "approach", "approach"]);
     expect(creeperMove({ ...base, dist: 4.5, readyInMs: 400 })).toBe("hold");
     expect(creeperMove({ ...base, dist: 6 })).toBe("approach");
-    // Walking in at 2.5 blocks a second, it is struck a tick early (the streamed reading is already current).
-    expect(creeperMove({ ...base, dist: 3.3 })).toBe("approach");
-    expect(creeperMove({ ...base, dist: 3.3, closing: 2.5 })).toBe("strike");
-    expect(creeperMove({ ...base, dist: 3.5, closing: 2.5 })).toBe("approach");
+  });
+  it("strikes or closes in to a burning creeper while a hit still leaves time for the run", () => {
+    // Lit 200 ms ago and standing: ready / cooling at 2.9, 3.05, 3.2, 3.5 (the close-in covers up to 0.45).
+    const lit = [2.9, 3.05, 3.2, 3.5].map((dist) => [creeperMove({ ...base, lit: true, fuseMs: 200, dist }), creeperMove({ ...base, lit: true, fuseMs: 200, dist, readyInMs: 400 })]);
+    expect(lit).toEqual([
+      ["strike", "run"],
+      ["step", "run"],
+      ["step", "run"],
+      ["run", "run"],
+    ]);
+    // Still slowing: judged by where it will stand. Coming in on a diagonal it lights at about 3.35 and stands at about
+    // 3.15, outside reach: close in while it slows. Along an axis it stands at 2.9: wait for it standing.
+    expect(creeperMove({ ...base, lit: true, fuseMs: 50, dist: 3.3, closing: 1.4, stand: creeperStand(0.7, 0.7) })).toBe("step");
+    expect(creeperMove({ ...base, lit: true, fuseMs: 50, dist: 3.05, closing: 1.4, stand: creeperStand(0, 1) })).toBe("strike");
+    // A swing while a hit leaves time to get out (a struck creeper is past 7 about 0.8 s after the hit, plus the input
+    // latency): 500 ms burned leaves 1000; 650 burned (850 left) no longer.
+    expect(creeperMove({ ...base, lit: true, fuseMs: 500, dist: 2.9 })).toBe("strike");
+    expect(creeperMove({ ...base, lit: true, fuseMs: 650, dist: 2.9 })).not.toBe("strike");
+    // A mob passing through the line is waited out while the fuse allows the strike, and once the escape was chosen on
+    // this fuse it stays the decision.
+    expect(creeperMove({ ...base, lit: true, fuseMs: 300, dist: 2.9, lineBlocked: true, committed: true })).toBe("strike");
+    expect(creeperMove({ ...base, lit: true, fuseMs: 300, dist: 2.9, lineBlocked: true })).toBe("strike");
+    expect(creeperMove({ ...base, lit: true, fuseMs: 300, dist: 3.6, lineBlocked: true })).toBe("run");
+    expect(creeperMove({ ...base, lit: true, fuseMs: 300, dist: 2.9, running: true })).toBe("run");
+  });
+  it("lights by the box gap: about 3.1 along an axis, about 3.35 on a diagonal; a close-in takes 1 to 3 ticks", () => {
+    expect(creeperLightDist(0, 3)).toBeCloseTo(3.1, 2);
+    expect(creeperLightDist(3, 3)).toBeCloseTo(3.34, 1);
+    expect(creeperLightDist(0.6, 0.8)).toBeCloseTo(3.34, 1);
+    expect([0.05, 0.11, 0.2, 0.27, 0.4, 0.6].map(closeInTicks)).toEqual([1, 1, 2, 2, 3, 3]);
   });
   it("strikes an unlit creeper that got close instead of backing off, and backs off only while the swing cools down", () => {
     expect(creeperMove({ ...base, dist: 2.6 })).toBe("strike");
@@ -193,6 +168,11 @@ describe("creeper fuse reaction", () => {
     expect(creeperMove({ ...base, dist: 3, lit: true, fuseMs: 400, readyInMs: 400 })).toBe("run");
     expect(creeperMove({ ...base, dist: 3, lit: true, fuseMs: 900 })).toBe("block");
     expect(creeperMove({ ...base, dist: 2.4, lit: true, fuseMs: 1200 })).toBe("block");
+    // Just struck at 2.24 (live): thrown about 2 farther, so with room behind the backward walk is in time; without the
+    // hit, or with a wall behind and the turn to make, the shield.
+    expect(creeperMove({ ...base, dist: 2.24, lit: true, fuseMs: 500, readyInMs: 400, struckAgoMs: 100 })).toBe("run");
+    expect(creeperMove({ ...base, dist: 2.24, lit: true, fuseMs: 900, readyInMs: 400, struckAgoMs: 100, roomBehind: 1 })).toBe("block");
+    expect(creeperMove({ ...base, dist: 2.24, lit: true, fuseMs: 900, readyInMs: 400 })).toBe("block");
     expect(creeperMove({ ...base, hasShield: false, dist: 2.4, lit: true, fuseMs: 1200 })).toBe("run");
     expect(creeperMove({ ...base, dist: 7.4, lit: true, fuseMs: 1200 })).toBe("hold");
     // Out of the blast's reach but not yet out of the fuse's: keep running, no shield.
@@ -247,12 +227,15 @@ describe("archers and spiders", () => {
 
 describe("creeper first", () => {
   const at = (x: number, z: number) => ({ x, y: 0, z });
-  it("turns to a creeper within 5 blocks before a nearer zombie, and keeps a creeper target while it is close", () => {
+  it("turns to a creeper within 5 blocks before a zombie, unless the zombie is a block nearer; keeps a creeper target while it is close", () => {
     const mobs = [
       { id: "z", typeId: "minecraft:zombie", location: at(0, 2) },
       { id: "c", typeId: "minecraft:creeper", location: at(3, 3) },
     ];
-    expect(pickDuelTarget(at(0, 0), "z", mobs, false)).toBe("c");
+    // The zombie 2 blocks out, the creeper 4.2 behind it: the zombie first, the creeper once it is lit or as near.
+    expect(pickDuelTarget(at(0, 0), "z", mobs, false)).toBe("z");
+    expect(pickDuelTarget(at(0, 0), "z", mobs, false, new Set(["c"]))).toBe("c");
+    expect(pickDuelTarget(at(0, 0), "z", [mobs[0] as (typeof mobs)[0], { ...(mobs[1] as (typeof mobs)[1]), location: at(1, 2.5) }], false)).toBe("c");
     // A burning creeper target is kept out to 7.5 blocks; an unlit one at 6 gives way to the zombie hitting the player.
     const six = [mobs[0] as (typeof mobs)[0], { ...(mobs[1] as (typeof mobs)[1]), location: at(0, 6) }];
     expect(pickDuelTarget(at(0, 0), "c", six, true, new Set(["c"]))).toBe("c");

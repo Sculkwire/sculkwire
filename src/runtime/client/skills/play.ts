@@ -5,9 +5,10 @@
  */
 import { setTimeout as sleep } from "node:timers/promises";
 import type { ActionResult, EntityInfo, Loadout, PlayerAction, PlayerController, PlayerState } from "../player.ts";
+import type { Stance } from "./pack.ts";
 import { checkGoal, parseGoal, type Goal, type GoalCheck } from "./goal.ts";
 import { shortType } from "./mobs.ts";
-import { logEvent, resetStats, type CombatStats } from "./stats.ts";
+import { fightText, logEvent, resetStats, type CombatStats } from "./stats.ts";
 import { chooseTactic, RECOVERED_HEALTH, scoreTactics, TACTICS, tacticKey, type Tactic, type TacticKind } from "./tactics.ts";
 import { THREAT_RADIUS, ThreatTracker, type ThreatMap } from "./threat.ts";
 
@@ -19,6 +20,8 @@ export interface PlayAction {
   stepMs?: number;
   /** Tactics the loop may use (default all). `idle` is always in. */
   allow?: string[];
+  /** The fights' shield stance (`fight`'s `stance`, default `auto`). */
+  stance?: Stance;
 }
 
 /** One entity death the helper recorded (`deaths` query). */
@@ -74,8 +77,14 @@ export interface PlayStats {
   killed: Record<string, number>;
   swings: number;
   hits: number;
+  /** Swings that struck nothing. */
+  misses: number;
   crits: number;
+  /** Health drops the loop saw (a few hits within one decision step count once). */
+  hitsTaken: number;
   damageTaken: number;
+  /** Hits the raised shield took during the run's fights. */
+  blocked: number;
   deaths: number;
   health?: number;
 }
@@ -104,12 +113,15 @@ function round(n: number, digits = 1): string {
   return n.toFixed(digits).replace(/\.0+$/, "");
 }
 
-/** The controller action that carries a tactic out. */
-export function tacticAction(t: Tactic, goal: Goal, stepMs: number, timeLeftMs: number): PlayerAction {
+/**
+ * The controller action that carries a tactic out. A fight is one continuing action: it starts on the tactic's target
+ * and moves on to the next hostile by itself (`all`), choosing whom to strike tick by tick.
+ */
+export function tacticAction(t: Tactic, goal: Goal, stepMs: number, timeLeftMs: number, stance?: Stance): PlayerAction {
   const left = Math.max(1000, timeLeftMs);
   switch (t.kind) {
     case "fight":
-      return { action: "fight", ...(t.target ? { target: t.target.id } : {}), all: false, timeoutMs: left };
+      return { action: "fight", ...(t.target ? { target: t.target.id } : {}), all: true, ...(stance ? { stance } : {}), timeoutMs: left };
     case "flee":
       return t.target?.info.kind === "exploder"
         ? { action: "flee", from: t.target.id, distance: 7, timeoutMs: Math.min(left, 4000) }
@@ -164,6 +176,7 @@ export async function play(spec: PlayAction, env: PlayEnvironment, options: { si
   let steps = 0;
   let decisions = 0;
   let damageTaken = 0;
+  let hitsTaken = 0;
   let deaths = 0;
   let lastHealth: number | undefined;
   let loadout: Loadout | undefined;
@@ -188,7 +201,8 @@ export async function play(spec: PlayAction, env: PlayEnvironment, options: { si
     running = undefined;
     if (!r.result) r.ctrl.abort();
     const result = await r.promise;
-    const text = why && result.message === "cancelled" ? `preempted (${why})` : result.message;
+    // A preempted fight still says what it did.
+    const text = why && result.message === "cancelled" ? `preempted (${why})${result.fight ? `, ${fightText(result.fight)}` : ""}` : result.message;
     const step: PlayStep = { ...r.step, result: { ok: result.ok || result.message === "cancelled", message: text, durationMs: Date.now() - r.started } };
     steps++;
     trace.push(step);
@@ -219,6 +233,7 @@ export async function play(spec: PlayAction, env: PlayEnvironment, options: { si
       if (me.health !== undefined) {
         if (lastHealth !== undefined && me.health < lastHealth) lostNow = lastHealth - me.health;
         damageTaken += lostNow;
+        if (lostNow > 0) hitsTaken++;
         lastHealth = me.health;
         if (me.health <= 0) {
           deaths++;
@@ -255,7 +270,8 @@ export async function play(spec: PlayAction, env: PlayEnvironment, options: { si
       }
       if (running?.result) await finish();
       if (map.vitals.health >= RECOVERED_HEALTH) recovering = false;
-      const fighting = running?.step.action === "fight" ? running.step.target?.id : undefined;
+      // The running fight's current mob (it changes targets by itself), else the one it started on.
+      const fighting = running?.step.action === "fight" ? (stats.fighting ?? running.step.target?.id) : undefined;
       const scored = scoreTactics(map, goal, { usedOn: stats.usedOn, allowed, recovering, cornered: Date.now() < cornerUntil, ...(fighting ? { fighting } : {}) });
       decisions++;
       const tactic = chooseTactic(scored, running?.key);
@@ -270,14 +286,14 @@ export async function play(spec: PlayAction, env: PlayEnvironment, options: { si
           key,
           ctrl,
           started: Date.now(),
-          promise: c.run(tacticAction(t, goal, stepMs, deadline - Date.now()), signal),
+          promise: c.run(tacticAction(t, goal, stepMs, deadline - Date.now(), spec.stance), signal),
           step: {
             step: steps + 1,
             atMs: tickStarted - started,
             action: t.kind,
             ...(t.target ? { target: { key: t.target.key, id: t.target.id, typeId: t.target.typeId } } : {}),
             score: Math.round(t.score * 100) / 100,
-            reason: t.reason,
+            reason: t.kind === "fight" ? `${t.reason}; the fight moves on to the next hostile by itself` : t.reason,
           },
         };
         void r.promise.then((res) => {
@@ -321,8 +337,11 @@ export async function play(spec: PlayAction, env: PlayEnvironment, options: { si
       killed,
       swings: stats.swings,
       hits: stats.hits,
+      misses: stats.misses,
       crits: stats.crits,
+      hitsTaken,
       damageTaken: Math.round(damageTaken * 10) / 10,
+      blocked: stats.blocked,
       deaths,
       ...(state?.health !== undefined ? { health: state.health } : {}),
     },
