@@ -44,6 +44,7 @@ import { findInstall, optionsFiles, type ClientInstall } from "./install.ts";
 import {
   defaultMode,
   hasInput,
+  isAlive,
   launch,
   muteWindowsGame,
   playerInput,
@@ -153,6 +154,8 @@ export interface BridgeStatus {
   ready: boolean;
   /** What the agent or user must still do by hand. */
   manualSteps: string[];
+  /** The game process this launch found (`gamePid`) is gone, e.g. it crashed: game_stop cleans up, then game_launch. */
+  gameExited?: boolean;
   /** Problems the last deploy found, e.g. a pack not derived from the project that shares a deployed pack's uuid. */
   deployDiagnostics?: Diagnostic[];
   /** World joins that raced Microsoft sign-in and were recovered without the user (present once one happened). */
@@ -228,20 +231,31 @@ export class ClientBridge {
   /** The game frame's size from the newest screenshot: clicks are fractions of it. */
   #frame?: { width: number; height: number };
 
+  /** A game was launched and has not exited. Before its process is found (a user still starting it) it counts as running. */
   get running(): boolean {
-    return this.launchState !== undefined;
+    return this.launchState !== undefined && !this.#gameExited();
+  }
+
+  /** The game process found for this launch is gone (crash, closed by hand): checked on every read, never cached. */
+  #gameExited(): boolean {
+    const pid = this.launchState?.gamePid;
+    return pid !== undefined && !isAlive(pid);
   }
 
   status(): BridgeStatus {
+    const exited = this.#gameExited();
     const s: BridgeStatus = {
       running: this.running,
       packs: this.#packs.map((p) => ({ ...p })),
       debugger: { attached: !!this.#session && !this.#session.closed },
       connect: { clients: this.#connect?.clients().length ?? 0, ...(this.#connectMethod ? { method: this.#connectMethod } : {}) },
-      ready: this.#ready,
-      manualSteps: [...this.#manual],
+      ready: this.#ready && !exited,
+      manualSteps: exited
+        ? [`the game process (pid ${this.launchState?.gamePid}) exited: call game_stop to clean up, then game_launch`]
+        : [...this.#manual],
       ...(this.#deployDiagnostics.length ? { deployDiagnostics: [...this.#deployDiagnostics] } : {}),
     };
+    if (exited) s.gameExited = true;
     if (this.launchState) s.mode = this.launchState.mode;
     if (this.install?.version) s.version = this.install.version;
     if (this.install) s.install = this.install.label;
@@ -259,7 +273,11 @@ export class ClientBridge {
   }
 
   async start(opts: BridgeStartOptions = {}): Promise<BridgeStatus> {
-    if (this.running) throw new Error("the client bridge is already running; game_stop first");
+    if (this.launchState) {
+      if (this.running) throw new Error("the client bridge is already running; game_stop first");
+      // The game exited (crash) without game_stop: clean that launch up (listeners, options, deployed packs) first.
+      await this.stop();
+    }
     // A new game starts with no provider state: drop what the provider remembered of an earlier one.
     await inputProvider()?.stopped();
     const install = await findInstall();
@@ -601,6 +619,9 @@ export class ClientBridge {
   }
 
   #requireRunning(): void {
+    if (this.launchState && this.#gameExited()) {
+      throw new Error(`the game process (pid ${this.launchState.gamePid}) exited; call game_stop, then game_launch`);
+    }
     if (!this.running) throw new Error("no client running; call game_launch first");
   }
 

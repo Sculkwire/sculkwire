@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -5,6 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { TAG, readLevelDat, writeLevelDat, type NbtCompound } from "../bds/nbt.ts";
 import type { ClientInstall } from "../client/install.ts";
+import { bridge } from "../client/bridge.ts";
 import { levelDatRoot } from "../client/world.ts";
 import { EngineSession, type EngineResult, type WorldChange, type WorldState } from "./engine.ts";
 import { getWorldSettings, setWorldSettings } from "./world.ts";
@@ -208,6 +210,27 @@ describe("world settings guards", () => {
     world(install, "sculkwire-bridge", "sculkwire-bridge");
     const result = await setWorldSettings({ gamerules: { not_a_rule: true } }, "bridge", { install, session: detached(), loaded: none });
     expect(result).toMatchObject({ ok: false, message: expect.stringContaining("level.dat has no game rule not_a_rule") });
+  });
+
+  it("rewrites level.dat once the bridge's game process exited, and refuses while it runs", async () => {
+    const { install } = await fixture();
+    const dir = world(install, "sculkwire-bridge", "sculkwire-bridge");
+    const launch = { mode: "desktop" as const, startedAt: 0, pid: 0, argv: [], launchLog: "", notes: [] };
+    bridge.world = { levelId: "sculkwire-bridge", name: "sculkwire-bridge", dir };
+    try {
+      // The default `loaded` is the bridge's: a live game process holds the world.
+      bridge.launchState = { ...launch, gamePid: process.pid };
+      const refused = await setWorldSettings({ time: 1 }, undefined, { install, session: detached() });
+      expect(refused).toMatchObject({ ok: false, message: expect.stringContaining("is loaded by the running game") });
+      // A crashed game left its launch state behind: the world is free again.
+      bridge.launchState = { ...launch, gamePid: spawnSync(process.execPath, ["-e", ""]).pid };
+      const changed = await setWorldSettings({ time: 1 }, undefined, { install, session: detached() });
+      if (!changed.ok) throw new Error(changed.message);
+      expect(changed.value.settings.time).toBe(1);
+    } finally {
+      bridge.launchState = undefined;
+      bridge.world = undefined;
+    }
   });
 });
 

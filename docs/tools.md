@@ -269,6 +269,8 @@ If the world join races Microsoft sign-in (the game stops on "You need to authen
 
 Shows whether the game is running (`running`, `ready`), the display `mode`, the game `version`, the `install`, the `world`, the `project` and its `packs`, the script `debugger` and `/connect` state, `manualSteps` still to do by hand, `deployDiagnostics` (a `client.duplicate-pack-uuid` warning for each pack folder that is not a copy of the project but shares a deployed pack's uuid), and `joinRecovery` after a sign-in race (`attempts`, `recovered`, `via` with the presses, `log`, `screenshot`). Each pack entry gives the pack name, uuid, kind, the deployed folder, its absolute path, and whether it is rgl build output. A manifest name that is a lang key such as `pack.name` is shown as its value in the pack's `texts/en_US.lang`.
 
+`running` and `ready` follow the game process found for the launch, checked on every call: once it exits (a crash, or closed by hand) they turn false, `gameExited` is `true` and `manualSteps` says to call `game_stop` (which still cleans up the bridge, its options and deployed packs); `game_launch` does that cleanup itself. Until the process is found (a user still starting the game) `running` stays true and `ready` false.
+
 No inputs.
 
 ### game_command

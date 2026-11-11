@@ -50,6 +50,7 @@ const statusSchema = {
   connect: z.object({ clients: z.number(), port: z.number().optional(), method: z.enum(["automatic", "chat"]).optional() }),
   ready: z.boolean(),
   manualSteps: z.array(z.string()),
+  gameExited: z.boolean().optional(),
   deployDiagnostics: z.array(diagnosticSchema).optional(),
   joinRecovery: z
     .object({
@@ -118,6 +119,7 @@ async function inputThroughUi(a: {
 }
 
 function statusText(s: BridgeStatus): string {
+  if (s.gameExited) return `client not running: ${s.manualSteps.join("; ")}`;
   if (!s.running) return "client not running";
   const parts = [
     `${s.mode} client ${s.version ?? ""} in world ${s.world ?? "?"}`,
@@ -192,7 +194,8 @@ export function register(server: McpServer): void {
     shutdownHooked = true;
     onShutdown(async () => {
       await playJobs.stopAll("the MCP server is shutting down");
-      if (bridge.running) await bridge.stop();
+      // An exited game still has a launch to clean up (listeners, options, deployed packs).
+      if (bridge.launchState) await bridge.stop();
     });
   }
   server.registerTool(
