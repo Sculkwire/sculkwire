@@ -54,7 +54,7 @@ Paste this into your AI agent harness:
 Install the sculkwire MCP server: clone https://github.com/ve3dy/sculkwire.git and follow the "Agent Install" steps in its docs/install.md.
 ```
 
-The agent checks Node.js and git, runs the installer, registers sculkwire with itself and runs `sculk doctor`. It asks one optional question about a decision model (default None) and never asks for an API key.
+The agent checks Node.js and git, runs the installer, registers sculkwire with itself and runs `sculk doctor`. It asks one optional question about a decision model (default None).
 
 ### Install With a Script
 
