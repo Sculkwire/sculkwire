@@ -753,7 +753,7 @@ Controls game time. Give exactly one input. The result has `paused`, `ticks`, `s
 
 ### engine_screenshot
 
-Writes the next frame the game presents to `path` as a PNG and returns `path`, `bytes`, `format` (`png`) and the image. The picture is what the game window shows: the world, the HUD and any open screen. The in-game agent copies the frame itself, so the game shows no screenshot animation or toast, plays no sound and adds nothing to its gallery, and calls can follow each other at once. A game that presents no frame within 3 s (minimized) is a `timeout`.
+Writes the next frame the game presents to `path` as a PNG and returns `path`, `bytes`, `format` (`png`) and the image. The picture is what the game window shows: the world, the HUD and any open screen. The in-game agent copies the frame itself, so the game shows no screenshot animation or toast, plays no sound and adds nothing to its gallery, and calls can follow each other at once. The agent writes the PNG uncompressed (about 6 MB at 1920x1080), and sculkwire deflates it again before returning it, so the file and the image are a fraction of that. A game that presents no frame within 3 s (minimized) is a `timeout`.
 
 | Input | Description |
 |---|---|

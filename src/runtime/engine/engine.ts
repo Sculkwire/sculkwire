@@ -29,6 +29,7 @@ import { buildAgent, type AgentBuild } from "./build.ts";
 import { AgentClient, AgentClientError, AgentRpcError } from "./client.ts";
 import { injectClient, type InjectionResult } from "./inject.ts";
 import { InputLock, parseLockState } from "./lock.ts";
+import { recompressPngFile } from "./png.ts";
 import {
   clickParams,
   keyParams,
@@ -965,6 +966,8 @@ export class EngineSession {
       // The name is ours: a file in the target directory is a leftover to move, a gallery file is the game's to keep.
       if (written.file === requested) await rename(written.file, target);
       else await copyFile(written.file, target);
+      // The retail agent writes stored deflate (it is no_std): about 6 MB a frame, a fraction of that deflated.
+      if (written.format === "png") await recompressPngFile(target);
       return { ok: true, value: { path: target, bytes: (await stat(target)).size, format: written.format } };
     } catch (err) {
       return { ok: false, code: -32007, reason: "path_not_writable", message: `cannot copy ${written.file} to ${target}: ${message(err)}` };
