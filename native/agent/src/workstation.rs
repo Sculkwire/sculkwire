@@ -708,14 +708,15 @@ fn request_outcome(result: Option<u8>, moved: u32, take: bool, cursor: bool, ite
         None => Value::String(String::from("the server did not answer the request in time")),
     };
     if take {
-        let (mut made, consumed, to, at) = match item {
+        let (mut made, mut consumed, to, at, before) = match item {
             Some(Value::Object(mut answer)) if answer.contains_key("consumed") => (
                 answer.remove("result").unwrap_or(Value::Null),
                 answer.remove("consumed").unwrap_or(Value::Array(Vec::new())),
                 answer.remove("to"),
                 answer.remove("slot").and_then(|slot| slot.as_u64()),
+                answer.remove("before"),
             ),
-            other => (other.unwrap_or(Value::Null), Value::Array(Vec::new()), None, None),
+            other => (other.unwrap_or(Value::Null), Value::Array(Vec::new()), None, None, None),
         };
         // The made stack as the client holds it now that the server answered (the prediction may not have
         // shown it yet when the request went out).
@@ -723,6 +724,13 @@ fn request_outcome(result: Option<u8>, moved: u32, take: bool, cursor: bool, ite
             if let (Some(Value::String(name)), Some(slot)) = (to.as_ref(), at) {
                 if let Some(now) = open_containers().ok().and_then(|open| open_named(&open, name).and_then(|open| open.item(slot as usize)).and_then(inventory::slot)) {
                     made = now;
+                }
+            }
+            // What left the screen's own slots, read again when the request went out before the client showed
+            // it (a beacon's payment leaves only once the server answers).
+            if consumed.as_array().is_some_and(Vec::is_empty) {
+                if let (Some(before), Ok(open)) = (before.as_ref().map(stations_from), open_containers()) {
+                    consumed = Value::Array(consumed_between(&before, &station_items(&open)));
                 }
             }
         }
@@ -741,7 +749,41 @@ fn request_outcome(result: Option<u8>, moved: u32, take: bool, cursor: bool, ite
         }
         return answer;
     }
+    // A bundle insert's count, read again now that the server answered: the source as the request
+    // named it can be a view the client refreshes later (`hotbar_items` while the combined hotbar and
+    // inventory view already changed), so the bundle's own contents are counted too.
+    let moved = match item.as_ref() {
+        Some(watch) if accepted => moved.max(watched_move(watch)),
+        _ => moved,
+    };
     json!({ "moved": if accepted { moved } else { 0 }, "reason": reason, "result": result })
+}
+
+/// What a bundle insert moved, as the client shows it now: the larger of what left the source stack
+/// and what the bundle's contents gained (each view can lag the other).
+fn watched_move(watch: &Value) -> u32 {
+    let Ok(open) = open_containers() else {
+        return 0;
+    };
+    let read = |side: &str| {
+        let entry = &watch[side];
+        let slot = entry["slot"].as_u64().unwrap_or(u64::MAX) as usize;
+        let before = entry["before"].as_u64().unwrap_or(0) as u32;
+        let item = entry["container"].as_str().and_then(|name| open_named(&open, name)).and_then(|open| open.item(slot));
+        (item, before)
+    };
+    let (source, held) = read("source");
+    let left = source.map_or(0, |item| held.saturating_sub(count_of(item) as u32));
+    let (bundle, contained) = read("bundle");
+    let gained = bundle.map_or(0, |item| bundle_total(&open, item).saturating_sub(contained));
+    left.max(gained)
+}
+
+/// The items a bundle stack holds, counted in its open dynamic container (0 when none is open).
+fn bundle_total(open: &[Open], bundle: usize) -> u32 {
+    inventory::bundle_id(bundle)
+        .and_then(|id| open.iter().find(|other| other.dynamic == Some(id)))
+        .map_or(0, |inside| (0..inside.size).filter_map(|slot| inside.item(slot)).map(|item| count_of(item) as u32).sum())
 }
 
 /// Answers a parked request whose phase ran out. Every handler starts with this, so a parked request
@@ -1726,16 +1768,30 @@ fn slots_of(open: &Open, all: &[Open]) -> Vec<Value> {
             let inside = inventory::bundle_id(item).and_then(|id| all.iter().find(|other| other.dynamic == Some(id)));
             if let (Some(inside), Value::Object(fields)) = (inside, &mut entry) {
                 if !fields.contains_key("contents") {
-                    let mut items = slots_of(inside, &[]);
-                    while items.last().is_some_and(Value::is_null) {
-                        items.pop();
-                    }
-                    fields.insert(String::from("contents"), Value::Array(items));
+                    fields.insert(String::from("contents"), contents_of(inside));
                 }
             }
             entry
         })
         .collect()
+}
+
+/// A bundle's dynamic container as a slot's `contents`: its stacks in order, trailing empty slots dropped.
+fn contents_of(inside: &Open) -> Value {
+    let mut items = slots_of(inside, &[]);
+    while items.last().is_some_and(Value::is_null) {
+        items.pop();
+    }
+    Value::Array(items)
+}
+
+/// A carried bundle's `contents` for `player.inventory`, read the way the screen tools read them: from the
+/// bundle's dynamic container while an open screen has it. `None` when no screen shows it (on the HUD
+/// the client holds no copy of a bundle's items).
+pub(crate) fn bundle_contents(stack: usize) -> Option<Value> {
+    let id = inventory::bundle_id(stack)?;
+    let open = open_containers().ok()?;
+    open.iter().find(|other| other.dynamic == Some(id)).map(contents_of)
 }
 
 /// An item's count (0 for an empty stack).
@@ -1970,9 +2026,14 @@ pub(crate) fn h_screen_move(core: &'static Core, params: &Value) -> Result<Value
         if count.is_some_and(|count| count > held) {
             return Err(RpcError::invalid_params(format!("the stack going into the bundle holds {held}, not {}", count.unwrap_or(0))));
         }
+        let place = if core::ptr::eq(items.0, source) { (target, to.1) } else { (source, from.1) };
+        let watch = json!({
+            "source": { "container": items.0.key(), "slot": items.1, "before": held },
+            "bundle": { "container": place.0.key(), "slot": place.1, "before": bundle_total(&open, bundle) },
+        });
         let (id, moved) = bundle_insert(items, bundle, count)?;
         let before = screen_now(core).map(|screen| screen.top).unwrap_or_default();
-        return park(core, before, Phase::Request { id, moved: moved as u32, take: false, cursor: false }, None);
+        return park(core, before, Phase::Request { id, moved: moved as u32, take: false, cursor: false }, Some(watch));
     }
     let (kind, amount) = if occupied && !same_item(source_item, target_item) {
         if count.is_some() {
@@ -3741,7 +3802,15 @@ fn take_screen(core: &'static Core, screen: String, controller: usize, take: &Ta
             "the screen's result is empty: place the inputs (and choose what to make) first",
         ));
     }
-    let amount = amount_for(times, shown.as_ref().map(|(_, count)| *count))?;
+    // The stonecutter lists no result preview container: one craft's count is its selected recipe's result.
+    let per_craft = shown.as_ref().map(|(_, count)| *count).or_else(|| {
+        (take.handler == H_STONECUTTER)
+            .then(stonecutter_data)
+            .and_then(Result::ok)
+            .and_then(|data| data["result"]["count"].as_u64())
+            .and_then(|count| u8::try_from(count).ok())
+    });
+    let amount = amount_for(times, per_craft)?;
     let open = open_containers()?;
     let (target, slot) = carried(&open)
         .into_iter()
@@ -3767,7 +3836,7 @@ fn take_screen(core: &'static Core, screen: String, controller: usize, take: &Ta
     let after = open_containers()?;
     let result = open_named(&after, &to_key).and_then(|open| open.item(slot)).and_then(inventory::slot).or_else(|| shown.map(|(slot, _)| slot));
     let consumed = consumed_between(&before, &station_items(&after));
-    let answer = json!({ "result": result, "consumed": consumed, "to": to_key, "slot": slot });
+    let answer = json!({ "result": result, "consumed": consumed, "to": to_key, "slot": slot, "before": stations_json(&before) });
     park(core, screen, Phase::Request { id, moved: 0, take: true, cursor: false }, Some(answer))
 }
 
@@ -3966,6 +4035,23 @@ fn enchanting_data() -> Result<Value, RpcError> {
         }));
     }
     Ok(json!({ "options": options }))
+}
+
+/// A [`station_items`] reading kept in a parked answer, and read back by [`stations_from`].
+fn stations_json(items: &[(String, u32)]) -> Value {
+    Value::Array(items.iter().map(|(name, count)| json!([name, count])).collect())
+}
+
+fn stations_from(value: &Value) -> Vec<(String, u32)> {
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|pair| Some((String::from(pair.get(0)?.as_str()?), pair.get(1)?.as_u64()? as u32)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// What left the screen's containers between two readings, as `[{item, count}]`.
@@ -4508,12 +4594,15 @@ pub(crate) fn h_screen_act(core: &'static Core, params: &Value) -> Result<Value,
         "stonecut" => {
             let recipe = index_param(params, "recipe", 256)?;
             let screen = require_screen(core, &["stonecutter"], action)?;
-            let input_empty = open_containers()
+            let input = open_containers()
                 .ok()
-                .and_then(|open| open_named(&open, "StonecutterInputContainer").map(|input| input.item(0).is_none_or(|item| count_of(item) == 0)));
-            if input_empty == Some(true) {
+                .and_then(|open| open_named(&open, "StonecutterInputContainer").map(|input| input.item(0).map_or(0, count_of)));
+            if input == Some(0) {
                 return Err(RpcError::invalid_params("the stonecutter's input is empty: place the block to cut first (screen.move)"));
             }
+            // One craft uses one input block, and the server refuses a take of more than the input makes:
+            // `times` is capped at what is there.
+            let times = input.map_or(times, |input| times.min(u32::from(input)));
             let controller = screen_manager(handler(H_STONECUTTER)?, "screen.stonecutter")?;
             let selection = STONECUTTER_SELECTION.load(Ordering::Acquire);
             let refresh = handler(H_STONECUTTER_REFRESH)?;
@@ -4599,6 +4688,7 @@ pub(crate) fn h_screen_act(core: &'static Core, params: &Value) -> Result<Value,
                     "the enchanting table offers {offered} option(s) now (place an enchantable item and lapis first)"
                 )));
             }
+            let before = open_containers().map(|open| station_items(&open)).unwrap_or_default();
             // SAFETY: the enchanting screen's own `enchant(option)` on the controller the screen itself passes
             // it (its field, validated), with an option the model lists.
             let (id, actions) = in_request(|| unsafe { transmute::<usize, extern "C" fn(usize, u32)>(entry)(controller, option) })?;
@@ -4607,7 +4697,9 @@ pub(crate) fn h_screen_act(core: &'static Core, params: &Value) -> Result<Value,
                     "the enchanting table offers no such option now (place an enchantable item and lapis first)",
                 ));
             }
-            park(core, screen, Phase::Request { id, moved: 0, take: true, cursor: false }, preview("EnchantingInputContainer").map(|(slot, _)| slot))
+            let made = preview("EnchantingInputContainer").map_or(Value::Null, |(slot, _)| slot);
+            let answer = json!({ "result": made, "consumed": [], "before": stations_json(&before) });
+            park(core, screen, Phase::Request { id, moved: 0, take: true, cursor: false }, Some(answer))
         }
         "trade" => {
             let offer = index_param(params, "offer", 64)?;
@@ -4652,11 +4744,14 @@ pub(crate) fn h_screen_act(core: &'static Core, params: &Value) -> Result<Value,
                 core::ptr::write_unaligned((model + selection) as *mut u32, primary);
                 core::ptr::write_unaligned((model + selection + 4) as *mut u32, secondary);
             }
+            let before = open_containers().map(|open| station_items(&open)).unwrap_or_default();
             let (id, actions) = in_request(|| unsafe { transmute::<usize, extern "C" fn(usize)>(entry)(controller) })?;
             if actions == 0 {
                 return Err(RpcError::invalid_params("the beacon built no payment"));
             }
-            park(core, screen, Phase::Request { id, moved: 0, take: true, cursor: false }, None)
+            // The payment leaves the beacon's slot as the server takes it: the answer counts it then.
+            let answer = json!({ "result": Value::Null, "consumed": [], "before": stations_json(&before) });
+            park(core, screen, Phase::Request { id, moved: 0, take: true, cursor: false }, Some(answer))
         }
         _ => take_result(core),
     }
