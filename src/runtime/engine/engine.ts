@@ -1023,9 +1023,20 @@ export class EngineSession {
     };
   }
 
-  /** `input.use`: no `hold` is one click, `hold: true` presses and keeps holding (a bow draw), `hold: false` lets go. */
+  /**
+   * `input.use`: no `hold` is one click, `hold: true` presses and keeps holding (a bow draw), `hold: false` lets go. The
+   * agent lets a held button go a second after the last `hold: true`, so a hold is renewed by repeating it.
+   */
   use(hold?: boolean): Promise<EngineResult<unknown>> {
     return this.#call("input.use", hold === undefined ? {} : { hold }, { timeoutMs: INPUT_TIMEOUT_MS });
+  }
+
+  /**
+   * `input.attack {hold}`: `true` presses the attack button and keeps holding it (breaking the block under the
+   * crosshair), `false` lets go. Renewed by repeating `true` within a second, like `use`.
+   */
+  attackHold(hold: boolean): Promise<EngineResult<unknown>> {
+    return this.#call("input.attack", { hold }, { timeoutMs: INPUT_TIMEOUT_MS });
   }
 
   /** The newest `tick` notification and when it arrived (Date.now()), if any arrived on the current connection. */

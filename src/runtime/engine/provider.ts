@@ -70,6 +70,10 @@ export class AgentInputProvider implements InputProvider {
       use: async (down) => {
         await must(session.use(down));
       },
+      // `input.attack {hold}` holds the left button in the game (GameInput's reading, or the window message).
+      attackHold: async (down) => {
+        await must(session.attackHold(down));
+      },
       // `ui.key` hands the key to the game's own window procedure, where the game reads its keyboard.
       key: async (key, down) => {
         await must(session.uiKey(key, down ? "down" : "up"));

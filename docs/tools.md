@@ -460,7 +460,7 @@ There are two input routes. The keyboard route sends held keys, mouse buttons an
 | `attack` | Hits an entity (by id, or the nearest of a `type`) `hits` times. The crosshair stays on it every frame while the player walks or sprints into reach, and it clicks whenever the entity is under the crosshair and its last hit's invulnerability is over |
 | `shoot` | Throws or shoots at an entity (by id, or the nearest of a `type`) with the held snowball, egg, ender pearl, bow or trident. The crosshair follows the ballistic intercept every frame, solved again from the entity's latest position and velocity, and the shot goes off when the aim is inside the target. It reports a hit or a miss with the landing point from the game's impact log. `shots` retries until one hits, `holdMs` is the bow or trident draw time (default 1100) |
 | `use_item` | Right-clicks with the held item, held for `holdMs` (a bow draw, eating) |
-| `mine` | Holds left click for `holdMs` (keyboard route only) |
+| `mine` | Holds left click for `holdMs` |
 | `select_slot` | Picks hotbar slot 1 to 9 |
 | `jump`, `sneak`, `hold`, `wait` | Jumps once, turns sneaking on or off, holds keys for a time, or waits |
 | `fight` | Melee against a `target` (entity id or type, default the nearest hostile mob within `radius`, 16 by default), then the next one when `all` (default unless the target is an id). See [Skills](#skills) below. `crits` (default on) and `timeoutMs` (default 60000) are optional. The message lists the kills, hits and critical hits |

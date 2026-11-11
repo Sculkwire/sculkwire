@@ -893,8 +893,17 @@ export interface EngineInput {
   release(): Promise<void>;
   /** One attack through the game mode, as a click. Returns the struck entity's id (the script `Entity.id`) or null. */
   attack(): Promise<string | null>;
-  /** Press (true) or let go of (false) the use button with the held item: throws, draws, eats, places. */
+  /**
+   * Press (true) or let go of (false) the use button with the held item: throws, draws, eats, places. A press is held
+   * while it is repeated: the engine route repeats it every 300 ms.
+   */
   use(down: boolean): Promise<void>;
+  /**
+   * Press (true) or let go of (false) the attack button and keep it held, which breaks the block under the crosshair in
+   * survival (`mine`). A press is held while it is repeated: the engine route repeats it every 300 ms. Optional:
+   * without it `mine` needs the keyboard route.
+   */
+  attackHold?(down: boolean): Promise<void>;
   /**
    * Press (true) or let go of (false) one key on the game's own keyboard, by its xdotool name (`1`, `e`, `F5`): the
    * hotbar keys of `select_slot` and the keys `hold` names. Optional: without it those keys need the keyboard route.
@@ -1023,6 +1032,9 @@ export class EngineBackend implements InputBackend {
   #looksInFlight = 0;
   /** Keys this route holds down through `EngineInput.key`. */
   readonly #keys = new Set<string>();
+  /** Buttons this route holds, pressed again every `MOVE_REFRESH_MS`: the agent lets a held button go a second after its last press. */
+  readonly #buttons = new Set<"use" | "attack">();
+  #buttonRenewal?: NodeJS.Timeout;
 
   constructor(engine: EngineInput) {
     this.#engine = engine;
@@ -1037,7 +1049,31 @@ export class EngineBackend implements InputBackend {
   #fail(err: unknown): EngineInputError {
     this.#failure ??= new EngineInputError(err instanceof Error ? err.message : String(err), { cause: err });
     this.#stopKeepalive();
+    this.#stopRenewal();
     return this.#failure;
+  }
+
+  #press(button: "use" | "attack", down: boolean): Promise<void> {
+    if (button === "use") return this.#engine.use(down);
+    if (!this.#engine.attackHold) return Promise.reject(new Error("the input provider cannot hold the attack button"));
+    return this.#engine.attackHold(down);
+  }
+
+  async #hold(button: "use" | "attack", down: boolean): Promise<void> {
+    await this.#do(() => this.#press(button, down));
+    if (down) this.#buttons.add(button);
+    else this.#buttons.delete(button);
+    if (this.#buttons.size === 0) this.#stopRenewal();
+    else
+      this.#buttonRenewal ??= setInterval(() => {
+        for (const b of this.#buttons) void this.#press(b, true).catch((err: unknown) => void this.#fail(err));
+      }, MOVE_REFRESH_MS);
+    this.#buttonRenewal?.unref?.();
+  }
+
+  #stopRenewal(): void {
+    clearInterval(this.#buttonRenewal);
+    this.#buttonRenewal = undefined;
   }
 
   async #do<T>(fn: () => Promise<T>): Promise<T> {
@@ -1097,7 +1133,17 @@ export class EngineBackend implements InputBackend {
   }
 
   use(down: boolean): Promise<void> {
-    return this.#do(() => this.#engine.use(down));
+    return this.#hold("use", down);
+  }
+
+  /** The provider holds the attack button (`EngineInput.attackHold`). */
+  get holdsAttack(): boolean {
+    return this.#engine.attackHold !== undefined;
+  }
+
+  /** Press and keep holding (true) or let go of (false) the attack button (`holdsAttack` must be true). */
+  holdAttack(down: boolean): Promise<void> {
+    return this.#hold("attack", down);
   }
 
   /** The provider takes keys on the game's own keyboard. */
@@ -1118,6 +1164,8 @@ export class EngineBackend implements InputBackend {
 
   async release(): Promise<void> {
     this.#stopKeepalive();
+    this.#stopRenewal();
+    this.#buttons.clear();
     this.#move = { ...STILL };
     this.#sentAt = Number.NEGATIVE_INFINITY;
     const keys = [...this.#keys];
@@ -1794,10 +1842,20 @@ export class PlayerController {
           await this.#backend.use(false);
         }
         return result(true, "used the held item");
-      case "mine":
-        // The agent's `input.attack` is one click, so a held attack (breaking a block in survival) needs the mouse.
-        if (this.#backend.kind === "engine" && this.world.input.unavailable) {
-          return result(false, `mine holds the attack button, which the engine route cannot hold (input.attack is one click), and the keyboard route is unavailable: ${this.world.input.unavailable}`);
+      case "mine": {
+        // On the engine route the provider holds the attack button in the game (the agent's `input.attack {hold}`).
+        const backend = this.#backend;
+        if (backend instanceof EngineBackend && backend.holdsAttack) {
+          await backend.holdAttack(true);
+          try {
+            await this.#clock.sleep(action.holdMs ?? 1000, signal);
+          } finally {
+            await backend.holdAttack(false);
+          }
+          return result(true, "held the attack button");
+        }
+        if (backend.kind === "engine" && this.world.input.unavailable) {
+          return result(false, `mine holds the attack button, which this input provider cannot hold, and the keyboard route is unavailable: ${this.world.input.unavailable}`);
         }
         await this.#buttonDown(1);
         try {
@@ -1806,6 +1864,7 @@ export class PlayerController {
           await this.#buttonUp(1);
         }
         return result(true, "held the attack button");
+      }
       case "select_slot":
         if (!Number.isInteger(action.slot) || action.slot < 1 || action.slot > 9) return result(false, "slot must be 1-9");
         await this.#tap(String(action.slot), 80, signal);

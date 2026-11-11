@@ -205,7 +205,7 @@ describe("projectile intercept", () => {
  */
 function fakeWorld(
   degPerPx: number,
-  opts: { blocked?: boolean; latencyMs?: number; entities?: EntityInfo[]; engine?: { failAfter?: number; prepareFails?: boolean; noTick?: boolean; noKeys?: boolean } } = {},
+  opts: { blocked?: boolean; latencyMs?: number; entities?: EntityInfo[]; engine?: { failAfter?: number; prepareFails?: boolean; noTick?: boolean; noKeys?: boolean; noAttackHold?: boolean } } = {},
 ) {
   const s: PlayerState = {
     tick: 0,
@@ -312,6 +312,14 @@ function fakeWorld(
     use: async (down) => {
       call("use", { down });
     },
+    // The held attack button (the agent's `input.attack {hold}`).
+    ...(opts.engine.noAttackHold
+      ? {}
+      : {
+          attackHold: async (down: boolean) => {
+            call("attackHold", { down });
+          },
+        }),
     // The game's keyboard: a digit key picks that hotbar slot.
     ...(opts.engine.noKeys
       ? {}
@@ -541,7 +549,7 @@ describe("PlayerController on the engine route", () => {
 
   it("picks hotbar slots and holds keys through the provider's game keyboard when there is no keyboard route", async () => {
     const reason = "player control needs window or off-screen mode on Linux (game_launch with display: window or headless), or Windows";
-    const game = (engine: { noKeys?: boolean }) => {
+    const game = (engine: { noKeys?: boolean; noAttackHold?: boolean }) => {
       const fake = fakeWorld(0.26, { latencyMs: 20, engine });
       return { ...fake, world: { ...fake.world, input: unavailableInput(reason) } };
     };
@@ -568,17 +576,27 @@ describe("PlayerController on the engine route", () => {
     expect(moves.at(-1)).toMatchObject({ forward: 0, sprint: false });
     expect(keys()).toEqual([{ key: "e", down: true }, { key: "e", down: false }]);
 
-    // The agent's attack is one click, so a held attack needs the keyboard route's mouse.
-    const mined = await pc.run({ action: "mine", holdMs: 100 });
-    expect(mined).toMatchObject({ ok: false, input: "engine" });
-    expect(mined.message).toBe(`mine holds the attack button, which the engine route cannot hold (input.attack is one click), and the keyboard route is unavailable: ${reason}`);
+    // The held attack goes through the provider: pressed, pressed again while it lasts (the agent lets go a second
+    // after the last press), then let go.
+    engineLog.length = 0;
+    const mined = await pc.run({ action: "mine", holdMs: 700 });
+    expect(mined).toMatchObject({ ok: true, input: "engine", message: "held the attack button" });
+    const holds = engineLog
+      .filter((e) => e.method === "attackHold")
+      .map((e) => (typeof e.params === "object" && e.params !== null && "down" in e.params ? e.params.down : undefined));
+    expect(holds[0]).toBe(true);
+    expect(holds.filter((down) => down === true).length).toBeGreaterThanOrEqual(2);
+    expect(holds.at(-1)).toBe(false);
 
-    // A provider that takes no keys leaves the hotbar to the keyboard route, which is not there.
-    const keyless = new PlayerController(game({ noKeys: true }).world);
+    // A provider that takes no keys and holds no attack leaves both to the keyboard route, which is not there.
+    const keyless = new PlayerController(game({ noKeys: true, noAttackHold: true }).world);
     await keyless.selectInput();
     const r = await keyless.run({ action: "select_slot", slot: 2 });
     expect(r).toMatchObject({ ok: false, input: "engine" });
     expect(r.message).toBe(reason);
+    const unheld = await keyless.run({ action: "mine", holdMs: 100 });
+    expect(unheld).toMatchObject({ ok: false, input: "engine" });
+    expect(unheld.message).toBe(`mine holds the attack button, which this input provider cannot hold, and the keyboard route is unavailable: ${reason}`);
     await keyless.releaseAll();
   });
 

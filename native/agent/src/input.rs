@@ -48,9 +48,10 @@
 //! itself, with the client instance the game passes to it — the same call a button press makes,
 //! without a mouse. The client instance is the object the client's own `getLevel` method runs on:
 //! that method (a ClientInstance vtable slot, found below) is hooked to remember its `this`.
-//! `input.use {hold: true}` is a *held* button, which the game reads as device state rather than an
-//! event, so a hold is the GameInput button (or the window message when GameInput is not hooked),
-//! re-asserted every [`TICK_MS`] and dropped [`HOLD_MS`] after the last renewal.
+//! `input.use {hold: true}` and `input.attack {hold: true}` are *held* buttons, which the game reads as
+//! device state rather than an event (a held left button keeps breaking the block under the crosshair),
+//! so a hold is the GameInput button (or the window message when GameInput is not hooked), checked
+//! every [`TICK_MS`] and dropped [`HOLD_MS`] after the last renewal.
 //!
 //! The use path builds item stacks, and an item stack looks its item up through a thread-local
 //! item-registry pointer the drain's thread does not hold (the game asserts at `exe+0x18daf02`). Every
@@ -272,24 +273,91 @@ fn centre(window: win::Hwnd) -> (isize, isize) {
 }
 
 /* ------------------------------------------------------------------------------------------------
- * The held use button: GameInput's own reading, or the window message
+ * The held buttons: GameInput's own reading, or the window message
  *
  * A *held* button is device state — the game asks "is it still down" every tick — so a hold cannot be
- * an event handler call. It is the right button in GameInput's reading while that interface is hooked,
- * else the window message, and a timer drops it [`HOLD_MS`] after the last renewal.
+ * an event handler call. It is the button in GameInput's reading while that interface is hooked, else
+ * the window message, and a timer drops it [`HOLD_MS`] after the last renewal.
  * ---------------------------------------------------------------------------------------------- */
 
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONUP: u32 = 0x0202;
 const WM_RBUTTONDOWN: u32 = 0x0204;
 const WM_RBUTTONUP: u32 = 0x0205;
-/// `wparam` of a right-button down: the button that is down.
+/// `wparam` of a left / right button down: the button that is down.
+const MK_LBUTTON: usize = 0x0001;
 const MK_RBUTTON: usize = 0x0002;
 
-/// 1 while `input.use {hold: true}` holds the right button.
-static USE_HELD: AtomicU32 = AtomicU32::new(0);
-/// `GetTickCount64` of the last renewal; the hold dies [`HOLD_MS`] later.
-static USE_STAMP: AtomicU64 = AtomicU64::new(0);
-/// 1 while the button's down has been delivered, so a release sends exactly one up.
-static USE_APPLIED: AtomicU32 = AtomicU32::new(0);
+/// One mouse button a hold can keep down.
+struct Held {
+    /// The name `input.release` reports it under.
+    name: &'static str,
+    button: gameinput::Button,
+    down: u32,
+    up: u32,
+    mk: usize,
+    /// 1 while a hold is asked for.
+    held: AtomicU32,
+    /// `GetTickCount64` of the last renewal; the hold dies [`HOLD_MS`] later.
+    stamp: AtomicU64,
+    /// 1 while the button's down has been delivered, so a release sends exactly one up.
+    applied: AtomicU32,
+}
+
+impl Held {
+    const fn new(name: &'static str, button: gameinput::Button, down: u32, up: u32, mk: usize) -> Self {
+        Self { name, button, down, up, mk, held: AtomicU32::new(0), stamp: AtomicU64::new(0), applied: AtomicU32::new(0) }
+    }
+
+    /// The button down or up: GameInput's reading once the game is seen reading the mouse through it
+    /// ([`gameinput::mouse_read`] — a hooked interface the game never reads is not a route), else the
+    /// window message.
+    fn press(&self, window: win::Hwnd, down: bool) {
+        if gameinput::mouse_read() && gameinput::hold(self.button, down) {
+            return;
+        }
+        let (x, y) = centre(window);
+        let lparam = (y << 16) | (x & 0xFFFF);
+        if down {
+            deliver(window, self.down, self.mk, lparam);
+        } else {
+            deliver(window, self.up, 0, lparam);
+        }
+    }
+
+    /// Asks for the hold (or renews it): the down goes out once, the timer drops it after silence.
+    fn hold(&self, window: win::Hwnd) {
+        self.held.store(1, Ordering::Release);
+        self.stamp.store(win::tick_ms(), Ordering::Release);
+        if !ensure_timer(window) {
+            agent_core::log::fmt(format_args!("input: no window timer; a held {} will not expire on its own", self.name));
+        }
+        if self.applied.swap(1, Ordering::AcqRel) == 0 {
+            self.press(window, true);
+        }
+    }
+
+    /// True when the hold ran out (no renewal for [`HOLD_MS`]) or is not asked for.
+    fn stale(&self) -> bool {
+        self.held.load(Ordering::Acquire) == 0 || win::tick_ms().saturating_sub(self.stamp.load(Ordering::Acquire)) > HOLD_MS
+    }
+
+    /// Ends the hold; true when a delivered down was released.
+    fn release(&self, window: Option<win::Hwnd>) -> bool {
+        self.held.store(0, Ordering::Release);
+        let was = self.applied.swap(0, Ordering::AcqRel) != 0;
+        if let (true, Some(window)) = (was, window) {
+            self.press(window, false);
+        }
+        was
+    }
+}
+
+/// The right button `input.use {hold: true}` keeps down.
+static USE: Held = Held::new("use", gameinput::Button::Right, WM_RBUTTONDOWN, WM_RBUTTONUP, MK_RBUTTON);
+/// The left button `input.attack {hold: true}` keeps down.
+static ATTACK: Held = Held::new("attack", gameinput::Button::Left, WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON);
+static HELD: [&Held; 2] = [&USE, &ATTACK];
 /// The window timer's id, 0 while no timer is installed.
 static TIMER: AtomicUsize = AtomicUsize::new(0);
 
@@ -298,7 +366,7 @@ static TIMER: AtomicUsize = AtomicUsize::new(0);
 const TIMER_ID: usize = 0x0053_4B49;
 /// How often a held button's expiry is checked.
 const TICK_MS: u32 = 100;
-/// A hold (movement or the use button) with no renewal for this long is released.
+/// A hold (movement or a button) with no renewal for this long is released.
 const HOLD_MS: u64 = 1_000;
 
 /// Delivers one message to the game's own window procedure.
@@ -328,23 +396,7 @@ fn deliver(window: win::Hwnd, message: u32, wparam: win::Wparam, lparam: win::Lp
     unsafe { win::PostMessageW(window, message, wparam, lparam) };
 }
 
-/// The right button down or up: GameInput's reading once the game is seen reading the mouse through
-/// it ([`gameinput::mouse_read`] — a hooked interface the game never reads is not a route), else the
-/// window message.
-fn press_use(window: win::Hwnd, down: bool) {
-    if gameinput::mouse_read() && gameinput::hold(gameinput::Button::Right, down) {
-        return;
-    }
-    let (x, y) = centre(window);
-    let lparam = (y << 16) | (x & 0xFFFF);
-    if down {
-        deliver(window, WM_RBUTTONDOWN, MK_RBUTTON, lparam);
-    } else {
-        deliver(window, WM_RBUTTONUP, 0, lparam);
-    }
-}
-
-/// Which path the held button takes right now.
+/// Which path a held button takes right now.
 fn hold_route() -> &'static str {
     if gameinput::mouse_read() {
         "gameinput"
@@ -353,17 +405,20 @@ fn hold_route() -> &'static str {
     }
 }
 
-/// Releases the held use button, if it is held, and stops its timer. True when a down was released.
-fn release_use() -> bool {
-    USE_HELD.store(0, Ordering::Release);
-    let was = USE_APPLIED.swap(0, Ordering::AcqRel) != 0;
-    if let Some(window) = window() {
-        if was {
-            press_use(window, false);
-        }
+/// Releases one held button, if it is held, and stops the timer once no button is held. True when a
+/// down was released.
+fn release_held(held: &Held) -> bool {
+    let window = window();
+    let was = held.release(window);
+    if let Some(window) = window.filter(|_| HELD.iter().all(|held| held.held.load(Ordering::Acquire) == 0)) {
         stop_timer(window);
     }
     was
+}
+
+/// Releases the held use button (see [`release_held`]).
+fn release_use() -> bool {
+    release_held(&USE)
 }
 
 /// Installs the expiry timer, once. It only works from the window's own thread: a timer's callback
@@ -396,44 +451,45 @@ fn stop_timer(window: win::Hwnd) {
 /// `agent.unload`: kills the hold timer and forgets every hold.
 ///
 /// The timer's callback is this crate's code, so user32 calling it after the image is freed is a crash.
-/// The button is *not* re-sent as released — that is a message to the game's window procedure, and this
-/// runs on the unload thread where the game's input state is not ours to touch. The two hooks are taken
-/// out by the core's unload with every other inline hook, and the movement hold stops applying as soon
-/// as its stamp is cleared.
+/// The buttons are *not* re-sent as released — that is a message to the game's window procedure, and
+/// this runs on the unload thread where the game's input state is not ours to touch. The two hooks are
+/// taken out by the core's unload with every other inline hook, and the movement hold stops applying as
+/// soon as its stamp is cleared.
 pub fn detach() {
     if let Some(window) = window() {
         stop_timer(window);
     }
-    USE_HELD.store(0, Ordering::Release);
-    USE_APPLIED.store(0, Ordering::Release);
+    for held in HELD {
+        held.held.store(0, Ordering::Release);
+        held.applied.store(0, Ordering::Release);
+    }
     MOVE_STAMP.store(0, Ordering::Release);
 }
 
-/// The hold timer: releases a held button nobody renewed.
+/// The hold timer: releases a held button nobody renewed, and stops once none is held.
 unsafe extern "system" fn tick(window: win::Hwnd, _message: u32, id: usize, _time: u32) {
-    let stale = win::tick_ms().saturating_sub(USE_STAMP.load(Ordering::Acquire)) > HOLD_MS;
-    if USE_HELD.load(Ordering::Acquire) == 0 || stale || win::IsWindow(window) == 0 {
-        USE_HELD.store(0, Ordering::Release);
-        if USE_APPLIED.swap(0, Ordering::AcqRel) != 0 {
-            press_use(window, false);
+    let gone = win::IsWindow(window) == 0;
+    for held in HELD {
+        if gone || held.stale() {
+            held.release(Some(window).filter(|_| !gone));
         }
+    }
+    if HELD.iter().all(|held| held.held.load(Ordering::Acquire) == 0) {
         TIMER.store(0, Ordering::Release);
         win::KillTimer(window, id);
     }
 }
 
 /// Releases a held button that ran out, before anything else looks at it. Every handler starts with
-/// this, so a caller that stopped talking to the agent cannot leave the button down even if the timer
+/// this, so a caller that stopped talking to the agent cannot leave a button down even if the timer
 /// never ran.
 fn expire() {
-    if USE_HELD.load(Ordering::Acquire) == 0 {
-        return;
+    for held in HELD {
+        if held.held.load(Ordering::Acquire) != 0 && held.stale() {
+            release_held(held);
+            agent_core::log::fmt(format_args!("input: a held {} expired without an update", held.name));
+        }
     }
-    if win::tick_ms().saturating_sub(USE_STAMP.load(Ordering::Acquire)) <= HOLD_MS {
-        return;
-    }
-    release_use();
-    agent_core::log::fmt(format_args!("input: a held use expired without an update"));
 }
 
 /* ------------------------------------------------------------------------------------------------
@@ -1396,8 +1452,10 @@ pub fn h_input_move(_core: &'static Core, params: &Value) -> Result<Value, RpcEr
 /// the world is unloading, which is exactly when a stuck hold would be worst.
 pub fn h_input_release(_core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
     let mut released = state_names(clear_movement());
-    if release_use() {
-        released.push(Value::String(String::from("use")));
+    for held in HELD {
+        if release_held(held) {
+            released.push(Value::String(String::from(held.name)));
+        }
     }
     Ok(json!({ "released": released }))
 }
@@ -1606,46 +1664,55 @@ fn crosshair_now() -> Option<Crosshair> {
     Player::open().and_then(|player| player.crosshair())
 }
 
-/// `input.attack` → `{hit, target, route}`: one left click through the client's own
-/// `button.destroy_or_attack` handler. `target` is what the crosshair was on when it ran (a block with
-/// its face, or an entity with its id and type; `null` when nothing in reach or nothing validated), and
-/// `hit` the struck entity's id alone.
-pub fn h_input_attack(_core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
+/// `input.attack {hold?}` → `{hit, target, route}` (`{held, target, route}` with `hold`): one left click
+/// through the client's own `button.destroy_or_attack` handler, or the held left button (`hold: true`,
+/// renewed by repeating it) that keeps breaking the block under the crosshair until an
+/// `input.attack {hold: false}`, an `input.release`, or [`HOLD_MS`] of silence. `target` is what the
+/// crosshair was on when it ran (a block with its face, or an entity with its id and type; `null` when
+/// nothing in reach or nothing validated), and `hit` the struck entity's id alone.
+pub fn h_input_attack(_core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     world()?;
     expire();
     let target = crosshair_now();
-    click_button(&ATTACK_HANDLER, &ATTACK_TABLE, "input.attack", false)?;
-    Ok(json!({
-        "hit": target.as_ref().map_or(Value::Null, Crosshair::entity_id),
-        "target": target.as_ref().map_or(Value::Null, Crosshair::json),
-        "route": "action",
-    }))
+    let json_target = target.as_ref().map_or(Value::Null, Crosshair::json);
+    match params.get("hold") {
+        None => {
+            // A click ends a hold first, so the held state cannot outlive it.
+            release_held(&ATTACK);
+            click_button(&ATTACK_HANDLER, &ATTACK_TABLE, "input.attack", false)?;
+            Ok(json!({ "hit": target.as_ref().map_or(Value::Null, Crosshair::entity_id), "target": json_target, "route": "action" }))
+        }
+        Some(_) => held_button(&ATTACK, flag(params, "hold")?, json_target),
+    }
 }
 
 /// `input.use {hold?}` → `{held, target, route}`: one right click through the client's own
-/// `button.build_or_interact` handler, or a held button (`hold: true`) that lasts until an
-/// `input.use {hold: false}`, an `input.release`, or [`HOLD_MS`] of silence. The button is its own
-/// domain — `input.move` restates the movement and leaves it alone. `target` is the crosshair's target
-/// when the click (or the hold) began, as `input.attack` reports it.
+/// `button.build_or_interact` handler, or the held right button (`hold: true`, renewed by repeating it)
+/// that lasts until an `input.use {hold: false}`, an `input.release`, or [`HOLD_MS`] of silence. The
+/// button is its own domain — `input.move` restates the movement and leaves it alone. `target` is the
+/// crosshair's target when the click (or the hold) began, as `input.attack` reports it.
 pub fn h_input_use(_core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     world()?;
     expire();
-    let hold = flag(params, "hold")?;
     let target = crosshair_now().as_ref().map_or(Value::Null, Crosshair::json);
-    if !hold {
-        // A click ends a hold first, so the held state cannot outlive it.
-        use_click()?;
-        return Ok(json!({ "held": false, "target": target, "route": "action" }));
+    match params.get("hold") {
+        None => {
+            // A click ends a hold first, so the held state cannot outlive it.
+            use_click()?;
+            Ok(json!({ "held": false, "target": target, "route": "action" }))
+        }
+        Some(_) => held_button(&USE, flag(params, "hold")?, target),
+    }
+}
+
+/// `hold: true` presses (or renews) the held button, `hold: false` lets it go.
+fn held_button(held: &Held, down: bool, target: Value) -> Result<Value, RpcError> {
+    if !down {
+        let released = release_held(held);
+        return Ok(json!({ "held": false, "released": released, "target": target, "route": hold_route() }));
     }
     let window = window().ok_or_else(|| RpcError::anchor("window.game"))?;
-    USE_HELD.store(1, Ordering::Release);
-    USE_STAMP.store(win::tick_ms(), Ordering::Release);
-    if !ensure_timer(window) {
-        agent_core::log::fmt(format_args!("input: no window timer; a held use will not expire on its own"));
-    }
-    if USE_APPLIED.swap(1, Ordering::AcqRel) == 0 {
-        press_use(window, true);
-    }
+    held.hold(window);
     Ok(json!({ "held": true, "target": target, "route": hold_route() }))
 }
 

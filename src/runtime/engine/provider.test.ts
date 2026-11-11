@@ -49,4 +49,21 @@ describe("AgentInputProvider without an agent", () => {
     await expect(provider.input.key?.("e", true)).rejects.toThrow("anchor_missing: no game window");
     provider.close();
   });
+
+  it("holds and lets go of the attack button through input.attack {hold} and fails the call when the agent refuses it", async () => {
+    const session = new EngineSession({ port: 9, timeoutMs: 500 });
+    const sent: boolean[] = [];
+    let refuse = false;
+    session.attackHold = async (hold): Promise<EngineResult<unknown>> => {
+      sent.push(hold);
+      return refuse ? { ok: false, code: -32001, reason: "anchor_missing", message: "no game window" } : { ok: true, value: { held: hold } };
+    };
+    const provider = new AgentInputProvider(session, "linux");
+    await provider.input.attackHold?.(true);
+    await provider.input.attackHold?.(false);
+    expect(sent).toEqual([true, false]);
+    refuse = true;
+    await expect(provider.input.attackHold?.(true)).rejects.toThrow("anchor_missing: no game window");
+    provider.close();
+  });
 });
