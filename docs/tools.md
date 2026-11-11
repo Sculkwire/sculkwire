@@ -232,6 +232,8 @@ Profiles your scripts through the session's debugger and returns the top functio
 
 Lines are 1-based: a script function's line is its hottest sampled line. A native Script API binding such as `Test::succeed` or `System::currentTick` (`native: true`) has no source of its own, and the line the game's capture gives it is the end of the calling function, so it is reported at the line of the script frame that called it.
 
+The result also has `durationMs` (the capture), `sampleCount`, `intervalMs` and `idleMs`. The game samples only while script code runs (every interval, plus one sample per native binding call) and records nothing between game ticks. Each sample is charged the time until the next sample, but at most one sampling interval (`intervalMs`: the median gap between samples, at least 1 ms), so the time between one tick's script work and the next is `idleMs` and is charged to no function. A function that runs briefly once per tick is still charged up to one interval per tick. `selfPercent` is a function's self time as a percent of `durationMs`, so the self times plus `idleMs` add up to the capture.
+
 | Input | Description |
 |---|---|
 | `id` | Session id (required) |

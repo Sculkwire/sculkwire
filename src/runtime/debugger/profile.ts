@@ -31,26 +31,56 @@ export interface ProfileFunction {
 export interface ProfileSummary {
   durationMs: number;
   sampleCount: number;
+  /** The sampling interval: the most time one sample is charged. */
+  intervalMs: number;
+  /** Capture time charged to no function: the script was not running (between game ticks, before the first sample). */
+  idleMs: number;
   functions: ProfileFunction[];
 }
 
-/** Self/total time per function (aggregated across call sites), sorted by self time, top `limit`. */
+/** V8's default sampling interval, which Minecraft's script profiler uses (pure script samples are 1000 µs apart). */
+const DEFAULT_INTERVAL_US = 1000;
+
+/** The capture carries no interval field: the median gap between samples, at least V8's default 1 ms. */
+function samplingIntervalUs(deltas: number[]): number {
+  const gaps = deltas
+    .slice(1)
+    .filter((d) => d > 0)
+    .sort((a, b) => a - b);
+  const median = gaps.length > 0 ? gaps[Math.floor((gaps.length - 1) / 2)]! : 0;
+  return Math.max(DEFAULT_INTERVAL_US, median);
+}
+
+/**
+ * Self/total time per function (aggregated across call sites), sorted by self time, top `limit`.
+ *
+ * Minecraft's profiler samples only while script code runs (every interval, plus one sample per native binding call)
+ * and records no idle samples, so the gap after a tick's last sample is the time until the next tick's script work.
+ * A sample is charged the gap to the next sample (the Chrome DevTools model) but at most one sampling interval: a
+ * longer gap means the script had stopped, and the rest of it is idle. `selfPercent` is percent of the capture duration.
+ */
 export function summarizeProfile(profile: CpuProfile, limit = 20): ProfileSummary {
   const byId = new Map(profile.nodes.map((n) => [n.id, n]));
   const selfUs = new Map<number, number>();
   const samples = profile.samples ?? [];
   const deltas = profile.timeDeltas ?? [];
+  const durationUs = Math.max(0, profile.endTime - profile.startTime);
+  const intervalUs = samplingIntervalUs(deltas);
   if (samples.length > 0 && deltas.length === samples.length) {
-    // timeDeltas[i] is the gap before sample i; attribute the gap after a sample to it (Chrome DevTools model).
+    // timeDeltas[i] is the gap before sample i; the gap after the last sample runs to endTime.
+    const lastAt = deltas.reduce((s, d) => s + d, profile.startTime);
     for (let i = 0; i < samples.length; i++) {
-      const dt = deltas[i + 1] ?? 0;
-      selfUs.set(samples[i]!, (selfUs.get(samples[i]!) ?? 0) + Math.max(0, dt));
+      const gap = i + 1 < deltas.length ? deltas[i + 1]! : profile.endTime - lastAt;
+      selfUs.set(samples[i]!, (selfUs.get(samples[i]!) ?? 0) + Math.min(intervalUs, Math.max(0, gap)));
     }
   } else {
+    // Hit counts only: one interval per hit, scaled down if the hits would not fit in the capture.
     const hits = profile.nodes.reduce((s, n) => s + (n.hitCount ?? 0), 0);
-    const per = hits > 0 ? (profile.endTime - profile.startTime) / hits : 0;
+    const per = hits > 0 ? Math.min(intervalUs, durationUs / hits) : 0;
     for (const n of profile.nodes) selfUs.set(n.id, (n.hitCount ?? 0) * per);
   }
+  let chargedUs = 0;
+  for (const [id, us] of selfUs) if (byId.get(id)?.callFrame.functionName !== "(idle)") chargedUs += us;
 
   const totalUs = new Map<number, number>();
   const total = (id: number, seen: Set<number>): number => {
@@ -65,7 +95,6 @@ export function summarizeProfile(profile: CpuProfile, limit = 20): ProfileSummar
   };
 
   const agg = new Map<string, ProfileFunction>();
-  const durationUs = Math.max(0, profile.endTime - profile.startTime);
   const parent = new Map<number, number>();
   for (const n of profile.nodes) for (const c of n.children ?? []) parent.set(c, n.id);
   const hottest = new Map<string, number>();
@@ -130,7 +159,13 @@ export function summarizeProfile(profile: CpuProfile, limit = 20): ProfileSummar
     }))
     .sort((a, b) => b.selfMs - a.selfMs || b.totalMs - a.totalMs)
     .slice(0, limit);
-  return { durationMs: durationUs / 1000, sampleCount: samples.length, functions };
+  return {
+    durationMs: durationUs / 1000,
+    sampleCount: samples.length,
+    intervalMs: intervalUs / 1000,
+    idleMs: Math.round(Math.max(0, durationUs - chargedUs)) / 1000,
+    functions,
+  };
 }
 
 export function decodeCapture(base64: string): CpuProfile {

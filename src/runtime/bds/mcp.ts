@@ -253,7 +253,9 @@ export function register(server: McpServer): void {
       title: "Profile scripts in a BDS session",
       description:
         "Script profiler over the session's debugger. `capture` = start, optionally run `command`, wait `durationMs`, " +
-        "stop; or drive `start`/`stop` yourself. Returns the top functions by self time.",
+        "stop; or drive `start`/`stop` yourself. Returns the top functions by self time. A sample is charged at most one " +
+        "sampling interval (`intervalMs`), so time between game ticks, when no script runs, is `idleMs` and not charged " +
+        "to any function; `selfPercent` is percent of the capture duration.",
       inputSchema: {
         id: z.string(),
         action: z.enum(["capture", "start", "stop"]).optional(),
@@ -265,6 +267,8 @@ export function register(server: McpServer): void {
         action: z.string(),
         durationMs: z.number().optional(),
         sampleCount: z.number().optional(),
+        intervalMs: z.number().optional(),
+        idleMs: z.number().optional(),
         functions: z
           .array(z.object({ functionName: z.string(), url: z.string(), line: z.number(), column: z.number(), native: z.boolean(), selfMs: z.number(), totalMs: z.number(), selfPercent: z.number() }))
           .optional(),
@@ -287,7 +291,10 @@ export function register(server: McpServer): void {
         const capture = await dbg.stopProfiler();
         const summary = summarizeProfile(capture.profile, limit ?? 20);
         const top = summary.functions.slice(0, 10).map((f) => `  ${f.selfMs.toFixed(1)} ms self  ${f.functionName} ${f.url}:${f.line}`);
-        return ok([`profile ${summary.durationMs.toFixed(0)} ms, ${summary.sampleCount} samples`, ...top].join("\n"), { action, ...summary });
+        return ok(
+          [`profile ${summary.durationMs.toFixed(0)} ms, ${summary.sampleCount} samples, ${summary.idleMs.toFixed(0)} ms idle`, ...top].join("\n"),
+          { action, ...summary },
+        );
       } catch (err) {
         return fail(err);
       }
