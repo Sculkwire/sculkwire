@@ -37,7 +37,7 @@ sculk world settings set --weather rain --gamerule keepinventory=true
 
 | Need | Linux | Windows | For |
 |---|---|---|---|
-| A PC (GDK) install of the game, already running | A Wine or Proton install sculkwire detects: Flarial, mcbe-gdk-installer, Bottles, Lutris, Steam | A native install: the Microsoft Store or Xbox app copy, or a folder named by `SCULKWIRE_GAME_DIR` | Injection |
+| A PC (GDK) install of the game, already running | A Wine or Proton install sculkwire detects: BedrockOnLinux, Flarial, mcbe-gdk-installer, Bottles, Lutris, Steam | A native install: the Microsoft Store or Xbox app copy, or a folder named by `SCULKWIRE_GAME_DIR` | Injection |
 | The install's own Wine | Found next to the install's prefix (`proton/<engine>` or `engine/<engine>`); `SCULKWIRE_WINE` overrides it | Not used | Running the injector |
 | `cargo`, when you build the DLL yourself | `cargo` on `PATH`, else `~/.cargo/bin/cargo` | Same | Building `native/` |
 | `rustup target add x86_64-pc-windows-msvc` | Once per rustup toolchain | Same | Building `native/` |
@@ -103,6 +103,8 @@ Requests that only read the agent's own state run on the connection's thread. Ev
 The drain is one at a time, and that guard is itself survivable: a handler that faults leaves its frame for good — a foreign exception unwinds through SEH, not through Rust's drops — so the fault path releases the drain and answers the request it was running with `internal error` instead of leaving the queue wedged for the life of the process. A drain that has held the flag for longer than any handler can (two minutes; `tick.step` is capped well below it) is treated the same way by the next entry, and `engine_status.drainReleases` counts both. A slot whose caller gave up before its handler answered is taken by the next request instead of being lost, so a run of timeouts no longer starves the sixteen slots.
 
 The agent serves up to eight connections, so `sculk game lock` and the `engine_*` commands work while an MCP session keeps its own connection open.
+
+To add or fix an agent feature, [Reverse Engineering the Game](reverse-engineering.md) covers when research is needed at all, how a recipe is found and written, the `debug-rpc` build, the hot-reload loop and the pitfalls.
 
 ## Tools
 
@@ -259,7 +261,7 @@ Newline-delimited JSON-RPC 2.0 over TCP on `127.0.0.1:<port>`: one object per li
 
 Notifications: `tick` (`tick`, `position`, `rotation`, `velocity`, `onGround`, `health`, `selectedSlot`) and `lock` (the lock state). Error codes: `-32601` unknown method, `-32602` invalid params, `-32001` anchor missing (with `data.anchor`), `-32002` not in a local world, `-32003` wrong thread, `-32004` timeout, `-32006` command failed, `-32007` path not writable, `-32014` scripting unavailable.
 
-The agent's addresses come from anchors resolved against the loaded image at attach time. A method whose anchor is missing fails instead of guessing, and `engine_status` says which one.
+The agent's addresses come from anchors resolved against the loaded image at attach time. A method whose anchor is missing fails instead of guessing, and `engine_status` says which one. The `debug-rpc` build adds `debug.*` methods for diagnosis; they are listed in [Reverse Engineering the Game](reverse-engineering.md#the-debug-rpc-build).
 
 ## Status
 

@@ -14,7 +14,7 @@ While the agent is attached, the bridge's own input takes its route where it can
 
 | Feature | Windows | Linux |
 |---|---|---|
-| Supported installs | Microsoft Store / Xbox app, stable and Preview, on any drive (the folder Windows registered for the package, else `XboxGames` on every fixed drive, plus `SCULKWIRE_GAME_DIRS`) | [mcbe-gdk-installer](https://gitlab.com/ve3dy/mcbe-gdk-installer), Flarial, Bottles, Lutris, Steam (any Wine or Proton prefix) |
+| Supported installs | Microsoft Store / Xbox app, stable and Preview, on any drive (the folder Windows registered for the package, else `XboxGames` on every fixed drive, plus `SCULKWIRE_GAME_DIRS`) | [mcbe-gdk-installer](https://gitlab.com/ve3dy/mcbe-gdk-installer), BedrockOnLinux, Flarial, Bottles, Lutris, Steam (any Wine or Proton prefix; the launcher's game folder is found next to its prefix) |
 | Starts the game automatically | Yes | With mcbe-gdk-installer, or any launcher given a launch command |
 | Commands, reload, content log, world queries | Yes | Yes |
 | Screenshots | Yes, also while the window is covered | Yes, in window or off-screen mode |
@@ -122,7 +122,7 @@ With the in-game agent attached, the screen comes from the agent's `ui.screen` i
 
 This is the bridge. The in-game agent has its own status, in [In-Game Agent](engine.md#status).
 
-- **Linux:** verified end to end against the game with mcbe-gdk-installer and Flarial.
+- **Linux:** verified end to end against the game with mcbe-gdk-installer, Flarial and BedrockOnLinux (1.26.63.1, 2026-11-11; there `game_launch` returns the manual steps and you start the game from the launcher).
 - **Windows:** the input helper (held keys, chords, Unicode text, clicks on the requested pixel, relative mouse motion, nothing delivered and the loss reported while another window is in front, keys let go when the helper closes), `PrintWindow` screenshots and the screen-capture fallback are checked on CI against a test window, not against the game. The installers are checked on CI too.
 - **Still to do:** a full run against the game on Windows. On a Windows machine with the game installed, run:
 

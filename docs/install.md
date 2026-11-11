@@ -110,6 +110,6 @@ Automatic updates run in a managed MCP server after it starts. The check happens
 
 1. Bump `version` in `package.json` and add a `## vX.Y.Z` section to `CHANGELOG.md`.
 2. Commit, then tag `vX.Y.Z` and push the tag.
-3. The `release` workflow runs tsc and vitest, checks that the tag matches `package.json`, and creates the GitHub release with the changelog section as its notes.
+3. The `release` workflow runs tsc and vitest, checks that the tag matches `package.json`, builds the in-game agent from `native/` (without `debug-rpc`), and creates the GitHub release with the changelog section as its notes and `sculkwire-agent-<version>-x86_64-windows.zip` plus its `.sha256` as assets. `engine_attach` downloads that archive when no cargo is installed.
 
 Managed installs pick up the tag on their next daily check.
