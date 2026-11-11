@@ -344,6 +344,9 @@ describe("engine error handling", () => {
     expect(session.attached).toBe(true);
     await agent.stop();
     agents.splice(agents.indexOf(agent), 1);
+    // The agent this session reached is gone: the file routes (options.txt, level.dat) take over, as for a new session.
+    await waitFor(() => !session.attached);
+    expect(await session.reachable()).toBe(false);
     expect(await new EngineSession({ port: 9, timeoutMs: 200 }).reachable()).toBe(false);
   });
 

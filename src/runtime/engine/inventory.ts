@@ -106,6 +106,8 @@ export type PlayerAttributes = Record<string, PlayerAttribute>;
 /** Attributes and inventory from one route, named, so a caller can tell a script answer from the agent's. */
 export interface PlayerInventoryState {
   source: InventorySource;
+  /** Set on a helper-pack answer: why the agent did not answer. */
+  note?: string;
   attributes: PlayerAttributes;
   inventory: PlayerInventory;
 }
@@ -123,6 +125,8 @@ export interface ContainerView {
   block: string | null;
   size: number;
   slots: Slot[];
+  /** Set on a helper-pack answer: why the agent did not answer. */
+  note?: string;
 }
 
 /** The container screen the player has open, with its own slots and the player's inventory beside it. */
@@ -528,10 +532,27 @@ function blockParams(at: BlockRef): Record<string, unknown> | string {
 }
 
 /**
- * Reasons that mean the agent cannot answer here rather than that the answer is bad: nothing is listening, or an
- * older agent does not have these methods. Both go to the helper pack.
+ * Reasons that mean no agent answers here rather than that the answer is bad: nothing is listening (never attached,
+ * or the agent this session attached is gone: unloaded, or the game restarted), or an older agent does not have
+ * these methods. All go to the helper pack.
  */
-const SCRIPT_FALLBACK: Readonly<Partial<Record<EngineFailureReason, boolean>>> = { not_attached: true, unknown_method: true };
+const SCRIPT_FALLBACK: Readonly<Partial<Record<EngineFailureReason, boolean>>> = { not_attached: true, disconnected: true, unknown_method: true };
+
+/** The note a helper-pack answer carries: which agent failure sent the call there. */
+function fallbackNote(failure: EngineFailure): string {
+  return `the agent did not answer (${failure.reason}: ${failure.message}); answered from the helper pack's Script API`;
+}
+
+/** A failure when neither route answers: keeps `disconnected` when that was the agent's reason. */
+function bothFailed(agentFailure: EngineFailure | undefined, err: unknown): EngineFailure {
+  const agent = agentFailure ? ` (agent: ${agentFailure.reason}: ${agentFailure.message})` : "";
+  return {
+    ok: false,
+    code: -32000,
+    reason: agentFailure?.reason === "disconnected" ? "disconnected" : "not_attached",
+    message: `no agent answered and the helper pack could not answer${agent}: ${messageOf(err)}`,
+  };
+}
 
 function scriptInventory(agentFailure?: EngineFailure): Promise<EngineResult<PlayerInventoryState>> {
   return (async () => {
@@ -542,15 +563,9 @@ function scriptInventory(agentFailure?: EngineFailure): Promise<EngineResult<Pla
       const attributes = raw.attributes === undefined ? {} : parseAttributes(raw.attributes);
       if (!inventory) return malformed("helper pack inventory", raw.inventory);
       if (!attributes) return malformed("helper pack attributes", raw.attributes);
-      return { ok: true, value: { source: "script", attributes, inventory } };
+      return { ok: true, value: { source: "script", ...(agentFailure ? { note: fallbackNote(agentFailure) } : {}), attributes, inventory } };
     } catch (err) {
-      const agent = agentFailure ? ` (agent: ${agentFailure.reason}: ${agentFailure.message})` : "";
-      return {
-        ok: false,
-        code: -32000,
-        reason: "not_attached",
-        message: `no agent is attached and the helper pack could not answer${agent}: ${messageOf(err)}`,
-      };
+      return bothFailed(agentFailure, err);
     }
   })();
 }
@@ -562,20 +577,14 @@ function scriptContainer(at: BlockRef, agentFailure?: EngineFailure): Promise<En
     try {
       const raw = await bridge.query("container", params);
       const view = parseContainer(raw);
-      if (view) return { ok: true, value: view };
+      if (view) return { ok: true, value: agentFailure ? { ...view, note: fallbackNote(agentFailure) } : view };
       return malformed("helper pack container", raw);
     } catch (err) {
       // A block with no container is a bad request, not a missing helper: the agent answers -32602 for it too.
       if (err instanceof HelperQueryError && (err.reason === "no_container" || err.reason === "no_block")) {
         return { ok: false, code: -32602, reason: "invalid_params", message: messageOf(err) };
       }
-      const agent = agentFailure ? ` (agent: ${agentFailure.reason}: ${agentFailure.message})` : "";
-      return {
-        ok: false,
-        code: -32000,
-        reason: "not_attached",
-        message: `no agent is attached and the helper pack could not answer${agent}: ${messageOf(err)}`,
-      };
+      return bothFailed(agentFailure, err);
     }
   })();
 }
@@ -658,6 +667,7 @@ function schemas() {
   const playerInventorySchema = {
     ...failureSchema,
     source: z.enum(["engine", "script"]).optional(),
+    note: z.string().optional().describe("On a helper-pack answer: why the agent did not answer"),
     attributes: z.record(z.string(), z.object({
       current: z.number(),
       min: z.number().optional(),
@@ -688,6 +698,7 @@ function schemas() {
     slots: z.array(maybeSlot).optional(),
     screen: z.string().optional(),
     playerSlots: z.array(maybeSlot).optional(),
+    note: z.string().optional().describe("On a helper-pack answer: why the agent did not answer"),
   };
 
   const craftSchema = {
@@ -725,7 +736,8 @@ export function registerInventoryTools(server: McpServer): void {
         const result = await readPlayerInventory();
         if (!result.ok) return failureOf(result);
         const state = result.value;
-        return ok(inventoryText(state.source, state), { ok: true, ...state });
+        const note = state.note ? `\n${state.note}` : "";
+        return ok(`${inventoryText(state.source, state)}${note}`, { ok: true, ...state });
       } catch (err) {
         return failedWith(err);
       }
@@ -770,7 +782,8 @@ export function registerInventoryTools(server: McpServer): void {
         const result = await readContainer({ x, y, z: bz, ...(dimension !== undefined ? { dimension } : {}) });
         if (!result.ok) return failureOf(result);
         const view = result.value;
-        return ok(`${containerText(view)} at ${x} ${y} ${bz}`, { ok: true, action, ...view });
+        const note = view.note ? `\n${view.note}` : "";
+        return ok(`${containerText(view)} at ${x} ${y} ${bz}${note}`, { ok: true, action, ...view });
       } catch (err) {
         return failedWith(err);
       }

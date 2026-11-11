@@ -283,6 +283,30 @@ describe("routes", () => {
     expect(!result.ok && result.message).toContain("no agent is listening");
   });
 
+  it("takes the helper pack when the agent this session attached is gone, and says why", async () => {
+    // What EngineSession returns once an attached agent is unloaded or the game restarted: the reconnect is refused.
+    const gone = (): EngineSession => {
+      const session = new EngineSession({ port: 9, timeoutMs: 100 });
+      session.call = async () => ({ ok: false, code: -32000, reason: "disconnected", message: "cannot connect to agent on 127.0.0.1:9: connect ECONNREFUSED 127.0.0.1:9" });
+      return session;
+    };
+    vi.mocked(bridge.query).mockResolvedValue({ attributes: {}, inventory: { selectedSlot: 0, hotbar: [], inventory: [] } });
+    const inventory = await readPlayerInventory(gone());
+    expect(inventory.ok && inventory.value.source).toBe("script");
+    expect(inventory.ok && inventory.value.note).toMatch(/agent did not answer \(disconnected: .*ECONNREFUSED.*\); answered from the helper pack/);
+
+    vi.mocked(bridge.query).mockResolvedValue({ block: "minecraft:chest", size: 1, slots: [null] });
+    const container = await readContainer({ x: 1, y: 64, z: -2 }, gone());
+    expect(container.ok && container.value.block).toBe("minecraft:chest");
+    expect(container.ok && container.value.note).toMatch(/disconnected/);
+
+    // Neither route answers: the agent's reason stays.
+    vi.mocked(bridge.query).mockRejectedValue(new Error("the game is not running"));
+    const failed = await readPlayerInventory(gone());
+    expect(!failed.ok && failed.reason).toBe("disconnected");
+    expect(!failed.ok && failed.message).toContain("ECONNREFUSED");
+  });
+
   it("reads a container from the agent, and from the helper pack without one", async () => {
     const fromAgent = await readContainer(
       { x: 1, y: 64, z: -2 },
