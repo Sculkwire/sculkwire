@@ -105,6 +105,10 @@ const KIND_FLOAT: u32 = 2;
 const KIND_ENUM_VARIANT: u32 = 3;
 const KIND_STRING: u32 = 4;
 const KIND_INT: u32 = 5;
+/// An int picked from the record's own value list (`game_thirdperson`: 0, 1, 2). Its record class
+/// shares the int class's parser and setter slots, and it keeps the value, range and list where an
+/// int record does.
+const KIND_INT_CHOICE: u32 = 6;
 const KIND_STRING_LIST: u32 = 8;
 
 /* ------------------------------------------------------------------------------------------------
@@ -588,7 +592,14 @@ fn report(record: usize) -> Option<Report> {
     let kind = pe::read::<u32>(definition + DEFINITION_KIND)?;
     if !matches!(
         kind,
-        KIND_BOOL | KIND_ENUM | KIND_FLOAT | KIND_ENUM_VARIANT | KIND_STRING | KIND_INT | KIND_STRING_LIST
+        KIND_BOOL
+            | KIND_ENUM
+            | KIND_FLOAT
+            | KIND_ENUM_VARIANT
+            | KIND_STRING
+            | KIND_INT
+            | KIND_INT_CHOICE
+            | KIND_STRING_LIST
     ) {
         return None;
     }
@@ -854,7 +865,7 @@ fn entry(record: usize) -> Option<Value> {
             entry.insert(String::from("type"), Value::String(String::from("bool")));
             entry.insert(String::from("value"), Value::Bool(value));
         }
-        KIND_INT => {
+        KIND_INT | KIND_INT_CHOICE => {
             let value = pe::read::<i32>(record + RECORD_VALUE)?;
             entry.insert(String::from("type"), Value::String(String::from("int")));
             entry.insert(String::from("value"), Value::from(value));
@@ -981,7 +992,7 @@ pub fn set(id: &str, value: &Value) -> Result<Value, RpcError> {
     let text = match (info.kind, value) {
         (KIND_BOOL, Value::Bool(flag)) => String::from(if *flag { "true" } else { "false" }),
         (KIND_BOOL, _) => return Err(RpcError::invalid_params("this option takes true or false")),
-        (KIND_INT, Value::Number(number)) => match number.as_i64() {
+        (KIND_INT | KIND_INT_CHOICE, Value::Number(number)) => match number.as_i64() {
             Some(number) => alloc::format!("{number}"),
             None => return Err(RpcError::invalid_params("this option takes a whole number")),
         },
@@ -990,7 +1001,7 @@ pub fn set(id: &str, value: &Value) -> Result<Value, RpcError> {
             _ => return Err(RpcError::invalid_params("this option takes a finite number")),
         },
         (KIND_STRING | KIND_STRING_LIST, Value::String(text)) => text.clone(),
-        (KIND_INT | KIND_FLOAT, _) => return Err(RpcError::invalid_params("this option takes a number")),
+        (KIND_INT | KIND_INT_CHOICE | KIND_FLOAT, _) => return Err(RpcError::invalid_params("this option takes a number")),
         (KIND_STRING | KIND_STRING_LIST, _) => return Err(RpcError::invalid_params("this option takes a string")),
         _ => return Err(RpcError::invalid_params("this option cannot be set by text in this build")),
     };
