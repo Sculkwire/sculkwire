@@ -53,8 +53,8 @@ function invalidParams(message: string): ToolResult {
   return failure({ ok: false, code: -32602, reason: "invalid_params", message });
 }
 
-/** Output schemas, built from the zod sculkwire depends on. */
-function schemas() {
+/** Output schemas, built from the zod sculkwire depends on. Exported so tests check real agent answers against them. */
+export function schemas() {
   const failureSchema = {
     ok: z.boolean(),
     code: z.number().optional(),
@@ -94,14 +94,18 @@ function schemas() {
     format: z.enum(["png", "jpeg"]).optional(),
   };
 
-  const vec3 = z.tuple([z.number(), z.number(), z.number()]);
+  const maybeVec3 = z.tuple([z.number().nullable(), z.number().nullable(), z.number().nullable()]);
   const playerSchema = {
     ...failureSchema,
-    position: vec3.optional(),
+    position: maybeVec3.optional(),
     rotation: z.tuple([z.number().nullable(), z.number().nullable()]).optional(),
-    delta: vec3.optional(),
+    delta: maybeVec3.optional(),
     simTick: z.number().optional(),
     dimension: z.number().nullable().optional(),
+    onGround: z.boolean().nullable().optional(),
+    health: z.number().nullable().optional(),
+    selectedSlot: z.number().nullable().optional(),
+    dimensionState: z.number().nullable().optional(),
   };
 
   const lockSchema = {
@@ -226,7 +230,7 @@ function delivery(value: unknown): Record<string, unknown> {
 }
 
 function playerText(p: EnginePlayerState): string {
-  const at = p.position.map((v) => v.toFixed(2)).join(" ");
+  const at = p.position.map((v) => (v === null ? "?" : v.toFixed(2))).join(" ");
   const [pitch, yaw] = p.rotation;
   return pitch === null || yaw === null ? `at ${at}` : `at ${at}, pitch ${pitch.toFixed(1)}, yaw ${yaw.toFixed(1)}`;
 }

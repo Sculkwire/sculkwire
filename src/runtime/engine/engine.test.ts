@@ -5,9 +5,11 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 import type { ClientInstall } from "../client/install.ts";
 import { gamePath } from "./gamepath.ts";
 import { EngineSession, engineGameDir, type EngineStatus } from "./engine.ts";
+import { schemas } from "./mcp.ts";
 import { AgentClient } from "./client.ts";
 import type { UiKeyAction } from "./ui.ts";
 
@@ -200,6 +202,34 @@ describe("engine method wrappers", () => {
     if (!player.ok) throw new Error(player.message);
     expect(player.value.position).toEqual([1, 2, 3]);
     expect(agent.requests.map((request) => request.method)).toEqual(["engine.resolve", "player.state"]);
+  });
+
+  it("publishes player.state in engine_player's strict output schema, keeping the agent's extra readings and dropping unknown keys", async () => {
+    const agent = await makeAgent();
+    const session = makeSession(agent);
+    // What the retail agent's `h_player_state` answers in a world (live snapshot plus component reads), with a key a
+    // newer agent might add.
+    const answer = {
+      position: [12.5, 64, -3.25],
+      rotation: [10.5, -90],
+      delta: [0, -0.0784, 0],
+      simTick: 48213,
+      dimension: null,
+      health: 20,
+      selectedSlot: null,
+      dimensionState: 0,
+      onGround: true,
+      futureField: { x: 1 },
+    };
+    agent.handler = (request) => reply(request, answer);
+    const player = await session.playerState();
+    if (!player.ok) throw new Error(player.message);
+    const { futureField: _dropped, ...known } = answer;
+    expect(player.value).toEqual(known);
+    // The MCP SDK rejects keys the output schema does not name ("must NOT have additional properties").
+    const parsed = z.object(schemas().playerSchema).strict().safeParse({ ok: true, ...player.value });
+    expect(parsed.success, parsed.error?.message).toBe(true);
+    expect(z.object(schemas().playerSchema).strict().safeParse({ ok: true, ...answer }).success).toBe(false);
   });
 
   it("keeps the agent's diagnostic status fields (gameinput, ui, drain counters) and drops malformed ones", async () => {

@@ -171,14 +171,52 @@ export interface EngineScreenshotResult {
 }
 
 export interface EnginePlayerState {
-  position: [number, number, number];
+  /** The feet; an entry is null when the agent read a non-finite float. */
+  position: [number | null, number | null, number | null];
   /** Pitch and yaw in degrees, null when the engine's rotation component could not be read. */
   rotation: [number | null, number | null];
   /** Movement since the previous tick. */
-  delta?: [number, number, number];
+  delta?: [number | null, number | null, number | null];
   /** Simulation tick the state was read on. */
   simTick?: number;
   dimension: number | null;
+  /** On the ground; null when the agent could not read it. */
+  onGround?: boolean | null;
+  /** Health points; null when the agent could not read it. */
+  health?: number | null;
+  /** Selected hotbar slot; null when the agent could not read it. */
+  selectedSlot?: number | null;
+  /** The raw `DimensionStateComponent` value the agent reads; `dimension` stays the decoded id. */
+  dimensionState?: number | null;
+}
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function numbers<N extends number>(value: unknown, length: N): (number | null)[] | undefined {
+  return Array.isArray(value) && value.length === length ? value.map(numberOrNull) : undefined;
+}
+
+/**
+ * `player.state` as the tools publish it: the fields `EnginePlayerState` names, each checked, and nothing else, so an
+ * agent that answers more (a newer agent, an extension's engine) still fits engine_player's output schema.
+ */
+export function normalizePlayerState(raw: unknown): EnginePlayerState {
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const out: EnginePlayerState = {
+    position: (numbers(r.position, 3) ?? [null, null, null]) as EnginePlayerState["position"],
+    rotation: (numbers(r.rotation, 2) ?? [null, null]) as EnginePlayerState["rotation"],
+    dimension: numberOrNull(r.dimension),
+  };
+  const delta = numbers(r.delta, 3);
+  if (delta) out.delta = delta as NonNullable<EnginePlayerState["delta"]>;
+  if (typeof r.simTick === "number") out.simTick = r.simTick;
+  if ("onGround" in r) out.onGround = typeof r.onGround === "boolean" ? r.onGround : null;
+  if ("health" in r) out.health = numberOrNull(r.health);
+  if ("selectedSlot" in r) out.selectedSlot = numberOrNull(r.selectedSlot);
+  if ("dimensionState" in r) out.dimensionState = numberOrNull(r.dimensionState);
+  return out;
 }
 
 export interface EngineTickArgs {
@@ -933,9 +971,10 @@ export class EngineSession {
     }
   }
 
-  /** `player.state`. `dimension` is a numeric dimension id, or null outside a world. */
-  playerState(): Promise<EngineResult<EnginePlayerState>> {
-    return this.#call("player.state");
+  /** `player.state`, normalized. `dimension` is a numeric dimension id, or null when the agent does not decode it. */
+  async playerState(): Promise<EngineResult<EnginePlayerState>> {
+    const result = await this.#call<unknown>("player.state");
+    return result.ok ? { ok: true, value: normalizePlayerState(result.value) } : result;
   }
 
   /**
