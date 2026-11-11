@@ -6,6 +6,7 @@
 import type { CommandOutput } from "../bridge.ts";
 import type { ActionResult, InputKind, PlayerAction, PlayerController, PlayerState, Vec3 } from "../player.ts";
 import type { PlayAction, PlayResult } from "../skills/play.ts";
+import type { TraceFrame } from "../skills/stats.ts";
 
 /** A position relative to the arena origin (the centre of the arena floor's top face, where feet stand). */
 export interface Offset {
@@ -94,6 +95,8 @@ export interface RunOutcome {
   state?: PlayerState;
   action?: ActionResult;
   play?: PlayResult;
+  /** The fight's per-tick trace over the action (`traceFights`), when the action fought. */
+  frames?: TraceFrame[];
 }
 
 export type Metric = number | string | boolean;
@@ -115,6 +118,11 @@ export interface Scenario {
   build?(ctx: BenchContext): string[];
   player: PlayerSetup;
   mobs?: MobSpawn[];
+  /**
+   * Summon the mobs this many ms after the action started instead of before it (their ids reach `ctx.mobs` once
+   * found), so the action begins with no mob in sight. Undefined: the mobs are there before the action starts.
+   */
+  spawnAfterMs?: number;
   /** What the player does. `play` runs in the bench process. */
   action(ctx: BenchContext): PlayerAction | PlayAction;
   /** Extra numbers for the table and the JSON, read after the run. */

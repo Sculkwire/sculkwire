@@ -1,6 +1,7 @@
 /** Shared pieces of the combat scenarios: the standard loadout, a walled arena and the common judging. */
 import type { Vec3 } from "../player.ts";
 import { fillBox } from "./arena.ts";
+import { traceMetrics } from "./trace.ts";
 import type { Metric, MobSpawn, PlayerSetup, RunOutcome, Scenario } from "./types.ts";
 
 /** Survival at night with an iron sword, cooked beef, full iron armor and a shield in the off hand. */
@@ -23,11 +24,16 @@ export function wall(origin: Vec3, radius = COMBAT_AREA.radius, height = 3): str
   return [...side(-r, -r, r, -r), ...side(-r, r, r, r), ...side(-r, -r, -r, r), ...side(r, -r, r, r)];
 }
 
-/** A combat scenario: the standard arena, a `play` kill goal, judged on kills and deaths. */
+/**
+ * A combat scenario: the standard arena, a `play` kill goal, judged on kills and deaths. The extras add the fight's
+ * own counts and, from the run's per-tick trace, how the player moved and blocked while mobs could reach it
+ * (`traceMetrics`; the stats' `hits` stays the hit count, the trace's own count of hit frames is not repeated).
+ */
 export function combat(
-  s: Pick<Scenario, "name" | "summary" | "runs"> & {
+  s: Pick<Scenario, "name" | "summary" | "runs" | "spawnAfterMs"> & {
     mobs: MobSpawn[];
     goal: string;
+    /** Default `FIGHTER` (night); `{ ...FIGHTER, time: "day" }` for a day fight. */
     player?: PlayerSetup;
     timeoutMs?: number;
     build?: (origin: Vec3) => string[];
@@ -48,15 +54,19 @@ export function combat(
     build: (ctx) => [...wall(ctx.origin), ...(s.build?.(ctx.origin) ?? [])],
     player: s.player ?? FIGHTER,
     mobs: s.mobs,
+    ...(s.spawnAfterMs !== undefined ? { spawnAfterMs: s.spawnAfterMs } : {}),
     action: () => ({ action: "play", goal: s.goal, durationMs: timeoutMs }),
     measure: (_ctx, o) => {
       const by = (re: RegExp) => Math.round(o.hurts.filter((h) => re.test(h.damager ?? "")).reduce((t, h) => t + h.damage, 0) * 10) / 10;
       const tactics = o.play?.trace ?? [];
-      return {
+      const extra: Record<string, Metric> = {
         hitsTaken: o.hurts.length,
         cleared: o.kills === s.mobs.length,
         swings: o.play?.stats.swings ?? 0,
         hits: o.play?.stats.hits ?? 0,
+        misses: o.play?.stats.misses ?? 0,
+        crits: o.play?.stats.crits ?? 0,
+        blocked: o.play?.stats.blocked ?? 0,
         eats: tactics.filter((t) => t.action === "eat" && t.result.ok).length,
         flees: tactics.filter((t) => t.action === "flee").length,
         zombieDmg: by(/zombie/),
@@ -64,6 +74,12 @@ export function combat(
         spiderDmg: by(/spider/),
         exploded: o.exploded,
       };
+      if (o.frames) {
+        const { hits: _traceHits, aimErrAtSwing, ...trace } = traceMetrics(o.frames);
+        Object.assign(extra, trace);
+        if (aimErrAtSwing !== undefined) extra.aimErrAtSwing = aimErrAtSwing;
+      }
+      return extra;
     },
     success: s.success ?? ((o, extra) => o.kills === s.mobs.length && o.deaths === 0 && (s.also?.(o, extra) ?? true)),
   };

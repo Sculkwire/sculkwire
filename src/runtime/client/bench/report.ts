@@ -1,11 +1,13 @@
 /** Per-scenario aggregates and the markdown table the bench prints. Pure, so the tests check the numbers. */
 import type { StalenessSummary } from "../entitystream.ts";
 import type { Metric, RunOutcome } from "./types.ts";
+import type { BenchStance } from "./stance.ts";
+import type { BenchView } from "./view.ts";
 
 export interface RunRecord {
   run: number;
   success: boolean;
-  outcome: Omit<RunOutcome, "play" | "state" | "action" | "hurts"> & { hurts: number };
+  outcome: Omit<RunOutcome, "play" | "state" | "action" | "hurts" | "frames"> & { hurts: number };
   extra: Record<string, Metric>;
   /** The play trace's tactic summary or the action message, for reading failures. */
   note: string;
@@ -17,6 +19,10 @@ export interface ScenarioReport {
   scenario: string;
   suite: string;
   input: string;
+  /** The camera the scenario ran in (`--view`); absent when the bench left the game's view alone. */
+  view?: BenchView;
+  /** The fight's shield stance the actions ran with (`--stance`); absent when the bench left the scenarios' own. */
+  stance?: BenchStance;
   runs: RunRecord[];
   summary: {
     runs: number;
@@ -76,16 +82,21 @@ export function summarize(scenario: string, suite: string, input: string, runs: 
   };
 }
 
-/** One markdown table, a row per scenario. Extras go into the last column as `name value`. */
+/**
+ * One markdown table, a row per scenario (and view and stance). A `view` column follows `input` when any report has a
+ * view, then a `stance` column when any report has a stance. Extras go into the last column as `name value`.
+ */
 export function markdownTable(reports: readonly ScenarioReport[]): string {
-  const head = "| scenario | input | success | avg time s | avg damage | avg health left | min health | deaths | kills | lost | blast dmg | falls | extra |";
-  const rule = "|---|---|---|---|---|---|---|---|---|---|---|---|---|";
+  const views = reports.some((r) => r.view !== undefined);
+  const stances = reports.some((r) => r.stance !== undefined);
+  const head = `| scenario | input |${views ? " view |" : ""}${stances ? " stance |" : ""} success | avg time s | avg damage | avg health left | min health | deaths | kills | lost | blast dmg | falls | extra |`;
+  const rule = `|---|---|${views ? "---|" : ""}${stances ? "---|" : ""}---|---|---|---|---|---|---|---|---|---|---|`;
   const rows = reports.map((r) => {
     const s = r.summary;
     const extra = Object.entries(s.extra)
       .map(([k, v]) => `${k} ${v}`)
       .join(", ");
-    return `| ${r.scenario} | ${r.input} | ${s.successes}/${s.runs} | ${s.avgTimeS} | ${s.avgDamage} | ${s.avgHealthLeft} | ${s.minHealthLeft} | ${s.deaths} | ${s.kills} | ${s.lost} | ${s.blastDamage} | ${s.falls} | ${extra} |`;
+    return `| ${r.scenario} | ${r.input} |${views ? ` ${r.view ?? ""} |` : ""}${stances ? ` ${r.stance ?? ""} |` : ""} ${s.successes}/${s.runs} | ${s.avgTimeS} | ${s.avgDamage} | ${s.avgHealthLeft} | ${s.minHealthLeft} | ${s.deaths} | ${s.kills} | ${s.lost} | ${s.blastDamage} | ${s.falls} | ${extra} |`;
   });
   return [head, rule, ...rows].join("\n");
 }
