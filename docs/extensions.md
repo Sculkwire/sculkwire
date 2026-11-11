@@ -82,7 +82,7 @@ An extension uses the values on `host` at runtime and never imports sculkwire's 
 | Member | Used for |
 |---|---|
 | `name` | Messages, such as a failed attach in `sculk bench` |
-| `input` | The controller's engine route (`EngineInput` in `src/runtime/client/player.ts`): `prepare`, `reachable`, `look`, `move`, `release`, `attack`, `use`, and an optional `takeover` that lets the user take control with F9 |
+| `input` | The controller's engine route (`EngineInput` in `src/runtime/client/player.ts`): `prepare`, `reachable`, `look`, `move`, `release`, `attack`, `use`, an optional `key` (a key down or up on the game's own keyboard, for `select_slot` and `hold`; without it they use the keyboard route), and an optional `takeover` that lets the user take control with F9 |
 | `motion()` | The newest position, rotation, velocity, ground contact and health with its arrival time. While under 250 ms old it replaces those fields of the helper pack's player state |
 | `pausedReason()` | A message when the simulation is paused; `player_act` then refuses to run and a `play` job stops |
 | `keyboardNote` | Optional text added to `player_act` output when the keyboard route was used |

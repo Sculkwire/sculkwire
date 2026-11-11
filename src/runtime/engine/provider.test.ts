@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EngineSession } from "./engine.ts";
+import { EngineSession, type EngineResult } from "./engine.ts";
 import { AgentInputProvider } from "./provider.ts";
 
 describe("AgentInputProvider without an agent", () => {
@@ -27,6 +27,26 @@ describe("AgentInputProvider without an agent", () => {
     expect(sent).toEqual([]);
     await provider.stopped();
     expect(provider.focusWatch()).toBeUndefined();
+    provider.close();
+  });
+
+  it("sends a key's press and release through ui.key and fails the call when the agent refuses it", async () => {
+    const session = new EngineSession({ port: 9, timeoutMs: 500 });
+    const sent: unknown[] = [];
+    let refuse = false;
+    session.uiKey = async (key, action): Promise<EngineResult<unknown>> => {
+      sent.push({ key, action });
+      return refuse ? { ok: false, code: -32001, reason: "anchor_missing", message: "no game window" } : { ok: true, value: {} };
+    };
+    const provider = new AgentInputProvider(session, "linux");
+    await provider.input.key?.("3", true);
+    await provider.input.key?.("3", false);
+    expect(sent).toEqual([
+      { key: "3", action: "down" },
+      { key: "3", action: "up" },
+    ]);
+    refuse = true;
+    await expect(provider.input.key?.("e", true)).rejects.toThrow("anchor_missing: no game window");
     provider.close();
   });
 });

@@ -1,6 +1,6 @@
 /**
  * The in-game agent as sculkwire's built-in in-process input provider: the player controller's engine route (absolute
- * view, held movement, attacks and item use through the game), the tick stream that replaces the helper's position and
+ * view, held movement, attacks, item use and keys through the game), the tick stream that replaces the helper's position and
  * rotation while it is fresh, the pause guard, the input lock around actions and play jobs, and the desktop focus
  * watcher of a window-mode game that gates polled input in the agent.
  *
@@ -69,6 +69,10 @@ export class AgentInputProvider implements InputProvider {
       attack: async () => (await must(session.attack())).hit,
       use: async (down) => {
         await must(session.use(down));
+      },
+      // `ui.key` hands the key to the game's own window procedure, where the game reads its keyboard.
+      key: async (key, down) => {
+        await must(session.uiKey(key, down ? "down" : "up"));
       },
       reachable: async () => (await session.status()).ok,
       takeover: session.lock,

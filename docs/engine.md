@@ -126,7 +126,7 @@ Full inputs and results are in the [tool reference](tools.md#engine), which name
 | `interact` | Use a block or an entity like a right click, and the screen it opened, see below |
 | `screen` | The open screen: its containers, moving items, its own action, closing it, see below |
 
-`player_act` and `sculk bench` on the engine route send `input.look` (the view shown from the next frame), `input.move` (a movement vector the game applies every tick until no update arrives for a second; sculkwire repeats it every 300 ms), `input.release`, `input.attack` and `input.use`. `input.attack` answers with the id of the entity under the crosshair, the id the Script API reports. The tick stream carries position, rotation, velocity, ground contact, health and the selected slot every tick, so the view the controller reads is one tick old.
+`player_act` and `sculk bench` on the engine route send `input.look` (the view shown from the next frame), `input.move` (a movement vector the game applies every tick until no update arrives for a second; sculkwire repeats it every 300 ms), `input.release`, `input.attack` and `input.use`, plus `ui.key` with `down` and `up` for the hotbar keys of `select_slot` and the keys of `hold`. `input.attack` has no hold, so `mine` stays on the keyboard route. `input.attack` answers with the id of the entity under the crosshair, the id the Script API reports. The tick stream carries position, rotation, velocity, ground contact, health and the selected slot every tick, so the view the controller reads is one tick old.
 
 ### Agent Port
 

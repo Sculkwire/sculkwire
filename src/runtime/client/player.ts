@@ -135,6 +135,22 @@ const FIRE_LATENCY_TICKS = 2;
 /** Default key names (xdotool names; Windows maps them to virtual keys) for Bedrock's default keyboard layout. */
 const KEYS = { forward: "w", left: "a", back: "s", right: "d", jump: "space", sneak: "Shift_L", sprint: "Control_L" } as const;
 
+/** The keys Bedrock's default layout moves with: WASD, space to jump, shift to sneak, ctrl to sprint. */
+const MOVEMENT_KEY = /^(?:[wasd]|space|shift(?:_[lr])?|ctrl(?:_[lr])?|control(?:_[lr])?)$/i;
+
+/** Split held keys into the movement they give and the rest. `move` is undefined when no key moves. */
+function movementKeys(keys: readonly string[]): { move?: Partial<MoveVector>; keys: string[] } {
+  const held = (re: RegExp) => keys.some((k) => re.test(k));
+  const move: Partial<MoveVector> = {};
+  if (held(/^[ws]$/i)) move.forward = (held(/^w$/i) ? 1 : 0) - (held(/^s$/i) ? 1 : 0);
+  if (held(/^[ad]$/i)) move.strafe = (held(/^d$/i) ? 1 : 0) - (held(/^a$/i) ? 1 : 0);
+  if (held(/^space$/i)) move.jump = true;
+  if (held(/^shift(?:_[lr])?$/i)) move.sneak = true;
+  if (held(/^(?:ctrl|control)(?:_[lr])?$/i)) move.sprint = true;
+  const rest = keys.filter((k) => !MOVEMENT_KEY.test(k));
+  return rest.length === keys.length ? { keys: rest } : { move, keys: rest };
+}
+
 /** Signed smallest difference `to - from` in degrees, in (-180, 180]. */
 export function angleDiff(from: number, to: number): number {
   const d = (((to - from) % 360) + 540) % 360 - 180;
@@ -879,6 +895,11 @@ export interface EngineInput {
   attack(): Promise<string | null>;
   /** Press (true) or let go of (false) the use button with the held item: throws, draws, eats, places. */
   use(down: boolean): Promise<void>;
+  /**
+   * Press (true) or let go of (false) one key on the game's own keyboard, by its xdotool name (`1`, `e`, `F5`): the
+   * hotbar keys of `select_slot` and the keys `hold` names. Optional: without it those keys need the keyboard route.
+   */
+  key?(key: string, down: boolean): Promise<void>;
   /** The provider's input lock: the user can take control with F9 while an action runs. */
   takeover?: InputTakeover;
 }
@@ -1000,6 +1021,8 @@ export class EngineBackend implements InputBackend {
   #keepalive?: NodeJS.Timeout;
   #failure?: EngineInputError;
   #looksInFlight = 0;
+  /** Keys this route holds down through `EngineInput.key`. */
+  readonly #keys = new Set<string>();
 
   constructor(engine: EngineInput) {
     this.#engine = engine;
@@ -1077,11 +1100,30 @@ export class EngineBackend implements InputBackend {
     return this.#do(() => this.#engine.use(down));
   }
 
+  /** The provider takes keys on the game's own keyboard. */
+  get keys(): boolean {
+    return this.#engine.key !== undefined;
+  }
+
+  /** Press or let go of a key through the provider (`keys` must be true). */
+  async key(name: string, down: boolean): Promise<void> {
+    if (this.#keys.has(name) === down) return;
+    await this.#do(async () => {
+      if (!this.#engine.key) throw new Error("the input provider takes no keys");
+      await this.#engine.key(name, down);
+    });
+    if (down) this.#keys.add(name);
+    else this.#keys.delete(name);
+  }
+
   async release(): Promise<void> {
     this.#stopKeepalive();
     this.#move = { ...STILL };
     this.#sentAt = Number.NEGATIVE_INFINITY;
+    const keys = [...this.#keys];
+    this.#keys.clear();
     if (this.#failure) return;
+    for (const k of keys) await this.#engine.key?.(k, false).catch(() => undefined);
     await this.#engine.use(false).catch(() => undefined);
     await this.#engine.release().catch(() => undefined);
   }
@@ -1261,12 +1303,22 @@ export class PlayerController {
     this.#held.delete(key);
   }
 
+  /**
+   * A key on the route that carries the action: the provider's own game keyboard on the engine route when it takes
+   * keys, else the system keyboard.
+   */
+  async #key(key: string, down: boolean): Promise<void> {
+    const backend = this.#backend;
+    if (backend instanceof EngineBackend && backend.keys) return backend.key(key, down);
+    return down ? this.#down(key) : this.#up(key);
+  }
+
   async #tap(key: string, ms: number, signal?: AbortSignal): Promise<void> {
-    await this.#down(key);
+    await this.#key(key, true);
     try {
       await this.#clock.sleep(ms, signal);
     } finally {
-      await this.#up(key);
+      await this.#key(key, false);
     }
   }
 
@@ -1743,6 +1795,10 @@ export class PlayerController {
         }
         return result(true, "used the held item");
       case "mine":
+        // The agent's `input.attack` is one click, so a held attack (breaking a block in survival) needs the mouse.
+        if (this.#backend.kind === "engine" && this.world.input.unavailable) {
+          return result(false, `mine holds the attack button, which the engine route cannot hold (input.attack is one click), and the keyboard route is unavailable: ${this.world.input.unavailable}`);
+        }
         await this.#buttonDown(1);
         try {
           await this.#clock.sleep(action.holdMs ?? 1000, signal);
@@ -1771,14 +1827,21 @@ export class PlayerController {
       case "sneak":
         await this.#setMove({ sneak: action.on });
         return result(true, action.on ? "sneaking" : "stopped sneaking");
-      case "hold":
+      case "hold": {
+        // On the engine route the movement keys become the held movement vector, the way move_to walks; the other
+        // keys go to the game's keyboard through the provider.
+        const { move, keys } = this.#backend.kind === "engine" ? movementKeys(action.keys) : { move: undefined, keys: action.keys };
+        const before = { ...this.#move };
         try {
-          for (const k of action.keys) await this.#down(k);
+          if (move) await this.#setMove(move);
+          for (const k of keys) await this.#key(k, true);
           await this.#clock.sleep(action.ms, signal);
         } finally {
-          for (const k of action.keys) await this.#up(k);
+          for (const k of keys) await this.#key(k, false);
+          if (move) await this.#setMove(Object.fromEntries(Object.keys(move).map((k) => [k, before[k as keyof MoveVector]])));
         }
         return result(true, `held ${action.keys.join("+")} for ${action.ms} ms`);
+      }
       case "wait":
         await this.#clock.sleep(action.ms, signal);
         return result(true, `waited ${action.ms} ms`);

@@ -205,7 +205,7 @@ describe("projectile intercept", () => {
  */
 function fakeWorld(
   degPerPx: number,
-  opts: { blocked?: boolean; latencyMs?: number; entities?: EntityInfo[]; engine?: { failAfter?: number; prepareFails?: boolean; noTick?: boolean } } = {},
+  opts: { blocked?: boolean; latencyMs?: number; entities?: EntityInfo[]; engine?: { failAfter?: number; prepareFails?: boolean; noTick?: boolean; noKeys?: boolean } } = {},
 ) {
   const s: PlayerState = {
     tick: 0,
@@ -312,6 +312,15 @@ function fakeWorld(
     use: async (down) => {
       call("use", { down });
     },
+    // The game's keyboard: a digit key picks that hotbar slot.
+    ...(opts.engine.noKeys
+      ? {}
+      : {
+          key: async (key: string, down: boolean) => {
+            call("key", { key, down });
+            if (down && /^[1-9]$/.test(key)) s.selectedSlot = Number(key);
+          },
+        }),
   };
   const world: PlayerWorld = {
     input,
@@ -528,5 +537,70 @@ describe("PlayerController on the engine route", () => {
     expect(r).toMatchObject({ ok: false, input: "engine" });
     expect(r.message).toBe(`engine input failed (disconnected: agent closed the connection), and the keyboard route is unavailable: ${reason}`);
     await failing.releaseAll();
+  });
+
+  it("picks hotbar slots and holds keys through the provider's game keyboard when there is no keyboard route", async () => {
+    const reason = "player control needs window or off-screen mode on Linux (game_launch with display: window or headless), or Windows";
+    const game = (engine: { noKeys?: boolean }) => {
+      const fake = fakeWorld(0.26, { latencyMs: 20, engine });
+      return { ...fake, world: { ...fake.world, input: unavailableInput(reason) } };
+    };
+    const { world, s, engineLog } = game({});
+    const pc = new PlayerController(world);
+    expect(await pc.selectInput("auto")).toBe("engine");
+
+    const picked = await pc.run({ action: "select_slot", slot: 3 });
+    expect(picked).toMatchObject({ ok: true, input: "engine" });
+    expect(s.selectedSlot).toBe(3);
+    const keys = () => engineLog.filter((e) => e.method === "key").map((e) => e.params);
+    expect(keys()).toEqual([{ key: "3", down: true }, { key: "3", down: false }]);
+    // The skills' hands use the same key.
+    expect(await pc.hands.selectSlot(5)).toBe(true);
+    expect(s.selectedSlot).toBe(5);
+
+    // Movement keys become the held movement vector; the others go to the game's keyboard, and all are let go after.
+    engineLog.length = 0;
+    const held = await pc.run({ action: "hold", keys: ["w", "Control_L", "e"], ms: 300 });
+    expect(held).toMatchObject({ ok: true, input: "engine" });
+    expect(Math.hypot(s.location.x, s.location.z)).toBeGreaterThan(0.5);
+    const moves = engineLog.filter((e) => e.method === "move").map((e) => e.params as MoveVector);
+    expect(moves[0]).toMatchObject({ forward: 1, strafe: 0, sprint: true });
+    expect(moves.at(-1)).toMatchObject({ forward: 0, sprint: false });
+    expect(keys()).toEqual([{ key: "e", down: true }, { key: "e", down: false }]);
+
+    // The agent's attack is one click, so a held attack needs the keyboard route's mouse.
+    const mined = await pc.run({ action: "mine", holdMs: 100 });
+    expect(mined).toMatchObject({ ok: false, input: "engine" });
+    expect(mined.message).toBe(`mine holds the attack button, which the engine route cannot hold (input.attack is one click), and the keyboard route is unavailable: ${reason}`);
+
+    // A provider that takes no keys leaves the hotbar to the keyboard route, which is not there.
+    const keyless = new PlayerController(game({ noKeys: true }).world);
+    await keyless.selectInput();
+    const r = await keyless.run({ action: "select_slot", slot: 2 });
+    expect(r).toMatchObject({ ok: false, input: "engine" });
+    expect(r.message).toBe(reason);
+    await keyless.releaseAll();
+  });
+
+  it("lets go of a key held through the provider when the action is cancelled", async () => {
+    const { world, engineLog } = fakeWorld(0.26, { latencyMs: 20, engine: {} });
+    const ac = new AbortController();
+    const engine = world.engine!;
+    // Cancelled as soon as the key is down, while the hold waits.
+    const key = engine.key!;
+    const pc = new PlayerController({
+      ...world,
+      engine: {
+        ...engine,
+        key: async (k, down) => {
+          await key(k, down);
+          if (down) ac.abort();
+        },
+      },
+    });
+    await pc.selectInput();
+    const r = await pc.run({ action: "hold", keys: ["q"], ms: 5000 }, ac.signal);
+    expect(r).toMatchObject({ ok: false, message: "cancelled" });
+    expect(engineLog.filter((e) => e.method === "key").map((e) => e.params)).toEqual([{ key: "q", down: true }, { key: "q", down: false }]);
   });
 });
