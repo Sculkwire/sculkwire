@@ -9,6 +9,7 @@ import type { Channel } from "../core/version.ts";
 import { type DtsSymbol, parsePackage } from "./dts.ts";
 import { single, writeJsonAtomic } from "./net.ts";
 import { ensureBedrockSamples } from "./samples.ts";
+import { suggestNames } from "./suggest.ts";
 import { ensureTypings } from "./typings.ts";
 import { TYPINGS_PACKAGES } from "./versions.ts";
 
@@ -310,16 +311,13 @@ export async function apiLookup(opts: {
     return entry;
   });
 
-  const suggestions: string[] = [];
-  if (!entries.length) {
-    const needle = (parsed.path.at(-1) ?? opts.query).toLowerCase();
-    for (const s of betaTable.all) {
-      if (suggestions.length >= 15) break;
-      if (inModule(s) && s.name.toLowerCase().includes(needle) && !suggestions.includes(s.name)) {
-        suggestions.push(s.name);
-      }
-    }
-  }
+  const suggestions = entries.length
+    ? []
+    : suggestNames(
+        parsed.path.at(-1) ?? opts.query,
+        betaTable.all.filter(inModule).map((s) => s.name),
+        { key: (n) => n.slice(n.lastIndexOf(".") + 1) },
+      );
   return {
     channel: opts.channel,
     version: betaTable.version,

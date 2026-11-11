@@ -7,6 +7,7 @@ import { join, relative } from "node:path";
 import type { Channel } from "../core/version.ts";
 import { lookupRockide, type RockideLookup, rockideComponentIds } from "./rockide.ts";
 import { ensureBedrockSamples, type SamplesCheckout, type SamplesPart } from "./samples.ts";
+import { suggestNames } from "./suggest.ts";
 
 async function readJson<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(path, "utf8")) as T;
@@ -109,9 +110,7 @@ export async function commandLookup(opts: { name: string; channel: Channel; offl
       return { syntax, params };
     }),
   }));
-  const suggestions = commands.length
-    ? []
-    : raw.commands.filter((c) => c.name.includes(q)).map((c) => c.name).slice(0, 15);
+  const suggestions = commands.length ? [] : suggestNames(q, raw.commands.flatMap((c) => [c.name, ...aliasNames(c)]));
   return { ...tagOf(samples), query: opts.name, commands, suggestions };
 }
 
@@ -167,9 +166,12 @@ export async function molangLookup(opts: { name: string; channel: Channel; offli
   const candidates = q.includes(".") ? [q] : [`query.${q}`, `math.${q}`];
   const exact = all.filter((e) => candidates.includes(e.name.toLowerCase()));
   const needle = q.replace(/^(query|math)\./, "");
+  const byName = new Map(all.map((e) => [e.name, e]));
   const entries = exact.length
     ? exact
-    : all.filter((e) => e.name.toLowerCase().includes(needle)).slice(0, opts.limit ?? 20);
+    : suggestNames(needle, byName.keys(), { limit: opts.limit ?? 20, key: (n) => n.replace(/^(query|math)\./, "") }).map(
+        (n) => byName.get(n)!,
+      );
   return { ...tagOf(samples), query: opts.name, exact: exact.length > 0, entries };
 }
 
@@ -327,12 +329,11 @@ export async function componentLookup(opts: { id: string; channel: Channel; offl
     suggestions: [],
   };
   if (!result.docs.length && !result.engineSchemas.length && !rockide.matches.length) {
-    const needle = id.replace(/^minecraft:/, "");
     const rockideIds = rockide.root ? await rockideComponentIds(rockide.root) : [];
-    result.suggestions = [...new Set([...docs.keys(), ...schemas.keys(), ...rockideIds])]
-      .filter((k) => k.includes(needle))
-      .sort()
-      .slice(0, 20);
+    result.suggestions = suggestNames(id.replace(/^minecraft:/, ""), [...docs.keys(), ...schemas.keys(), ...rockideIds], {
+      limit: 20,
+      key: (k) => k.replace(/^minecraft:/, ""),
+    });
   }
   return result;
 }

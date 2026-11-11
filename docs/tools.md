@@ -52,7 +52,7 @@ Searches the official Minecraft Creator docs from Microsoft Learn with BM25. Ide
 
 ### api_lookup
 
-Looks up a Script API symbol in the channel's `@minecraft/*` typings, e.g. `Entity.applyDamage`, `Entity`, `applyDamage`, `world.getDimension` or `@minecraft/server-ui:ActionFormData.button`. Returns the signature, the docs, parameters, what it throws, the privileges, whether it is beta, and the module version that added it. A class lookup lists every member, and inherited members are found through the base classes.
+Looks up a Script API symbol in the channel's `@minecraft/*` typings, e.g. `Entity.applyDamage`, `Entity`, `applyDamage`, `world.getDimension` or `@minecraft/server-ui:ActionFormData.button`. Returns the signature, the docs, parameters, what it throws, the privileges, whether it is beta, and the module version that added it. A class lookup lists every member, and inherited members are found through the base classes. When nothing matches, `suggestions` lists close names.
 
 | Input | Description |
 |---|---|
@@ -63,7 +63,7 @@ Looks up a Script API symbol in the channel's `@minecraft/*` typings, e.g. `Enti
 
 ### command_lookup
 
-Shows the syntax of a slash command from the engine's command metadata. You get every overload, the parameter types, allowed enum values, the permission level and whether cheats are needed. When nothing matches, `suggestions` lists close names.
+Shows the syntax of a slash command from the engine's command metadata. You get every overload, the parameter types, allowed enum values, the permission level and whether cheats are needed. When nothing matches, `suggestions` lists close names: names containing the query first, then misspellings (`gvie` → `give`, `tpp` → `tp`).
 
 | Input | Description |
 |---|---|
@@ -72,7 +72,7 @@ Shows the syntax of a slash command from the engine's command metadata. You get 
 
 ### molang_lookup
 
-Explains a Molang query or math function, e.g. `query.is_baby`, `q.is_baby`, `is_baby` or `math.lerp`. Shows what it does, how many arguments it takes, what it returns, its query sets and the versions it exists in. `exact` says whether the name matched exactly.
+Explains a Molang query or math function, e.g. `query.is_baby`, `q.is_baby`, `is_baby` or `math.lerp`. Shows what it does, how many arguments it takes, what it returns, its query sets and the versions it exists in. `exact` says whether the name matched exactly; when it did not, `entries` holds the close names (`is_bbay` → `query.is_baby`).
 
 | Input | Description |
 |---|---|
@@ -82,7 +82,7 @@ Explains a Molang query or math function, e.g. `query.is_baby`, `q.is_baby`, `is
 
 ### component_lookup
 
-Explains a component such as `minecraft:behavior.tempt` or `minecraft:geometry`. Returns the engine documentation with every property's type, default and description (`docs`), the engine JSON schemas for each `format_version` (`engineSchemas`), and the [rockide/schemas](https://github.com/rockide/schemas) definition with its description (`rockide`).
+Explains a component such as `minecraft:behavior.tempt` or `minecraft:geometry`. Returns the engine documentation with every property's type, default and description (`docs`), the engine JSON schemas for each `format_version` (`engineSchemas`), and the [rockide/schemas](https://github.com/rockide/schemas) definition with its description (`rockide`). When nothing matches, `suggestions` lists close ids.
 
 `rockide.matches` has one entry per scope that defines the id (`server/entity/behaviors`, `server/block/components`, `server/item/components`, client scopes, ...). Each entry summarizes the schema at the newest `format_version` folder not newer than the channel's game version (`selectedVersion`, `newerThanGame` when every folder is newer): description, type and every property with its type, description, default, allowed values (first 50, `enumCount` for the total), minimum, maximum, required and deprecated flags, and nested properties two levels deep. `formatVersions` lists every folder that has the component and `changes` the versions where its schema file changed. `rockide.release` names the release in use, `rockide.commit` its commit and `rockide.latest` the newest release seen upstream. rockide/schemas is fetched at runtime (see Validation); when it is not cached and cannot be fetched, or `offline` is set without a copy, `matches` is empty and `rockide.note` says why.
 
