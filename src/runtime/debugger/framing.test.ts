@@ -80,4 +80,26 @@ describe("profile summary", () => {
     expect(s.functions[0]).toMatchObject({ functionName: "busyWork", line: 20, selfMs: 3, totalMs: 3 });
     expect(s.functions[1]).toMatchObject({ functionName: "outer", selfMs: 1, totalMs: 4 });
   });
+
+  it("places a native binding at the line of the script frame that called it", () => {
+    // Recorded from BDS on src/runtime/bds/fixtures/gametest_pack: `test.succeed()` is on line 8 and `test.fail(...)` on
+    // line 15 of scripts/main.js, but the capture gives the native frames the end of the calling function (10, 17).
+    const frame = (functionName: string, lineNumber: number) => ({ functionName, url: "main.js", lineNumber, columnNumber: 0 });
+    const s = summarizeProfile({
+      nodes: [
+        { id: 0, callFrame: frame("Test::succeed", 10), hitCount: 1 },
+        { id: 1, callFrame: frame("<anonymous>", 8), hitCount: 1, children: [0] },
+        { id: 2, callFrame: frame("Test::fail", 17), hitCount: 1 },
+        { id: 3, callFrame: frame("<anonymous>", 15), hitCount: 1, children: [2] },
+        { id: 4, callFrame: frame("busyWork", 24), hitCount: 299 },
+        { id: 5, callFrame: frame("<anonymous>", 31), hitCount: 1, children: [4] },
+      ],
+      startTime: 0,
+      endTime: 304_000,
+    });
+    const byName = new Map(s.functions.map((f) => [f.functionName, f]));
+    expect(byName.get("Test::succeed")).toMatchObject({ line: 8, native: true });
+    expect(byName.get("Test::fail")).toMatchObject({ line: 15, native: true });
+    expect(byName.get("busyWork")).toMatchObject({ line: 24, native: false });
+  });
 });

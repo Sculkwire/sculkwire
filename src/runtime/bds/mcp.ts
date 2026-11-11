@@ -266,7 +266,7 @@ export function register(server: McpServer): void {
         durationMs: z.number().optional(),
         sampleCount: z.number().optional(),
         functions: z
-          .array(z.object({ functionName: z.string(), url: z.string(), line: z.number(), column: z.number(), selfMs: z.number(), totalMs: z.number(), selfPercent: z.number() }))
+          .array(z.object({ functionName: z.string(), url: z.string(), line: z.number(), column: z.number(), native: z.boolean(), selfMs: z.number(), totalMs: z.number(), selfPercent: z.number() }))
           .optional(),
       },
     },

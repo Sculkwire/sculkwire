@@ -18,9 +18,11 @@ export interface CpuProfile {
 export interface ProfileFunction {
   functionName: string;
   url: string;
-  /** 1-based, as editors show it. */
+  /** 1-based, as editors show it. For a native function, the line of the script frame that called it. */
   line: number;
   column: number;
+  /** A native Script API binding (`Test::succeed`, `System::currentTick`), not a function of the script. */
+  native: boolean;
   selfMs: number;
   totalMs: number;
   selfPercent: number;
@@ -67,19 +69,33 @@ export function summarizeProfile(profile: CpuProfile, limit = 20): ProfileSummar
   const parent = new Map<number, number>();
   for (const n of profile.nodes) for (const c of n.children ?? []) parent.set(c, n.id);
   const hottest = new Map<string, number>();
+  // Minecraft names a native Script API binding `Class::member`. Its frame has no source, and the line the capture
+  // gives it is not the call: it is the last line of the calling function (its final return, sometimes the line
+  // after), so such a frame is placed at the position of the nearest script frame that called it.
+  const isNative = (node: CpuProfileNode): boolean => node.callFrame.functionName.includes("::");
+  const position = (node: CpuProfileNode): { lineNumber: number; columnNumber: number } => {
+    if (!isNative(node)) return node.callFrame;
+    for (let p = parent.get(node.id); p !== undefined; p = parent.get(p)) {
+      const pn = byId.get(p);
+      if (pn && !isNative(pn) && pn.callFrame.url === node.callFrame.url && pn.callFrame.lineNumber > 0) return pn.callFrame;
+    }
+    return node.callFrame;
+  };
   for (const n of profile.nodes) {
     const name = n.callFrame.functionName || "(anonymous)";
     if (name === "(root)" || name === "(program)" || name === "(idle)") continue;
     // Minecraft's captures carry the 1-based line of the sampled position (not the V8 0-based function start), so
     // one function shows up at several lines: aggregate per function and report its hottest sampled line.
     const key = `${name}\0${n.callFrame.url}`;
+    const at = position(n);
     let f = agg.get(key);
     if (!f) {
       f = {
         functionName: name,
         url: n.callFrame.url,
-        line: Math.max(1, n.callFrame.lineNumber),
-        column: Math.max(1, n.callFrame.columnNumber),
+        line: Math.max(1, at.lineNumber),
+        column: Math.max(1, at.columnNumber),
+        native: isNative(n),
         selfMs: 0,
         totalMs: 0,
         selfPercent: 0,
@@ -90,8 +106,8 @@ export function summarizeProfile(profile: CpuProfile, limit = 20): ProfileSummar
     const hot = hottest.get(key) ?? -1;
     if (self > hot) {
       hottest.set(key, self);
-      f.line = Math.max(1, n.callFrame.lineNumber);
-      f.column = Math.max(1, n.callFrame.columnNumber);
+      f.line = Math.max(1, at.lineNumber);
+      f.column = Math.max(1, at.columnNumber);
     }
     f.selfMs += self / 1000;
     // Count a subtree once per outermost frame of the function (recursion would double count).

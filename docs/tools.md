@@ -231,6 +231,8 @@ Stops the server and returns its exit code, every problem from the whole run and
 
 Profiles your scripts through the session's debugger and returns the top functions by self time, with their file, line, self and total time.
 
+Lines are 1-based: a script function's line is its hottest sampled line. A native Script API binding such as `Test::succeed` or `System::currentTick` (`native: true`) has no source of its own, and the line the game's capture gives it is the end of the calling function, so it is reported at the line of the script frame that called it.
+
 | Input | Description |
 |---|---|
 | `id` | Session id (required) |
