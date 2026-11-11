@@ -41,6 +41,7 @@ import {
 } from "./contentlog.ts";
 import { applyPackDeploy, listDevPacks, packDisplayName, planPackDeploy, readManifestHeader, type PackToDeploy } from "./deploy.ts";
 import { findInstall, optionsFiles, type ClientInstall } from "./install.ts";
+import { debuggerCommandOk, loadFailureMatcher, type FailureMatcher } from "./commandfail.ts";
 import {
   defaultMode,
   hasInput,
@@ -308,6 +309,8 @@ export class ClientBridge {
   #screens: ScreenState = NO_SCREENS;
   /** The game frame's size from the newest screenshot: clicks are fractions of it. */
   #frame?: { width: number; height: number };
+  /** The game's own failure messages for the debugger route's `ok`, read once per install. */
+  #failures?: { install: ClientInstall | undefined; matcher: Promise<FailureMatcher> };
 
   /** A game was launched and has not exited. Before its process is found (a user still starting it) it counts as running. */
   get running(): boolean {
@@ -736,7 +739,17 @@ export class ClientBridge {
     }
     // `[sculkwire:…]` lines are the helper pack's own messages, not command output.
     const output = this.#prints.filter((p) => p.seq > echo.seq && p.seq <= last && !p.message.startsWith("[sculkwire:")).map((p) => p.message.trim());
-    return { command, via: "debugger", ok: !output.some((o) => /^Syntax error|^Unknown command/i.test(o)), output };
+    return { command, via: "debugger", ok: debuggerCommandOk(output, await this.#failureMatcher()), output };
+  }
+
+  #failureMatcher(): Promise<FailureMatcher> {
+    const install = this.install;
+    let failures = this.#failures;
+    if (!failures || failures.install !== install) {
+      failures = { install, matcher: loadFailureMatcher(install?.gameDir, install ? optionsFiles(install)[0] : undefined) };
+      this.#failures = failures;
+    }
+    return failures.matcher;
   }
 
   /** Every block, item or mob id the running game knows: `/connect` data requests, else the helper pack (`readRegistry`). */

@@ -277,7 +277,7 @@ No inputs.
 
 ### game_command
 
-Runs a slash command in the game and returns `ok`, the `output` lines and the route it took. Through `/connect` the result also has `statusCode` and the structured `body`. Through the script debugger it runs server commands, and the output comes from the game's prints.
+Runs a slash command in the game and returns `ok`, the `output` lines and the route it took. Through `/connect` the result also has `statusCode` and the structured `body`, and `ok` is the game's own status. Through the script debugger it runs server commands and the output comes from the game's prints. The debugger sends no status, so `ok` is false when an output line is one of the game's failure messages (`No targets matched selector`, `Function <name> not found.`, a syntax error), read from the installed game's `texts/en_US.lang` and the language in its options.txt; without that file only syntax errors and unknown commands count as failures.
 
 | Input | Description |
 |---|---|

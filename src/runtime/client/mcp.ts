@@ -283,8 +283,8 @@ export function register(server: McpServer): void {
       title: "Run a game command",
       description:
         "Run a slash command in the running client. Uses /connect when attached (structured status and body), else the " +
-        "script debugger (server commands; output " +
-        "from the game's prints).",
+        "script debugger (server commands; output from the game's prints, `ok` false when a line is one of the game's " +
+        "failure messages such as `No targets matched selector`).",
       inputSchema: {
         command: z.string().describe("Command line, with or without the leading slash"),
         via: z.enum(["auto", "connect", "debugger"]).optional(),

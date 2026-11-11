@@ -4,6 +4,8 @@ Release notes for sculkwire. Each `## vX.Y.Z` section becomes the GitHub release
 
 ## Unreleased
 
+- `game_command` through the script debugger answers `ok: false` when the output is one of the game's failure messages (`No targets matched selector`, `Function <name> not found.`), read from the installed game's language file. Before, only syntax errors and unknown commands failed.
+
 ## v0.1.1
 
 - In-game agent (`engine_attach`, `engine_status`, `engine_command`, `engine_player`, `engine_tick`, `engine_screenshot`; `sculk engine attach|status|command|tick|screenshot|player`). A small DLL is injected into the running retail game: under the install's Wine or Proton prefix on Linux and macOS, natively on Windows. It serves newline-delimited JSON-RPC 2.0 on `127.0.0.1:19160`, runs every request that touches the game on its main thread, and resolves its addresses from anchors at attach time, so it is not tied to one build. The DLL is built from `native/` with cargo (rustup's `x86_64-pc-windows-msvc` target, no Windows SDK) or, without cargo, downloaded from the release with its sha256 checked. Hot reload unloads the old copy completely before the new one loads. `engine_command` works right after an attach: the agent replays a real player command's origin, typing `/testfor @s` in chat itself the first time, only while the HUD alone shows. `engine_screenshot` copies the frame the game presents into a PNG at your path, open screens included, without the game's own screenshot (no toast, nothing in its gallery). See [In-Game Agent](docs/engine.md).

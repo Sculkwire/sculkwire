@@ -61,9 +61,9 @@ export interface BenchReport {
 let route: "auto" | "debugger" = "auto";
 
 /**
- * Failures that mean the command itself is wrong. /connect also reports a command that found nothing to change as
- * an error (`No targets matched`, `0 blocks filled`, `no items to remove`, a door half already placed), which the
- * reset hits every run, so only these count, as on the script debugger route.
+ * Failures that mean the command itself is wrong. Both routes also report a command that found nothing to change as
+ * a failure (`No targets matched`, `0 blocks filled`, `no items to remove`, a door half already placed), which the
+ * reset hits every run, so only these count.
  */
 const COMMAND_WRONG = /^Syntax error|^Unknown command/i;
 
