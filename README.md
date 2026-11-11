@@ -15,6 +15,20 @@
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
+Sculkwire gives your AI agent the Bedrock docs, a validator, a test server and the real game. The agent can write an add-on, check it, run it and watch it work.
+
+## Features
+
+- **Knowledge.** Looks up docs, Script API, components, commands, Molang, vanilla examples and changelogs for stable and preview.
+- **Validation.** Reports each problem with its file, line and rule.
+- **Test server.** Runs your packs and GameTests on a Bedrock Dedicated Server.
+- **Live game.** Starts the real game in a test world with your packs, reloads after edits, reads the log and takes screenshots. Works on Windows and Linux.
+- **Player control.** The agent walks, finds paths, fights mobs and works toward goals like a player.
+- **Game files.** Unpacks the vanilla packs from your installed game so you can search or compare them.
+- **In-game agent.** An optional helper inside the game. It lets the agent run commands as the player, take screenshots, read inventories, use menus and crafting stations, and pause or step game time. See [In-Game Agent](docs/engine.md).
+- **Extensions.** Add your own tools and commands. See [Extensions](docs/extensions.md).
+- **Benchmarks.** `sculk bench` measures the agent's combat and movement skills. See [Bench](docs/bench.md).
+
 ## MCP Tools
 
 | Category | Tools |
@@ -29,23 +43,11 @@
 | Game Files | `game_builds`, `game_vanilla_packs`, `game_extract_pack` |
 | Setup | `decision_status`, `sculkwire_version` |
 
-See the [tool reference](docs/tools.md) for what each tool does and its inputs.
-
-## Features
-
-- **Versioned knowledge.** Docs, Script API, components, commands, Molang, vanilla examples and changelogs, for both stable and preview. Every answer states the game version it describes.
-- **Validation.** Every problem is reported with a file, line, column and rule code. Regolith projects are built with rgl first.
-- **Bedrock Dedicated Server.** Load checks, headless GameTest runs and script profiling. Regolith projects are built with rgl first.
-- **Live game bridge.** Launch the real client in a private test world with your packs, reload after edits, read the content log, query the world, take screenshots and send keyboard and mouse input, on Windows and Linux. On Linux the input stays inside gamescope, so your own mouse and keyboard stay yours, and the game can also run off-screen. On Windows the agent uses the system keyboard and mouse while the game window is in the foreground, and stops when you switch away. A sign-in error at launch is recovered without restarting the game.
-- **Player control.** The agent plays like a person through `player_act`, on Linux and Windows. That covers smooth camera movement, pathfinding over blocks, ladders, water and gaps, and combat against zombies, skeletons, spiders and creepers. `play` runs a goal in the background, with an optional decision model as an advisor. On Windows a running action stops and a `play` job pauses while the game window is not in the foreground.
-- **Game files.** Reads your installed PC copy of the game: its version, and the per-version `vanilla_1.x` packs a world's `base_game_version` pins, unpacked from `.brarchive` into plain folders you can grep or diff against.
-- **In-game agent.** Loads a small DLL into the running retail game through engine hooks, on Linux under the install's Wine or Proton and natively on Windows. From inside the game it runs commands as the player, controls game time, reads the player and the level, copies the frame the game presents into a PNG (silently: no screenshot animation, toast or gallery entry), drives menus and screens in the background, reads inventories and containers, crafts, uses blocks and villagers like a right click, runs every station's own action, keeps your keyboard and mouse out while the agent plays (F9 takes over), and reads or changes game and world settings. `player_act`, `game_input` and the sign-in recovery use it when it is attached. The DLL is built from `native/` with cargo, or, without cargo, downloaded from the GitHub release (from v0.1.1 each release carries `sculkwire-agent-<version>-x86_64-windows.zip` and its `.sha256`, which is checked). See [In-Game Agent](docs/engine.md).
-- **Extensions.** Packages in your sculkwire config folder can add MCP tools, CLI commands and an in-process input route. See [Extensions](docs/extensions.md).
-- **Benchmarks.** `sculk bench` builds arenas in a test world and measures combat and movement skills.
+The [tool reference](docs/tools.md) explains each tool and its inputs.
 
 ## Quick Start
 
-sculkwire needs Node.js 22.18 or newer and git. Both install paths below put a `sculk` command on your PATH and register a stable launcher with your MCP client, so later updates never change the client configuration. [Install and Update](docs/install.md) has the details.
+You need Node.js 22.18 or newer and git. Both install paths give you a `sculk` command and register sculkwire with your MCP client.
 
 ### Install With Your Agent
 
@@ -55,7 +57,7 @@ Paste this into your AI agent harness:
 Install the sculkwire MCP server: clone https://github.com/ve3dy/sculkwire.git and follow the "Agent Install" steps in its docs/install.md.
 ```
 
-The agent checks Node.js and git, runs the installer, registers sculkwire with itself and runs `sculk doctor`. It asks one optional question about a decision model (default None).
+The agent installs sculkwire, registers it and runs `sculk doctor`. It asks one optional question about a decision model. The default is none.
 
 ### Install With a Script
 
@@ -75,9 +77,14 @@ cd sculkwire
 .\install.ps1
 ```
 
-The installer checks Node.js and git, installs the newest release into your data folder, puts `sculk` on your PATH (it says what it changes first; `--no-path` / `-NoPath` skips it) and runs `sculk setup`. It asks two questions. The first is the optional decision model, where pressing Enter keeps None (the default). The second is which MCP clients to register with. `--yes` skips both questions, and `--decision none|openrouter|zenmux|local` and `--register <clients>` answer them from the command line (`-Yes`, `-Decision` and `-Register` in PowerShell). API keys are never passed as flags. Set `OPENROUTER_API_KEY` or `ZENMUX_API_KEY` in your environment, or run `sculk setup` in a terminal to save one.
+The installer asks two questions:
 
-Or install in one line. Piped, the installers read their options from `SCULKWIRE_*` environment variables, see [Installers](docs/install.md#installers).
+1. Which decision model to use. Press Enter for none.
+2. Which MCP clients to register with.
+
+`--yes` (`-Yes` in PowerShell) skips the questions. Other options are in [Install and Update](docs/install.md#installers).
+
+Or install in one line:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ve3dy/sculkwire/main/install.sh | sh
@@ -87,11 +94,11 @@ curl -fsSL https://raw.githubusercontent.com/ve3dy/sculkwire/main/install.sh | s
 irm https://raw.githubusercontent.com/ve3dy/sculkwire/main/install.ps1 | iex
 ```
 
-`sculk doctor` checks the game install, BDS, rgl, uv, the decision model and the installed version, one line per problem with a fix for your OS.
+Run `sculk doctor` any time. It lists each problem on your machine with a fix.
 
 ### Manual Setup
 
-To run from a git checkout instead (development checkouts never update themselves), run `npm install` in the clone and add sculkwire to your MCP client configuration by hand:
+To run from a git checkout, run `npm install` in the clone and add this to your MCP client config:
 
 ```json
 {
@@ -105,11 +112,15 @@ To run from a git checkout instead (development checkouts never update themselve
 }
 ```
 
-The first knowledge request downloads docs, typings and vanilla samples, which takes about a minute. Run `sculk knowledge update` (`node src/cli.ts knowledge update` in a checkout) to do this ahead of time.
+A git checkout never updates itself.
+
+The first knowledge request downloads docs and samples. This takes about a minute. Run `sculk knowledge update` to do it ahead of time.
 
 ## Updating
 
-An installed sculkwire updates itself. When the MCP server starts, it checks for a new release at most once a day in the background. A new release is downloaded, installed and tested, then used by the next session. The running session keeps its version and sends a notice that a restart picks up the update. A failed check (offline, no access to the repository) changes nothing.
+- An installed sculkwire updates itself, at most once a day, in the background.
+- The new version starts with your next session.
+- Docs, typings, samples and the test server also update on their own. Offline, the last copy keeps working.
 
 ```sh
 sculk update --check            # Show whether a newer release exists
@@ -118,45 +129,63 @@ sculk update --rollback         # Switch back to the version before the last upd
 sculk update --channel off      # No automatic updates (release and main are the other channels)
 ```
 
-The `sculkwire_version` tool and `sculk doctor` report the running version and any update waiting for the next session. In a development checkout, `sculk update` prints the `git pull` command instead.
-
-Data sources update on their own as well. Vanilla samples, Script API typings, docs, changelogs, Bedrock Dedicated Server and rockide/schemas are each checked at most once a day, and a new upstream release is used without a sculkwire release or `sculk knowledge update`. The MCP server downloads new builds in the background; a CLI command only refreshes the version pins and leaves the downloads to the next MCP session or `sculk knowledge update`. Offline, the last copy keeps working. `sculk knowledge status` shows per source the version in use, the newest upstream and the last check.
+Details are in [Install and Update](docs/install.md#updates).
 
 ## Optional Decision Model
 
-The `play` action of `player_act` picks its tactics with built-in scores and works without a decision model. When one is configured (Jev through OpenRouter or ZenMux, or Kev on your own GPU), `play` asks it as an advisor at game speed, and `game_launch` can ask it to find a button when its sign-in recovery is stuck. Nothing else uses one, and the default is none. See [Decision Model](docs/decision.md) for setup, Kev and the config file.
+A decision model is a small AI model that answers multiple-choice questions about the game. You do not need one. Everything works without it, and the default is none.
+
+It is used in two places, only as an advisor:
+
+- **`player_act` `play`:** suggests which tactic to use next, such as fight, flee or eat.
+- **`game_launch`:** looks at a screenshot to find the right button when sign-in recovery gets stuck.
+
+| | Without a model | With a model |
+|---|---|---|
+| `play` tactics | Built-in scores pick the tactic | The model suggests a tactic; built-in scores take over when it is slow or unsure |
+| Sign-in recovery | Built-in menu steps | Also asks the model when those steps get stuck (needs Jev) |
+| Cost | None | Jev: billed per input token. Kev: free, needs a GPU with about 4.3 GB VRAM |
+
+**Does it help?** A test on 2026-11-11 with local Kev showed no measurable difference in win rate, time or damage taken. See [Measured Effect](docs/decision.md#measured-effect).
+
+**When to set one up:**
+
+- You want help with stuck sign-ins. Use Jev through OpenRouter or ZenMux. It reads images.
+- You want to try the advisor for free on your own GPU. Use Kev. It reads text only, so it cannot help with sign-in.
+
+Setup is in [Decision Model](docs/decision.md).
 
 ## Requirements
 
 | Feature | Requirement |
 |---|---|
 | Knowledge and validation | Node.js 22.18 or newer. rgl for Regolith projects |
-| Bedrock Dedicated Server | Windows or Linux x64, and acceptance of the [Minecraft EULA](https://www.minecraft.net/eula) |
-| Game client | Minecraft Bedrock for PC (GDK) on Windows or Linux. On Linux: mcbe-gdk-installer, or any Wine or Proton launcher sculkwire finds by its prefix, such as BedrockOnLinux, Flarial, Bottles, Lutris or Steam (with those you start the game yourself unless `SCULKWIRE_CLIENT_LAUNCH` names a launch command; `SCULKWIRE_CLIENT` picks one install when several are found). gamescope and xdotool for window and headless modes. On Windows nothing extra (Windows PowerShell 5.1 ships with Windows); input needs the game window in the foreground. See [Game Client Setup](docs/client.md) |
-| In-game agent (optional) | The game running, from an install sculkwire detects; on Linux its Wine or Proton prefix is used. Without `cargo` sculkwire downloads the release build (v0.1.1 and later) and checks its sha256; building from `native/` needs rustup with the `x86_64-pc-windows-msvc` target, and no Windows SDK. See [In-Game Agent](docs/engine.md) |
-| Game files | An installed PC (GDK) copy of Minecraft Bedrock: the Xbox app install on Windows, mcbe-gdk-linux or any Wine/Proton launcher (BedrockOnLinux, Flarial, Bottles, Lutris, Steam) on Linux, or a folder in `SCULKWIRE_GAME_DIRS` |
+| Test server | Windows or Linux x64. You accept the [Minecraft EULA](https://www.minecraft.net/eula) |
+| Game client | Minecraft Bedrock for PC (GDK). Linux also needs gamescope and xdotool. See [Game Client Setup](docs/client.md) |
+| In-game agent (optional) | The game running. sculkwire downloads the helper, or builds it if you have Rust. See [In-Game Agent](docs/engine.md) |
+| Game files | An installed PC (GDK) copy of the game. See [Game Client Setup](docs/client.md) |
 | Decision model (optional) | An OpenRouter or ZenMux key, or a local Kev server |
 
 ## CLI
 
-All features are also available from the command line.
+Every feature also works from the command line. Installed, the command is `sculk`. In a git checkout, use `node src/cli.ts` instead.
 
 ```sh
-node src/cli.ts validate path/to/addon            # Exit code 1 when errors are found
-node src/cli.ts bds gametest path/to/addon        # Run GameTests
-node src/cli.ts game check path/to/addon --screenshot shot.png
-node src/cli.ts api Entity.applyDamage
-node src/cli.ts bench combat --runs 3             # Measure the player skills
-node src/cli.ts doctor                            # Check the machine
-node src/cli.ts --help                            # List all commands
+sculk validate path/to/addon            # Exit code 1 when errors are found
+sculk bds gametest path/to/addon        # Run GameTests
+sculk game check path/to/addon --screenshot shot.png
+sculk api Entity.applyDamage
+sculk bench combat --runs 3             # Measure the player skills
+sculk doctor                            # Check the machine
+sculk --help                            # List all commands
 ```
 
-With the game running, the in-game agent has its own commands. Each prints JSON on stdout.
+With the game running, these commands use the in-game agent. Each prints JSON.
 
 ```sh
-sculk engine attach                               # Build or download the DLL, inject it, print its status
+sculk engine attach                     # Load the in-game agent and print its status
 sculk engine status|command|tick|screenshot|player
-sculk game lock [on|off|auto]                     # Input lock; F9 in the game takes over
+sculk game lock [on|off|auto]           # Keep your input out of the game; F9 takes over
 sculk game settings [list|get <id>|set <id> <value>]
 sculk world settings [get|set ...]
 sculk game ui [screen|controls|press|key|text|click|scroll]
@@ -169,13 +198,13 @@ sculk screen state|move|act|close
 
 ## Contributing
 
-[CONTRIBUTING.md](CONTRIBUTING.md) covers the development setup, the checks before a pull request, where a new tool, knowledge source, bench scenario or agent method goes, and the rules for running the real game. Work on the in-game agent starts with [Reverse Engineering the Game](docs/reverse-engineering.md): when it is needed, the agent's anchor model, the tools and the live workflow.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks and where new code goes. Work on the in-game agent starts with [Reverse Engineering the Game](docs/reverse-engineering.md).
 
 ## Data Sources
 
-- Vanilla samples, `@minecraft/*` typings, Microsoft Learn docs, changelogs and Bedrock Dedicated Server are downloaded into your local cache and update on their own.
-- [rockide/schemas](https://github.com/rockide/schemas) by the Rockide project provides the JSON schemas used first by the validator and by `component_lookup`.
-- Packs unpacked from your installed copy of the game stay in your local cache.
+- Vanilla samples, `@minecraft/*` typings, Microsoft Learn docs, changelogs and Bedrock Dedicated Server are downloaded into your local cache.
+- [rockide/schemas](https://github.com/rockide/schemas) by the Rockide project provides the JSON schemas used by the validator and `component_lookup`.
+- Packs unpacked from your installed game stay in your local cache.
 - The icon is a pixel-art sculk block with a glowing pixel [Model Context Protocol](https://github.com/modelcontextprotocol/modelcontextprotocol) mark above it.
 
 ## License
