@@ -1,6 +1,6 @@
 {
   "name": "sculkwire",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Agent-first MCP server and CLI for Minecraft: Bedrock Edition add-on development: versioned knowledge, precise validation, live game bridge, GameTest and visual proof.",
   "type": "module",
