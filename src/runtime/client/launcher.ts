@@ -462,7 +462,10 @@ export function hasInput(state: LaunchState): boolean {
 }
 
 /** Where keyboard/mouse input can go for this launch, or an explanation why it cannot. */
-function inputRoute(state: LaunchState): "gamescope" | "windows" {
+/** Where `sendInput` delivers: xdotool into gamescope's own display, or SendInput on Windows. */
+export type InputRoute = "gamescope" | "windows";
+
+function inputRoute(state: LaunchState): InputRoute {
   if (state.xDisplay) return "gamescope";
   if (process.platform === "win32") return "windows";
   throw new Error(
@@ -747,9 +750,9 @@ export type InputAction =
  * Keyboard/mouse into the game. Coordinates are game-window client pixels (same frame as `screenshot`).
  * Linux window/off-screen mode: gamescope's private XWayland (clicks use real button down/up, the game ignores
  * synthetic XSendEvent clicks). Windows: SendInput after bringing the game window to the foreground; it fails with
- * "the game window is not in the foreground" when the window loses it before the input is sent.
+ * "the game window is not in the foreground" when the window loses it before the input is sent. Returns the route taken.
  */
-export async function sendInput(state: LaunchState, input: InputAction): Promise<void> {
+export async function sendInput(state: LaunchState, input: InputAction): Promise<InputRoute> {
   if (inputRoute(state) === "windows") {
     // Key names are checked before anything is sent.
     const chords = input.action === "key" ? input.keys.split(/\s+/).filter(Boolean).map(chordKeys) : [];
@@ -766,7 +769,7 @@ export async function sendInput(state: LaunchState, input: InputAction): Promise
         }
       }
     });
-    return;
+    return "windows";
   }
   const window = await gamescopeWindow(state);
   if (input.action === "key") await xdotool(state, ["key", "--window", window, ...input.keys.split(/\s+/).filter(Boolean)]);
@@ -780,6 +783,7 @@ export async function sendInput(state: LaunchState, input: InputAction): Promise
       await xdotool(state, ["mouseup", button]);
     }
   }
+  return "gamescope";
 }
 
 /** Wait until a file another process writes has a stable non-zero size. */

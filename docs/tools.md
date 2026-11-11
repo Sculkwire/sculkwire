@@ -286,11 +286,11 @@ Runs a slash command in the game and returns `ok`, the `output` lines and the ro
 
 ### game_reload
 
-Copies the project's current packs into the game again, building a Regolith project with rgl first, then runs `/reload`, or `/reload all` with `all: true`. Use `all: true` after adding or changing blocks, items, entities or other JSON, since `/reload` only restarts scripts and functions and `/reload all` rejoins the world. A failed rgl build stops the reload with rgl's message. The redeploy follows the same one-folder-per-uuid rule as `game_launch`. Returns the `redeployed` folders, the `command` result and the `diagnostics` the reload logged, after any `client.duplicate-pack-uuid` warnings.
+Copies the project's current packs into the game again, building a Regolith project with rgl first, then runs `/reload`, or `/reload all` with `all: true`. Use `all: true` after adding or changing blocks, items, entities or other JSON, since `/reload` only restarts scripts and functions. The game documents `/reload all` as reloading every behavior and resource pack by leaving and rejoining the world, but the retail client 1.26.63 run through `/connect` (and BDS) answers it like `/reload` (`Function and script files have been reloaded.`) and stays in the world; when new JSON content does not show up, relaunch with `game_launch`. A failed rgl build stops the reload with rgl's message. The redeploy follows the same one-folder-per-uuid rule as `game_launch`. Returns the `redeployed` folders, the `command` result and the `diagnostics` the reload logged, after any `client.duplicate-pack-uuid` warnings.
 
 | Input | Description |
 |---|---|
-| `all` | Reload every pack (default false) |
+| `all` | Run `/reload all` instead of `/reload` (default false) |
 
 ### game_log
 
@@ -331,7 +331,7 @@ Reads the world through the helper pack and returns it as `result`.
 
 ### game_registry
 
-Lists every block, item or mob id the running game knows, including ones from your add-on, through `/connect` data requests.
+Lists every block, item or mob id the running game knows, including ones from your add-on. It asks `/connect`'s data request first. When no `/connect` client is attached, the request fails, or the game answers an empty list (the retail client answers `[]` to every data request), the helper pack lists the ids through the Script API instead (`BlockTypes`, `ItemTypes` and `EntityTypes`, so `mob` then lists every entity type, projectiles and other non-mobs included), which needs the script debugger. The result has `kind`, `source` (`connect` or `script`), the `entries` (the game's own entry objects from `/connect`, sorted id strings from the helper pack) and, for the helper pack, a `note` saying why `/connect` did not answer.
 
 | Input | Description |
 |---|---|
@@ -339,7 +339,7 @@ Lists every block, item or mob id the running game knows, including ones from yo
 
 ### game_input
 
-Presses keys, types text, clicks or moves the mouse in the game, like a player would. Coordinates are pixels in the screenshot. On Linux input goes to the game's own gamescope display and never touches your desktop. On Windows it brings the game window to the foreground, then uses the system keyboard and mouse; it fails with `the game window is not in the foreground` when the window loses it before the input is sent. With the in-game agent attached, keys, text and left/right clicks go through the game's own UI instead ([`game_ui`](#game_ui)), which works in the background and on Windows without the foreground; `move` and a middle click always take the route above.
+Presses keys, types text, clicks or moves the mouse in the game, like a player would. Coordinates are pixels in the screenshot. On Linux input goes to the game's own gamescope display and never touches your desktop. On Windows it brings the game window to the foreground, then uses the system keyboard and mouse; it fails with `the game window is not in the foreground` when the window loses it before the input is sent. With the in-game agent attached, keys, text and left/right clicks go through the game's own UI instead ([`game_ui`](#game_ui)), which works in the background and on Windows without the foreground; `move` and a middle click always take the route above. The result has `done` and `route`: `engine` when the in-game agent's UI took the input, `gamescope` for xdotool into gamescope's display (Linux), `windows` for the system keyboard and mouse through SendInput.
 
 | Input | Description |
 |---|---|

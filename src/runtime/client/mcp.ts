@@ -16,6 +16,7 @@ import { TACTICS } from "./skills/tactics.ts";
 import { pauseOnTakeover, playJobs, runActions, stepText, type PlayJobInfo } from "./jobs.ts";
 import { DIFFICULTIES, type Difficulty } from "./world.ts";
 import { FOREGROUND_MESSAGE } from "./windows.ts";
+import type { InputRoute } from "./launcher.ts";
 import { loadDecisionModel } from "../../decision/config.ts";
 
 const position = z.object({ line: z.number(), column: z.number() });
@@ -305,10 +306,11 @@ export function register(server: McpServer): void {
       title: "Reload scripts or packs",
       description:
         "Copy the project's current packs into the game again (building Regolith projects with rgl first), then run " +
-        "`/reload` (scripts and functions) or `/reload all` (rejoins the world and reloads every pack, needed for new " +
-        "or changed blocks, items, entities and other JSON). Returns the redeployed folders and the content-log and " +
-        "script errors logged by the reload.",
-      inputSchema: { all: z.boolean().optional().describe("Reload all packs (rejoins the world)") },
+        "`/reload` (scripts and functions) or `/reload all`, which the game documents as rejoining the world to reload " +
+        "every pack (new or changed blocks, items, entities and other JSON). The retail client 1.26.63 answers " +
+        "`/reload all` from /connect like `/reload` and stays in the world; relaunch with game_launch when new JSON " +
+        "content does not show up. Returns the redeployed folders and the content-log and script errors logged by the reload.",
+      inputSchema: { all: z.boolean().optional().describe("Run /reload all instead of /reload") },
       outputSchema: {
         command: z.object(commandSchema),
         diagnostics: z.array(diagnosticSchema),
@@ -412,15 +414,18 @@ export function register(server: McpServer): void {
     "game_registry",
     {
       title: "Game registries",
-      description: "Every block, item or mob id the running game knows (including add-on content), via /connect data requests.",
+      description:
+        "Every block, item or mob id the running game knows (including add-on content). Asks /connect's data request " +
+        "first; when no /connect client is attached, or the game answers an empty list (the retail client does), the " +
+        "helper pack lists the ids through the Script API (BlockTypes, ItemTypes, EntityTypes; mob then means every " +
+        "entity type). `source` says which answered (`connect` or `script`), and `note` why the helper pack did.",
       inputSchema: { kind: z.enum(["block", "item", "mob"]) },
-      outputSchema: { kind: z.string(), entries: z.unknown() },
+      outputSchema: { kind: z.string(), source: z.enum(["connect", "script"]), entries: z.array(z.unknown()), note: z.string().optional() },
     },
     async ({ kind }) => {
       try {
-        const entries = await bridge.data(kind);
-        const n = Array.isArray(entries) ? entries.length : 0;
-        return ok(`${n} ${kind} entries`, { kind, entries });
+        const r = await bridge.registry(kind);
+        return ok(`${r.entries.length} ${kind} entries via ${r.source}${r.note ? ` (${r.note})` : ""}`, r);
       } catch (err) {
         return fail(err);
       }
@@ -438,7 +443,8 @@ export function register(server: McpServer): void {
         "which works in the background and on Windows without the foreground; `move` and a middle click always take the " +
         "route below. Linux: into gamescope's own display, never the user's desktop. Windows: the system keyboard and " +
         "mouse after bringing the game window to the foreground; fails with \"the game window is not in the foreground\" " +
-        "when the user switches away before the input is sent.",
+        "when the user switches away before the input is sent. `route` says which way the input went: `engine` (the " +
+        "in-game agent's UI), `gamescope` (xdotool into gamescope's display) or `windows` (SendInput).",
       inputSchema: {
         action: z.enum(["key", "type", "click", "move"]),
         keys: z.string().optional(),
@@ -447,22 +453,23 @@ export function register(server: McpServer): void {
         y: z.number().optional(),
         button: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional(),
       },
-      outputSchema: { done: z.boolean() },
+      outputSchema: { done: z.boolean(), route: z.enum(["engine", "gamescope", "windows"]) },
     },
     async (a) => {
       try {
-        if (await inputThroughUi(a)) return ok("done", { done: true });
+        if (await inputThroughUi(a)) return ok("done via engine", { done: true, route: "engine" });
+        let route: InputRoute;
         if (a.action === "key") {
           if (!a.keys) throw new Error("key needs `keys`");
-          await bridge.input({ action: "key", keys: a.keys });
+          route = await bridge.input({ action: "key", keys: a.keys });
         } else if (a.action === "type") {
           if (a.text === undefined) throw new Error("type needs `text`");
-          await bridge.input({ action: "type", text: a.text });
+          route = await bridge.input({ action: "type", text: a.text });
         } else {
           if (a.x === undefined || a.y === undefined) throw new Error(`${a.action} needs x and y`);
-          await bridge.input(a.action === "click" ? { action: "click", x: a.x, y: a.y, ...(a.button ? { button: a.button } : {}) } : { action: "move", x: a.x, y: a.y });
+          route = await bridge.input(a.action === "click" ? { action: "click", x: a.x, y: a.y, ...(a.button ? { button: a.button } : {}) } : { action: "move", x: a.x, y: a.y });
         }
-        return ok("done", { done: true });
+        return ok(`done via ${route}`, { done: true, route });
       } catch (err) {
         return fail(err);
       }

@@ -1,7 +1,7 @@
 // sculkwire helper (MIT): answers `/scriptevent sculkwire:query <json>` with one console line
 // `[sculkwire:reply] {"id":..,"ok":true,"result":..}` that the bridge reads from the script debugger
 // (PrintEvent) or the content log.
-import { BlockVolume, system, world } from "@minecraft/server";
+import { BlockTypes, BlockVolume, EntityTypes, ItemTypes, system, world } from "@minecraft/server";
 
 const MAX_ENTITIES = 200;
 const MAX_BLOCKS = 2000;
@@ -672,7 +672,21 @@ function hurts(q) {
   return { tick: system.currentTick, hurts: HURTS.filter((h) => h.tick > since) };
 }
 
-const HANDLERS = { ping: () => "pong", entities, entity, blocks, block, grid, player, state, stream, impacts, deaths, hurts, loadout, inventory, container: containerAt };
+/** The Script API's registries, by the `/connect` data kind they stand in for (`mob` lists every entity type). */
+const REGISTRIES = { block: () => BlockTypes.getAll(), item: () => ItemTypes.getAll(), mob: () => EntityTypes.getAll() };
+/** Ids per `registry` reply, so one print stays a few kilobytes; the bridge asks page after page. */
+const REGISTRY_PAGE = 400;
+
+/** One page of a registry's ids, sorted so the pages of one listing line up: `{ total, offset, ids }`. */
+function registry(q) {
+  const all = REGISTRIES[q.registry];
+  if (!all) throw new Error(`registry must be one of ${Object.keys(REGISTRIES).join(", ")}`);
+  const ids = Array.from(all(), (t) => t.id).sort();
+  const offset = Math.max(0, Math.floor(Number(q.offset ?? 0)) || 0);
+  return { total: ids.length, offset, ids: ids.slice(offset, offset + REGISTRY_PAGE) };
+}
+
+const HANDLERS = { ping: () => "pong", registry, entities, entity, blocks, block, grid, player, state, stream, impacts, deaths, hurts, loadout, inventory, container: containerAt };
 
 function sendReply(reply) {
   console.log(`[sculkwire:reply] ${JSON.stringify(reply)}`);

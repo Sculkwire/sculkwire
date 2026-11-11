@@ -56,6 +56,7 @@ import {
   typeChatCommand,
   waitForGame,
   type InputAction,
+  type InputRoute,
   type LaunchMode,
   type LaunchState,
 } from "./launcher.ts";
@@ -92,6 +93,62 @@ export class HelperQueryError extends Error {
     this.name = "HelperQueryError";
     this.reason = reason;
   }
+}
+
+/** Where `game_registry` got its ids: the game's `/connect` data request, or the helper pack's Script API. */
+export type RegistrySource = "connect" | "script";
+
+export interface RegistryResult {
+  kind: DataKind;
+  source: RegistrySource;
+  entries: unknown[];
+  /** Why the ids came from the helper pack rather than /connect. */
+  note?: string;
+}
+
+/** Where `readRegistry` reads: a `/connect` data request, and one page of the helper's `registry` query from `offset`. */
+export interface RegistrySources {
+  connect?: () => Promise<unknown>;
+  script?: (offset: number) => Promise<unknown>;
+}
+
+/** One page of the helper's `registry` query: `ids` from `offset` of `total`, sorted. */
+function registryPage(value: unknown): { total: number; ids: string[] } {
+  if (value && typeof value === "object" && "total" in value && "ids" in value) {
+    const { total, ids } = value;
+    if (typeof total === "number" && Array.isArray(ids) && ids.every((id) => typeof id === "string")) return { total, ids };
+  }
+  throw new Error(`malformed helper registry page: ${JSON.stringify(value)}`);
+}
+
+/**
+ * Every id of one registry. `/connect`'s `data:<kind>` first, when a client is attached. A missing, failed or empty
+ * answer (the retail client answers `[]` to every data request) falls back to the helper pack's Script API
+ * (`BlockTypes`, `ItemTypes`, `EntityTypes`), read page by page so no reply print grows past a page.
+ */
+export async function readRegistry(kind: DataKind, sources: RegistrySources): Promise<RegistryResult> {
+  let note = "no /connect client attached";
+  if (sources.connect) {
+    try {
+      const body = await sources.connect();
+      if (Array.isArray(body) && body.length > 0) return { kind, source: "connect", entries: body };
+      note = `/connect answered data:${kind} with ${Array.isArray(body) ? "an empty list" : "no list"}`;
+    } catch (err) {
+      note = `/connect data:${kind} failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+  if (!sources.script) throw new Error(`${note}, and the helper pack's registry query needs the script debugger`);
+  const ids: string[] = [];
+  try {
+    for (;;) {
+      const page = registryPage(await sources.script(ids.length));
+      ids.push(...page.ids);
+      if (page.ids.length === 0 || ids.length >= page.total) break;
+    }
+  } catch (err) {
+    throw new Error(`${note}, and the helper pack's registry query failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return { kind, source: "script", entries: ids, note };
 }
 
 export interface BridgeStartOptions {
@@ -483,7 +540,9 @@ export class ClientBridge {
     const shots = dataDir("client", "screenshots");
     const io: RecoveryIO = {
       readLog: () => this.#readJoinLog(),
-      key: (keys) => sendInput(state, { action: "key", keys }),
+      key: async (keys) => {
+        await sendInput(state, { action: "key", keys });
+      },
       click: async (x: number, y: number, count = 1) => {
         const frame = this.#frame ?? { width: state.width ?? 1280, height: state.height ?? 720 };
         for (let i = 0; i < count; i++) {
@@ -678,11 +737,15 @@ export class ClientBridge {
     return { command, via: "debugger", ok: !output.some((o) => /^Syntax error|^Unknown command/i.test(o)), output };
   }
 
-  /** `/connect` registry requests: every block, item or mob id the running game knows. */
-  async data(kind: DataKind): Promise<unknown> {
+  /** Every block, item or mob id the running game knows: `/connect` data requests, else the helper pack (`readRegistry`). */
+  async registry(kind: DataKind): Promise<RegistryResult> {
     this.#requireRunning();
-    if (!this.#connect || this.#connect.clients().length === 0) throw new Error("data requests need /connect");
-    return this.#connect.data(kind);
+    const connect = this.#connect;
+    const session = this.#session;
+    return readRegistry(kind, {
+      ...(connect && connect.clients().length > 0 ? { connect: () => connect.data(kind) } : {}),
+      ...(session && !session.closed ? { script: (offset: number) => this.query("registry", { registry: kind, offset }) } : {}),
+    });
   }
 
   /**
@@ -843,7 +906,8 @@ export class ClientBridge {
 
   /**
    * Redeploy the project (rgl build for Regolith projects with filters, else a fresh copy of each pack sculkwire
-   * deployed), then `/reload` (scripts + functions) or `/reload all` (rejoin, all packs). Returns the copied folders
+   * deployed), then `/reload` (scripts + functions) or `/reload all` (documented as a rejoin with all packs; the retail
+   * client answers it like `/reload` from /connect and stays in the world). Returns the copied folders
    * and the problems the reload logged.
    */
   async reload(all = false): Promise<{ command: CommandOutput; diagnostics: Diagnostic[]; redeployed: string[] }> {
@@ -957,9 +1021,10 @@ export class ClientBridge {
     return screenshot(this.launchState as LaunchState, path);
   }
 
-  async input(action: InputAction): Promise<void> {
+  /** Keyboard or mouse input into the game; returns the route it took. */
+  async input(action: InputAction): Promise<InputRoute> {
     this.#requireRunning();
-    await sendInput(this.launchState as LaunchState, action);
+    return sendInput(this.launchState as LaunchState, action);
   }
 
   /**
