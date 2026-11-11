@@ -405,7 +405,8 @@ fn block_use(params: &Value) -> Result<([i32; 3], Option<usize>), RpcError> {
 ///
 /// The view is written into the rotation component; [`AIM_MS`] later the client's own use handler
 /// runs on the level's hit result, and the answer settles on the timer (see the module
-/// documentation): `screen` is the screen that opened, `null` when none did.
+/// documentation): `screen` is the screen that opened, `null` when none did, and `changed` whether a
+/// screen opened or the block's state changed (a lever, a button, a door).
 pub(crate) fn h_interact_block(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     expire(core);
     world()?;
@@ -422,7 +423,7 @@ pub(crate) fn h_interact_block(core: &'static Core, params: &Value) -> Result<Va
     let [pitch, yaw] = look_at(eye, target)
         .ok_or_else(|| RpcError::invalid_params("the block is at the player's eye: there is no view to aim"))?;
     write_look(pitch, yaw)?;
-    park(core, before, Phase::Aim, None)
+    park_settle(core, before, Phase::Aim, None, None, Some(AimPlan { block, state: None }))
 }
 
 /// `interact.entity {id}` → `{screen, changed}`.
@@ -572,6 +573,15 @@ struct Settle {
     item: Option<Value>,
     /// A `craft.run`'s state while its phase is [`Phase::Craft`].
     craft: Option<CraftRun>,
+    /// An `interact.block`'s aims and the block's state before the use.
+    aim: Option<AimPlan>,
+}
+
+/// The block an `interact.block` uses and its state right before the use.
+struct AimPlan {
+    block: [i32; 3],
+    /// The client's `Block` at the target right before the use (one object per block state).
+    state: Option<usize>,
 }
 
 static SETTLE: SpinLock<Option<Settle>> = SpinLock::new(None);
@@ -585,6 +595,17 @@ fn park(core: &'static Core, before: String, phase: Phase, item: Option<Value>) 
 }
 
 fn park_with(core: &'static Core, before: String, phase: Phase, item: Option<Value>, craft: Option<CraftRun>) -> Result<Value, RpcError> {
+    park_settle(core, before, phase, item, craft, None)
+}
+
+fn park_settle(
+    core: &'static Core,
+    before: String,
+    phase: Phase,
+    item: Option<Value>,
+    craft: Option<CraftRun>,
+    aim: Option<AimPlan>,
+) -> Result<Value, RpcError> {
     if !core.is_main_thread() || !ensure_timer() {
         return Err(RpcError::anchor("window.game").with_data(json!({
             "message": "the settle timer needs the game window and its own thread",
@@ -593,18 +614,24 @@ fn park_with(core: &'static Core, before: String, phase: Phase, item: Option<Val
     let Some(deferred) = core.defer() else {
         return Err(RpcError::wrong_thread());
     };
-    let previous = SETTLE.lock().replace(Settle { deferred, before, started: win::tick_ms(), phase, item, craft });
+    let previous = SETTLE.lock().replace(Settle { deferred, before, started: win::tick_ms(), phase, item, craft, aim });
     if let Some(previous) = previous {
         previous.deferred.fail(RpcError::timeout());
     }
     Err(RpcError::deferred())
 }
 
-/// The wire's interaction answer: the screen that opened (`null` when none did) and whether that is a
-/// change.
-fn outcome(now: Option<&str>, before: &str) -> Value {
+/// The wire's interaction answer: the screen that opened (`null` when none did) and whether the use
+/// changed anything: a screen opened, or the used block's state is not the one it had before.
+fn outcome(now: Option<&str>, before: &str, aim: Option<&AimPlan>) -> Value {
     let opened = now.filter(|name| *name != before && !on_hud(name));
-    json!({ "screen": opened, "changed": opened.is_some() })
+    json!({ "screen": opened, "changed": opened.is_some() || aim.is_some_and(block_changed) })
+}
+
+/// True when the used block is now in another state than right before the use.
+fn block_changed(aim: &AimPlan) -> bool {
+    let now = inventory::client_block(aim.block).map(|(block, _)| block);
+    aim.state.is_some() && now.is_some() && now != aim.state
 }
 
 /// The answer a request gets once the server's verdict (or its absence) is known. For a take, `item` is the
@@ -681,7 +708,7 @@ fn expire(core: &'static Core) {
             state.deferred.fail(RpcError::timeout());
         }
         Phase::Open => {
-            state.deferred.resolve(outcome(screen_name(core).as_deref(), &state.before));
+            state.deferred.resolve(outcome(screen_name(core).as_deref(), &state.before, state.aim.as_ref()));
         }
         Phase::Request { id, moved, take, cursor } => {
             state.deferred.resolve(request_outcome(response(id), moved, take, cursor, state.item));
@@ -757,6 +784,9 @@ unsafe extern "system" fn settle_tick(_window: win::Hwnd, _message: u32, _id: us
                 *SETTLE.lock() = Some(state);
                 return;
             }
+            if let Some(aim) = state.aim.as_mut() {
+                aim.state = inventory::client_block(aim.block).map(|(block, _)| block);
+            }
             if let Err(error) = input::with_item_scope(input::use_click).and_then(|result| result) {
                 state.deferred.fail(error);
                 stop_timer();
@@ -771,6 +801,11 @@ unsafe extern "system" fn settle_tick(_window: win::Hwnd, _message: u32, _id: us
             let opened = now_screen.as_deref().filter(|name| *name != state.before && !on_hud(name)).map(String::from);
             if let Some(name) = opened {
                 state.deferred.resolve(json!({ "screen": name, "changed": true }));
+                stop_timer();
+            } else if state.aim.as_ref().is_some_and(block_changed) {
+                // A lever, a button, a door: the use changed the block and opens nothing. Answered at
+                // once, before a button springs back.
+                state.deferred.resolve(json!({ "screen": null, "changed": true }));
                 stop_timer();
             } else if elapsed >= SETTLE_MS {
                 state.deferred.resolve(json!({ "screen": null, "changed": false }));
