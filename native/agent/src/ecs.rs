@@ -35,10 +35,19 @@ const ENTITY_END: usize = 0x28;
 /// `StateVectorComponent` element stride: three `Vec3` (position, previous, delta). Observed as
 /// `lea rax,[rcx+rcx*8]; shl eax,2` (×36) at the component's lookup site.
 pub const STATE_VECTOR_STRIDE: usize = 0x24;
-/// Position inside a `StateVectorComponent` element (feet, first of the three `Vec3`).
+/// Position inside a `StateVectorComponent` element (first of the three `Vec3`). For a player this is
+/// the eye (the feet plus the player's height offset); other actors keep their feet here.
 pub const STATE_POSITION: usize = 0x00;
 /// Per-tick movement inside a `StateVectorComponent` element (third `Vec3`).
 pub const STATE_DELTA: usize = 0x18;
+
+/// `AABBShapeComponent` element: the collision box (`min` `Vec3`, `max` `Vec3`) and its
+/// `[width, height]`, 0x20 bytes. The box's `min.y` is where the feet stand; every reading is
+/// cross-checked against the size and the state vector, so a moved layout answers `None`.
+pub const AABB_STRIDE: usize = 0x20;
+const AABB_MIN: usize = 0x00;
+const AABB_MAX: usize = 0x0c;
+const AABB_SIZE: usize = 0x18;
 
 /// `ActorRotationComponent` element stride: two `Vec2` (rotation, previous rotation), observed as
 /// `shl ecx,4` at the component's lookup sites.
@@ -60,7 +69,10 @@ pub const UNIQUE_STRIDE: usize = 0x08;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Sample {
     pub entity: u32,
+    /// The state vector's position: the player's eye, where reach and aim are measured from.
     pub position: [f32; 3],
+    /// Where the feet stand: the collision box's bottom, under the state vector's x and z.
+    pub feet: Option<[f32; 3]>,
     /// `[pitch, yaw]` in degrees.
     pub rotation: Option<[f32; 2]>,
     /// Per-tick movement (`StateVectorComponent`'s delta), blocks per tick.
@@ -233,9 +245,12 @@ pub fn read(accessor: usize) -> Option<Reading> {
     let rotation = rotation_element.and_then(rotation_of);
     let on_ground = storage(accessor, anchors::component_hash("OnGroundFlagComponent"))
         .is_some_and(|flag| contains(flag, entity));
+    let feet = storage(accessor, anchors::component_hash("AABBShapeComponent"))
+        .and_then(|shape| element(shape, entity, AABB_STRIDE))
+        .and_then(|shape| feet_of(shape, &position));
 
     Some(Reading {
-        sample: Sample { entity, position, rotation, velocity, on_ground: Some(on_ground) },
+        sample: Sample { entity, position, feet, rotation, velocity, on_ground: Some(on_ground) },
         rotation_element,
     })
 }
@@ -294,6 +309,27 @@ fn read_vec3(address: usize) -> Option<[f32; 3]> {
         pe::read::<f32>(address + 8)?,
     ];
     vector.iter().all(|value| value.is_finite()).then_some(vector)
+}
+
+/// The feet under `position`, from an `AABBShapeComponent` element: believed only when the box is as
+/// wide and tall as its own size says, is centred on the state vector's x and z, and holds its y.
+fn feet_of(element: usize, position: &[f32; 3]) -> Option<[f32; 3]> {
+    let min = read_vec3(element + AABB_MIN)?;
+    let max = read_vec3(element + AABB_MAX)?;
+    let width = pe::read::<f32>(element + AABB_SIZE)?;
+    let height = pe::read::<f32>(element + AABB_SIZE + 4)?;
+    let fits = |low: f32, high: f32, size: f32| high >= low && ((high - low) - size).abs() < 0.01;
+    let centred = |low: f32, high: f32, at: f32| ((low + high) / 2.0 - at).abs() < 0.01;
+    (width > 0.0
+        && height > 0.0
+        && height < 16.0
+        && fits(min[0], max[0], width)
+        && fits(min[2], max[2], width)
+        && fits(min[1], max[1], height)
+        && centred(min[0], max[0], position[0])
+        && centred(min[2], max[2], position[2])
+        && (min[1]..=max[1]).contains(&position[1]))
+    .then_some([position[0], min[1], position[2]])
 }
 
 /// A position is believed only inside the build's world bounds (±30 M blocks, 4096 tall). A player

@@ -737,7 +737,7 @@ The agent replays the origin of a real player command, so the first command afte
 
 ### engine_player
 
-Returns the local player's `position` (the feet), `rotation` (pitch, yaw; each `null` when not readable) and movement since the previous tick (`delta`), read from the engine on the game's main thread, plus the simulation tick it was read on (`simTick`) and the numeric `dimension` (`null` when unknown). When the agent reads them it adds `onGround`, `health`, `selectedSlot` and the raw `dimensionState` value (each `null` when unreadable). Keys an agent answers beyond these are dropped. Needs `engine_attach` and a loaded world; right after an attach it answers `not_in_world` until the agent's first client tick.
+Returns the local player's `position` (the feet: the bottom of the player's collision box, `null` when not readable), `rotation` (pitch, yaw; each `null` when not readable) and movement since the previous tick (`delta`), read from the engine on the game's main thread, plus the simulation tick it was read on (`simTick`) and the numeric `dimension` (`null` when unknown). When the agent reads them it adds `onGround`, `health`, `selectedSlot` and the raw `dimensionState` value (each `null` when unreadable). Keys an agent answers beyond these are dropped. Needs `engine_attach` and a loaded world; right after an attach it answers `not_in_world` until the agent's first client tick.
 
 No inputs.
 

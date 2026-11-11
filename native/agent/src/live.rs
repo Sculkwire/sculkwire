@@ -805,8 +805,8 @@ fn note_player_found(reading: &ecs::Reading, accessor: usize) {
     }
     let [x, y, z] = reading.sample.position;
     agent_core::log::fmt(format_args!(
-        "player: LocalPlayerComponent entity 0x{entity:x} in the registry at 0x{accessor:x}, feet {x:.2} {y:.2} {z:.2}, rotation {:?}, on ground {:?}",
-        reading.sample.rotation, reading.sample.on_ground
+        "player: LocalPlayerComponent entity 0x{entity:x} in the registry at 0x{accessor:x}, eye {x:.2} {y:.2} {z:.2}, feet {:?}, rotation {:?}, on ground {:?}",
+        reading.sample.feet, reading.sample.rotation, reading.sample.on_ground
     ));
 }
 
@@ -833,7 +833,10 @@ fn note_player_missing(accessor: usize) {
 
 fn publish(sample: &ecs::Sample) {
     LIVE.entity.store(sample.entity, Ordering::Release);
-    for (slot, value) in LIVE.position.iter().zip(sample.position.iter()) {
+    // The wire's position is the feet; a box that did not check out publishes no position (null)
+    // rather than the eye under the feet's name.
+    let feet = sample.feet.unwrap_or([f32::NAN; 3]);
+    for (slot, value) in LIVE.position.iter().zip(feet.iter()) {
         slot.store(bits(*value), Ordering::Relaxed);
     }
     for (slot, value) in LIVE.velocity.iter().zip(sample.velocity.iter()) {
@@ -1150,12 +1153,10 @@ pub fn settled() -> bool {
     steady_frames() >= STEADY_FRAMES && has_position()
 }
 
-/// True when the last client tick produced a finite position for the local player.
+/// True once a client tick has read the local player (its eye position was plausible); the published
+/// feet may still be null when the collision box did not check out.
 fn has_position() -> bool {
-    let x = float(LIVE.position[0].load(Ordering::Relaxed));
-    let y = float(LIVE.position[1].load(Ordering::Relaxed));
-    let z = float(LIVE.position[2].load(Ordering::Relaxed));
-    x.is_finite() && y.is_finite() && z.is_finite() && (x != 0.0 || y != 0.0 || z != 0.0)
+    LIVE.entity.load(Ordering::Acquire) != 0
 }
 
 impl Snapshot {

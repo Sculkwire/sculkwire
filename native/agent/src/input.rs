@@ -1657,7 +1657,8 @@ pub fn h_player_state(_core: &'static Core, _params: &Value) -> Result<Value, Rp
         return Ok(out);
     };
     let sample = player.reading.sample;
-    set(&mut out, "position", floats(&sample.position));
+    // The feet, as the tick stream publishes them; null when the collision box did not check out.
+    set(&mut out, "position", sample.feet.map_or(Value::Null, |feet| floats(&feet)));
     set(&mut out, "delta", floats(&sample.velocity));
     if let Some(rotation) = sample.rotation {
         set(&mut out, "rotation", floats(&rotation));
