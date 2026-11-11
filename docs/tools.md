@@ -704,6 +704,19 @@ No inputs.
 
 Returns the `build` identity as the DLL reports it (the executable's file name and version), whether the main-thread hook runs requests (`hooked`), the current `tick`, every `resolved` anchor with its address, and every `missing` one. Without a prior attach it connects to an agent that is already listening on the agent port.
 
+The agent's diagnostic fields come with it when the agent reports them (an older agent leaves them out):
+
+| Field | Description |
+|---|---|
+| `attached` | `false` while the agent is still resolving its anchors right after the injection |
+| `mainThread` | Which thread main-thread methods run on and the hook that proved it (`null` before any drain ran) |
+| `port` | The port the agent's socket bound; a hot reload that could not take the expected one says so here |
+| `drainReleases` | Drains released from outside: a fault inside a handler, or one that never returned |
+| `hooks` | Every hook the engine installed: `installed`, `calls`, first `thread` |
+| `gameinput` | The GameInput interface the mouse goes through: `hooked`, `patched` (slots), `samples`, `readings`, `kinds` (`mouse`, `keyboard`, `other`), `cursor`, `idleMs`, `lastClick` (`number`, `state`: `queued`, `pressed`, `released` or `dropped`), `versions`, `probe` (why the last probe refused) |
+| `ui` | The game window (`window`: `class`, `width`, `height`), its `children` and the OreUI `host` a click is posted to |
+| `minecraft` | The game objects the engine steps, each with its `role` (`server`, `client`, `unknown`) |
+
 No inputs.
 
 ### engine_command

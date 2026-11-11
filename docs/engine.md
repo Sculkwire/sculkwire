@@ -111,7 +111,7 @@ Full inputs and results are in the [tool reference](tools.md#engine), which name
 | Tool | Inside the game |
 |---|---|
 | `engine_attach` | Build, inject, connect, read `engine.status`. An error says what to fix: which install or game folder was not found, that the game has to be running, or where the agent log is when the DLL loaded but nothing answered |
-| `engine_status` | `build` (the executable's own file name and version), `hooked`, `tick`, `resolved`, `missing`. Without an attach it connects to an agent already listening on the port |
+| `engine_status` | `build` (the executable's own file name and version), `hooked`, `tick`, `resolved`, `missing`, and the diagnostics `attached`, `mainThread`, `port`, `drainReleases`, `hooks`, `gameinput`, `ui`, `minecraft`. Without an attach it connects to an agent already listening on the port |
 | `engine_command` | Runs one line as the local player through the game's command dispatcher, chat feedback included. A leading slash is optional; a newline is rejected because the game would split it into several commands. `success` comes from the command's own output and is `null` when it prints nothing, as `say` does. The agent replays the origin of a real player command, so the first command after an attach or a world change types one line in chat itself first (`/testfor @s`, its output kept out of chat by `command.prime`). It does so only while the HUD alone is showing: the chat opens with `t`, the line is typed only into that chat screen, and Return goes only to it. With any other screen open it answers `anchor_missing` `command.origin` and says to run one line in chat |
 | `engine_tick` | `pause` freezes or resumes the simulation, `step` pauses if needed and runs 1 to 600 ticks inside one main-thread request then stays paused, `scale` sets the tick rate multiplier. Exactly one of the three |
 | `engine_screenshot` | Presses the game's own screenshot handler (F2's). The game keeps the file in its own gallery (a JPEG on the retail client), and sculkwire waits for it to finish writing, then copies it to your path, with the extension of its format, and returns the image. The gallery copy stays |
@@ -231,7 +231,7 @@ Newline-delimited JSON-RPC 2.0 over TCP on `127.0.0.1:<port>`: one object per li
 | Method | Thread | Result |
 |---|---|---|
 | `ping`, `info`, `modules` | socket | Liveness; the process, image base and size; loaded modules |
-| `engine.status` | socket | `{build, hooked, attached, tick, resolved: {name: "0x…"}, missing: [name]}`; `attached` is false while the agent is still resolving right after the injection, and `engine_attach` waits for it |
+| `engine.status` | socket | `{build, hooked, attached, tick, mainThread, hooks, gameinput, port, drainReleases, resolved: {name: "0x…"}, missing: [name]}` plus the engine's own `minecraft` and `ui`; `attached` is false while the agent is still resolving right after the injection, and `engine_attach` waits for it |
 | `engine.resolve` | socket | The `engine.status` shape; the client calls it to re-check the anchors |
 | `stream.subscribe {every?}` / `stream.unsubscribe` | socket | `tick` notifications, every 1 to 1200 ticks |
 | `input.lock {mode?, active?}` / `input.focus {focused}` | socket | Lock state; host focus |

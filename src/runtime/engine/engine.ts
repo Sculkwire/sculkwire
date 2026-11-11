@@ -19,6 +19,7 @@ import { existsSync } from "node:fs";
 import { copyFile, mkdir, open, readdir, rename, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { z } from "zod";
 import { cacheDir } from "../../core/paths.ts";
 import { gameDirCandidates } from "../../gamefiles/detect.ts";
 import { findInstall, type ClientInstall } from "../client/install.ts";
@@ -61,7 +62,78 @@ const UI_TIMEOUT_MS = 5_000;
 const ATTACH_RESOLVE_MS = 60_000;
 const ATTACH_RESOLVE_POLL_MS = 250;
 
-export interface EngineStatus {
+const windowSize = z.object({ class: z.string(), width: z.number(), height: z.number() });
+
+/**
+ * The agent's diagnostic `engine.status` fields beyond the core five, as zod schemas: `normalizeStatus` keeps a field
+ * only when it parses, and the `engine_status` output schema is built from the same shape. Nested objects are loose,
+ * so a newer agent that adds a counter still fits; an older agent simply leaves a field out.
+ */
+export const ENGINE_STATUS_DIAGNOSTICS = {
+  /** False while the agent is still resolving its anchors right after the injection. */
+  attached: z.boolean(),
+  /** Which thread main-thread methods run on and what proved it; null before any drain ran. */
+  mainThread: z.string().nullable(),
+  /** The port the agent's socket bound (a hot reload may have settled for the next free one). */
+  port: z.number(),
+  /** Drains released from outside: a fault inside a handler, or one that never returned. */
+  drainReleases: z.number(),
+  /** Every hook the engine installed, with its call count and first thread. */
+  hooks: z.record(z.string(), z.looseObject({ installed: z.boolean(), calls: z.number(), thread: z.number().nullable() })),
+  /** The GameInput interface the agent drives the mouse through, and what the game's readings have seen. */
+  gameinput: z
+    .looseObject({
+      hooked: z.boolean().optional(),
+      module: z.string().nullable().optional(),
+      create: z.string().nullable().optional(),
+      /** How many vtable slots are patched right now. */
+      patched: z.number().optional(),
+      samples: z.number().optional(),
+      synthetic: z.number().optional(),
+      hidden: z.number().optional(),
+      keySamples: z.number().optional(),
+      keys: z.number().optional(),
+      /** The agent's cursor in client pixels, null before its first request. */
+      cursor: z.tuple([z.number(), z.number()]).nullable().optional(),
+      kinds: z.looseObject({ mouse: z.number(), keyboard: z.number(), other: z.number() }).optional(),
+      readings: z.number().optional(),
+      idleMs: z.number().nullable().optional(),
+      /** The last queued click, followed to `released` (read down and up) or `dropped` (no reading took it). */
+      lastClick: z
+        .object({ number: z.number(), state: z.enum(["queued", "pressed", "released", "dropped"]) })
+        .nullable()
+        .optional(),
+      callbacks: z.number().optional(),
+      adopted: z.number().optional(),
+      versions: z.array(z.looseObject({})).optional(),
+      /** Why the last probe refused, empty once a version is hooked. */
+      probe: z.string().optional(),
+    })
+    .nullable(),
+  /** The game window, its children and the hosted view a UI click is aimed at; null without a window. */
+  ui: z
+    .looseObject({
+      window: windowSize.optional(),
+      children: z.array(windowSize).optional(),
+      /** The hosted view (OreUI) a click goes to, null when there is none. */
+      host: z.string().nullable().optional(),
+    })
+    .nullable(),
+  /** The game objects the engine steps, with the role it proved for each. */
+  minecraft: z.array(
+    z.looseObject({
+      ptr: z.string(),
+      calls: z.number(),
+      thread: z.number().nullable(),
+      level: z.string().nullable(),
+      role: z.string(),
+    }),
+  ),
+};
+
+type EngineStatusDiagnostics = { [K in keyof typeof ENGINE_STATUS_DIAGNOSTICS]?: z.infer<(typeof ENGINE_STATUS_DIAGNOSTICS)[K]> };
+
+export interface EngineStatus extends EngineStatusDiagnostics {
   /** Build identity as the DLL reports it. */
   build: string;
   /** True when the main-thread drain is installed and runs requests. */
@@ -409,19 +481,29 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Fills absent fields so a partial or older status still satisfies the tool schema. */
+/**
+ * Fills absent core fields so a partial or older status still satisfies the tool schema, and keeps each diagnostic
+ * field of `ENGINE_STATUS_DIAGNOSTICS` the agent reports in its own shape; one that is absent or does not parse is
+ * left out rather than failing the whole status.
+ */
 export function normalizeStatus(raw: Partial<EngineStatus> | undefined): EngineStatus {
   const resolved: Record<string, string> = {};
   if (raw?.resolved && typeof raw.resolved === "object") {
     for (const [anchor, address] of Object.entries(raw.resolved)) if (typeof address === "string") resolved[anchor] = address;
   }
   const missing = Array.isArray(raw?.missing) ? raw.missing.filter((entry): entry is string => typeof entry === "string") : [];
+  const extra: EngineStatusDiagnostics = {};
+  for (const [key, schema] of Object.entries(ENGINE_STATUS_DIAGNOSTICS)) {
+    const field = schema.safeParse(raw?.[key as keyof EngineStatusDiagnostics]);
+    if (field.success) Object.assign(extra, { [key]: field.data });
+  }
   return {
     build: typeof raw?.build === "string" ? raw.build : "unknown",
     hooked: raw?.hooked === true,
     tick: typeof raw?.tick === "number" ? raw.tick : 0,
     resolved,
     missing,
+    ...extra,
   };
 }
 

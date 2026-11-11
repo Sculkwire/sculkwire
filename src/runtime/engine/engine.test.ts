@@ -201,6 +201,56 @@ describe("engine method wrappers", () => {
     expect(player.value.position).toEqual([1, 2, 3]);
     expect(agent.requests.map((request) => request.method)).toEqual(["engine.resolve", "player.state"]);
   });
+
+  it("keeps the agent's diagnostic status fields (gameinput, ui, drain counters) and drops malformed ones", async () => {
+    const agent = await makeAgent();
+    const session = makeSession(agent);
+    // The shape agent-core's `Hub::status` and the agent's `Engine::status` answer, trimmed.
+    const recorded = {
+      ...statusResult(),
+      attached: true,
+      mainThread: "sim.update (0x1a4)",
+      hooks: { "sim.update": { installed: true, calls: 4211, thread: 420 } },
+      gameinput: {
+        hooked: true,
+        module: "0x7ff800000000",
+        create: null,
+        patched: 3,
+        samples: 912,
+        synthetic: 2,
+        hidden: 0,
+        keySamples: 0,
+        keys: 0,
+        cursor: [960, 540],
+        kinds: { mouse: 912, keyboard: 0, other: 0 },
+        readings: 1200,
+        idleMs: 16,
+        lastClick: { number: 2, state: "released" },
+        callbacks: 0,
+        adopted: 0,
+        versions: [{ module: "GameInput.dll", version: "v2", status: "patched", readings: 1200 }],
+        probe: "",
+      },
+      port: 19160,
+      drainReleases: 1,
+      minecraft: [{ ptr: "0x1000", calls: 30, thread: 420, level: "0x2000", role: "client" }],
+      ui: {
+        window: { class: "Bedrock", width: 1920, height: 1080 },
+        children: [{ class: "OreUIHost", width: 1920, height: 1080 }],
+        host: "0x40a2",
+      },
+    };
+    agent.handler = (request) => reply(request, recorded);
+    const result = await session.status();
+    if (!result.ok) throw new Error(result.message);
+    expect(result.value).toEqual(recorded);
+    expect(result.value.gameinput?.lastClick?.state).toBe("released");
+
+    agent.handler = (request) => reply(request, { ...statusResult(), drainReleases: "1", ui: null, gameinput: { cursor: "x" } });
+    const partial = await session.status();
+    if (!partial.ok) throw new Error(partial.message);
+    expect(partial.value).toEqual({ ...statusResult(), ui: null });
+  });
 });
 
 describe("engine error handling", () => {

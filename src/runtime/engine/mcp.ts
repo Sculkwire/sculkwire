@@ -14,6 +14,7 @@ import {
   engine,
   type EngineFailure,
   type EnginePlayerState,
+  ENGINE_STATUS_DIAGNOSTICS,
   type EngineStatus,
   type EngineTickResult,
   type WorldChange,
@@ -69,6 +70,7 @@ function schemas() {
     tick: z.number().optional(),
     resolved: z.record(z.string(), z.string()).optional(),
     missing: z.array(z.string()).optional(),
+    ...Object.fromEntries(Object.entries(ENGINE_STATUS_DIAGNOSTICS).map(([key, schema]) => [key, schema.optional()])),
   };
 
   const commandSchema = {
@@ -238,6 +240,8 @@ function statusText(s: EngineStatus): string {
     `${anchors} anchor(s) resolved`,
   ];
   if (s.missing.length) parts.push(`missing ${s.missing.join(", ")}`);
+  if (s.drainReleases) parts.push(`${s.drainReleases} drain release(s)`);
+  if (s.gameinput?.lastClick) parts.push(`last click ${s.gameinput.lastClick.state}`);
   return parts.join(", ");
 }
 
