@@ -19,8 +19,8 @@ interface Fixture {
   options: string;
 }
 
-/** An install whose player options.txt holds `text` (and whose shared file is empty). */
-async function fixture(text = "gfx_viewdistance:24\ngame_thirdperson:0\n"): Promise<Fixture> {
+/** An install whose player options.txt holds `text` (and whose shared file is empty). 384 blocks are 24 chunks. */
+async function fixture(text = "gfx_viewdistance:384\ngame_thirdperson:0\n"): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "sculkwire-settings-"));
   dirs.push(root);
   const user = join(root, "Users", "1", "games", "com.mojang");
@@ -100,7 +100,8 @@ describe("settings from options.txt", () => {
       appliesAt: "next launch",
       saved: true,
     });
-    expect(readFileSync(options, "utf8")).toContain("gfx_viewdistance:32");
+    // options.txt saves the render distance in blocks; the tool speaks chunks, as the game does.
+    expect(readFileSync(options, "utf8")).toContain("gfx_viewdistance:512");
     expect(existsSync(`${options}.sculkwire-backup`)).toBe(true);
 
     const second = await setSetting("gfx_viewdistance", "48", deps);
@@ -110,7 +111,7 @@ describe("settings from options.txt", () => {
 
     const restored = await restoreGameSettings({ ...deps, install });
     expect(restored).toEqual({ gfx_viewdistance: "24" });
-    expect(readFileSync(options, "utf8")).toContain("gfx_viewdistance:24");
+    expect(readFileSync(options, "utf8")).toContain("gfx_viewdistance:384");
     expect(existsSync(record)).toBe(false);
   });
 
@@ -121,17 +122,33 @@ describe("settings from options.txt", () => {
     expect(await setSetting("not_an_option", "1", deps)).toMatchObject({ ok: false, message: expect.stringContaining("only options the game already saved") });
     expect(existsSync(record)).toBe(false);
   });
+
+  it("answers the render distance in chunks, as the engine route does, though the file saves blocks", async () => {
+    const { install, record, options } = await fixture("gfx_viewdistance:800\ngame_thirdperson:0\n");
+    const deps = { install, session: detached(), record };
+    const one = await getSetting("gfx_viewdistance", deps);
+    if (!one.ok) throw new Error(one.message);
+    expect(one.value.setting).toEqual({ id: "gfx_viewdistance", type: "string", value: "50" });
+    const change = await setSetting("gfx_viewdistance", 12, deps);
+    if (!change.ok) throw new Error(change.message);
+    expect(change.value).toMatchObject({ previous: "50", value: "12" });
+    expect(readFileSync(options, "utf8")).toContain("gfx_viewdistance:192");
+    expect(await setSetting("gfx_viewdistance", "far", deps)).toMatchObject({ ok: false, reason: "invalid_params" });
+    // Other options are the file's text as it is.
+    const third = await getSetting("game_thirdperson", deps);
+    expect(third).toMatchObject({ ok: true, value: { setting: { value: "0" } } });
+  });
 });
 
 describe("settings through an agent", () => {
   it("changes the running game without touching the file, then restores live", async () => {
-    const { install, record, options } = await fixture("gfx_viewdistance:24\n");
+    const { install, record, options } = await fixture("gfx_viewdistance:384\n");
     const edits: [string, SettingValue][] = [];
     const session = attached({ edits });
     const change = await setSetting("gfx_viewdistance", 48, { install, session, record });
     if (!change.ok) throw new Error(change.message);
     expect(change.value).toEqual({ id: "gfx_viewdistance", previous: 24, value: 48, source: "engine", appliesAt: "now" });
-    expect(readFileSync(options, "utf8")).toContain("gfx_viewdistance:24");
+    expect(readFileSync(options, "utf8")).toContain("gfx_viewdistance:384\n");
     expect(JSON.parse(readFileSync(record, "utf8"))).toEqual({ settings: { gfx_viewdistance: { previous: 24, source: "engine" } } });
 
     const restored = await restoreGameSettings({ install, session, record });
@@ -140,8 +157,8 @@ describe("settings through an agent", () => {
       ["gfx_viewdistance", 48],
       ["gfx_viewdistance", 24],
     ]);
-    // The file is written too, so a game that never saves its own copy still comes back unchanged.
-    expect(readFileSync(options, "utf8")).toContain("gfx_viewdistance:24");
+    // The file is written too (in blocks), so a game that never saves its own copy still comes back unchanged.
+    expect(readFileSync(options, "utf8")).toContain("gfx_viewdistance:384");
     expect(existsSync(record)).toBe(false);
   });
 

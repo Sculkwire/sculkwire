@@ -444,7 +444,8 @@ export function register(server: McpServer): void {
         "showcoordinates). Through the running game when the agent is attached, so a change applies at once; in " +
         "options.txt when it is not, which applies at the next launch. set reports `saved`: true when the value " +
         "reached options.txt (always for the file route), false when it is live only and is lost on restart unless the " +
-        "game saves later. Every value sculkwire changes is put back by game_stop. The script debugger, websocket and " +
+        "game saves later. Both routes answer in the game's unit: gfx_viewdistance is in chunks, though options.txt " +
+        "saves blocks. Every value sculkwire changes is put back by game_stop. The script debugger, websocket and " +
         "content-log keys belong to the bridge: game_launch writes them and game_stop restores them.",
       inputSchema: {
         action: z.enum(["list", "get", "set"]).describe("list every option, read one, or change one"),

@@ -104,6 +104,34 @@ export function settingsText(value: SettingValue): string {
   return String(value);
 }
 
+/**
+ * Options whose `options.txt` text counts a smaller unit than the game itself: the render distance is saved in blocks
+ * (16 per chunk), while the game's options object, the agent and the settings screen count chunks. Both routes answer
+ * in the game's unit, so the same id reads the same value whichever route serves it.
+ */
+const FILE_SCALE: Readonly<Record<string, number>> = { gfx_viewdistance: 16 };
+
+/** The number in `text`, or undefined when it is not one. */
+function numberIn(text: string): number | undefined {
+  const n = Number(text);
+  return text.trim() !== "" && Number.isFinite(n) ? n : undefined;
+}
+
+/** `options.txt` text for `id`, in the game's unit (chunks for the render distance). Text that is no number stays as it is. */
+function fromFileText(id: string, text: string): string {
+  const scale = FILE_SCALE[id];
+  const n = scale ? numberIn(text) : undefined;
+  return scale && n !== undefined ? String(n / scale) : text;
+}
+
+/** The text `options.txt` holds for `value` of `id`, a value in the game's unit (blocks for the render distance). */
+function fileText(id: string, value: SettingValue): string {
+  const text = settingsText(value);
+  const scale = FILE_SCALE[id];
+  const n = scale ? numberIn(text) : undefined;
+  return scale && n !== undefined ? String(Math.round(n * scale)) : text;
+}
+
 /** One line for a change, as the tools and the CLI report it: what it was, what it is, and whether the file has it. */
 export function changeText(change: SettingChange): string {
   const was = change.previous === null ? "unset" : String(change.previous);
@@ -112,7 +140,7 @@ export function changeText(change: SettingChange): string {
   return `${change.id}: ${was} -> ${String(change.value)} (${change.source}, applies ${change.appliesAt}${stored})`;
 }
 
-/** Read every options.txt of the install, the player's file first (the game reads that one). */
+/** Read every options.txt of the install, the player's file first (the game reads that one), values in the game's unit. */
 async function readOptionsFiles(install: ClientInstall): Promise<{ files: string[]; values: Map<string, string> }> {
   const files = optionsFiles(install);
   const values = new Map<string, string>();
@@ -123,7 +151,7 @@ async function readOptionsFiles(install: ClientInstall): Promise<{ files: string
     } catch {
       continue;
     }
-    for (const [key, value] of parseOptions(text)) if (!values.has(key)) values.set(key, value);
+    for (const [key, value] of parseOptions(text)) if (!values.has(key)) values.set(key, fromFileText(key, value));
   }
   return { files, values };
 }
@@ -239,13 +267,16 @@ export async function setSetting(id: string, value: SettingValue, deps: Settings
         message: `options.txt has no ${key}; without an attached agent only options the game already saved can be changed`,
       };
     }
+    if (FILE_SCALE[key] && numberIn(settingsText(value)) === undefined) {
+      return { ok: false, code: -32602, reason: "invalid_params", message: `${key} takes a number, got ${JSON.stringify(value)}` };
+    }
     change.previous = existing;
     change.value = settingsText(value);
     change.source = "options.txt";
     change.appliesAt = "next launch";
     // The write below is the file the game reads at its next launch, so this route always leaves it saved.
     change.saved = true;
-    await writeOptionsValues(install, { [key]: settingsText(value) });
+    await writeOptionsValues(install, { [key]: fileText(key, value) });
   }
   const record = deps.record ?? defaultRecord();
   const pending = await readPending(record);
@@ -276,7 +307,7 @@ export async function restoreGameSettings(deps: SettingsDeps = {}): Promise<Reco
       const result = await session.settingsSet(id, previous);
       if (result.ok) live.add(id);
     }
-    if (install) file[id] = previous === null ? null : settingsText(previous);
+    if (install) file[id] = previous === null ? null : fileText(id, previous);
   }
   let fileWritten = false;
   if (install && Object.keys(file).length > 0) fileWritten = (await writeOptionsValues(install, file).catch(() => [])).length > 0;
