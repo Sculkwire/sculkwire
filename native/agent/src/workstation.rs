@@ -208,8 +208,9 @@ fn eye() -> Result<[f32; 3], RpcError> {
     ecs::read(accessor).map(|reading| reading.sample.position).ok_or_else(|| RpcError::anchor("player.state"))
 }
 
-/// Writes the view the way `input.look` does — the camera's direct-look pair first, then the local
-/// player's rotation component — and reads the rotation back.
+/// Writes the view the way `input.look` does — the camera the player follows first (first person's
+/// direct-look pair or third person's orbit), then the local player's rotation component — and reads
+/// the rotation back.
 ///
 /// The read-back is what makes the use that follows honest: a view the component refused is an error,
 /// never a click at whatever the player was already looking at. The camera write is what keeps the

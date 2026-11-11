@@ -25,6 +25,9 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup target add x86_64-pc-windows-msvc
       - run: cargo build --release --locked --target x86_64-pc-windows-msvc
+      # The agent's pure view math (`look.rs`) also builds on its own as a host test crate.
+      - run: rustc --edition 2021 --test agent/src/look.rs -o target/look-test.exe
+      - run: ./target/look-test.exe
 
   test:
     strategy:

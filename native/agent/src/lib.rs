@@ -25,6 +25,7 @@ mod hooks;
 mod input;
 mod inventory;
 mod live;
+mod look;
 mod methods;
 mod options;
 mod pe;

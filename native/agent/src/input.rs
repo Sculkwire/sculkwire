@@ -58,12 +58,13 @@
 //! click therefore runs inside the client's own item-registry scope, opened exactly as the client's
 //! methods open it ([`with_item_scope`]); `input.use` refuses (`-32001 input.item_scope`) without it.
 //!
-//! **`input.look` — the camera's direct look.** The player's rotation follows the camera every frame,
-//! and the camera's orientation comes from its `CameraDirectLookComponent` (radians), which is where
-//! mouse look goes. The view is written there — into each camera whose pair is the player's current
-//! rotation under the game's convention — and into the player's `ActorRotationComponent` for an
-//! immediate read-back. When the registry cannot be resolved, the request falls back to
-//! [`crate::live::request_look`].
+//! **`input.look` — the active camera.** The player's rotation follows the active camera every frame,
+//! so the view is written where mouse look goes: in first person into the camera's
+//! `CameraDirectLookComponent` (radians), into each camera whose pair is the player's current
+//! rotation under the game's convention; in third person (back and front view) into the active
+//! orbit camera's `CameraOrbitComponent` angles, by the camera's look mode (see [`crate::look`]).
+//! The player's `ActorRotationComponent` is written too, for an immediate read-back. When the
+//! registry cannot be resolved, the request falls back to [`crate::live::request_look`].
 //!
 //! **`player.state` — components, with `live`'s snapshot as the fallback.** Position, rotation, delta
 //! and on ground come from `StateVectorComponent`, `ActorRotationComponent` and
@@ -113,7 +114,7 @@ use agent_core::hub::Movement;
 use agent_core::sync::SpinLock;
 use agent_core::{gameinput, hook, log, message_loop, win, Anchor, Core, Image, RpcError};
 
-use crate::{anchors, ecs, live, pe};
+use crate::{anchors, ecs, live, look, pe};
 
 /* ------------------------------------------------------------------------------------------------
  * Params
@@ -1417,14 +1418,12 @@ pub fn h_input_release(_core: &'static Core, _params: &Value) -> Result<Value, R
 
 /// `input.look {pitch, yaw}` → `{pitch, yaw, route, cameras}` once the view is written.
 ///
-/// The client's player rotation is not where the view lives: every frame the camera's
-/// `CameraDirectLookComponent` (yaw and pitch in radians, plus the pending mouse turn) becomes the
-/// camera's orientation, and the player's `ActorRotationComponent` is set from the camera — so a
-/// write to the rotation alone is undone on the next frame (live: `[30, 0]` written, `[8.84, -0.03]`
-/// read 2 s later). The view is therefore written where mouse look goes: into each camera whose
-/// direct-look pair is the player's current rotation under the game's convention (see
-/// [`look_mapping`]), with its pending turn cleared, and into the player's rotation for an immediate
-/// read-back. `pitch` is the number `player.state.rotation` reports (+ looks down).
+/// The client's player rotation is not where the view lives: every frame the active camera's
+/// orientation is built from its own components, and the player's `ActorRotationComponent` is set
+/// from the camera — so a write to the rotation alone is undone on the next frame (live: `[30, 0]`
+/// written, `[8.84, -0.03]` read 2 s later). The view is therefore written into the camera the player
+/// follows ([`write_camera_look`]) and into the player's rotation for an immediate read-back. `pitch`
+/// is the number `player.state.rotation` reports (+ looks down).
 pub fn h_input_look(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     let pitch = number(params, "pitch")?;
     let yaw = number(params, "yaw")?;
@@ -1433,7 +1432,7 @@ pub fn h_input_look(core: &'static Core, params: &Value) -> Result<Value, RpcErr
     }
     world()?;
     let pitch = pitch as f32;
-    let yaw = wrap_degrees(yaw as f32);
+    let yaw = look::wrap_degrees(yaw as f32);
     let Some(accessor) = registry() else {
         // No registry: the tick route is the only one left (it writes and confirms on the next tick).
         return live::request_look(core, pitch, yaw);
@@ -1456,61 +1455,86 @@ const DIRECT_LOOK_STRIDE: usize = 0x14;
 const DIRECT_LOOK_YAW: usize = 0x00;
 const DIRECT_LOOK_PITCH: usize = 0x04;
 const DIRECT_LOOK_TURN: usize = 0x08;
+/// `MinecraftCamera::CameraOrbitComponent`, the third-person cameras' view: element stride `0x4c`
+/// (`imul …, 0x4c` at its lookups). The game's own "point the camera along a view vector" writes the
+/// spherical offset `(radius, azimuth, polar)` twice, at `+0x24` (current) and `+0x30` (target), and
+/// its look input turns the target azimuth `+0x34`; with the presets' zero smoothing springs the
+/// current follows the target at once. Both pairs of angles are written, the radius is left alone.
+const ORBIT: &str = "MinecraftCamera::CameraOrbitComponent";
+const ORBIT_STRIDE: usize = 0x4c;
+const ORBIT_ANGLES: [usize; 2] = [0x28, 0x34];
+const ORBIT_POLAR_AFTER_AZIMUTH: usize = 0x04;
+/// `VanillaCamera::UpdatePlayerFromCameraComponent`: a camera the player's rotation follows. Element
+/// stride 4, the look mode as a `u32` (see [`look::LookMode`]).
+const UPDATE_PLAYER: &str = "VanillaCamera::UpdatePlayerFromCameraComponent";
+const UPDATE_PLAYER_STRIDE: usize = 0x04;
+/// `MinecraftCamera::ActiveCameraComponent`: the flag on the camera the client renders through (the
+/// game's own active-orbit views join it with `CameraOrbitComponent`).
+const ACTIVE_CAMERA: &str = "MinecraftCamera::ActiveCameraComponent";
 /// Cameras a client holds: a handful (first person, third person, …).
 const MAX_CAMERAS: usize = 64;
-/// How far, in degrees, a camera's pair may be from the player's rotation and still be the one the
-/// player follows.
-const LOOK_MATCH_DEGREES: f32 = 1.0;
-const DEGREES_PER_RADIAN: f32 = 57.295_78;
 
-/// How a camera's radians map to the player's degrees: `yaw = yaw_sign · deg(+0x00) + offset`,
-/// `pitch = pitch_sign · deg(+0x04)`. Ordered by preference: the first two are the game's quaternion
-/// `Ry · Rx` with the player's convention (yaw 0 = +Z, growing clockwise from above; + pitch looks
-/// down) for a camera looking along +Z or −Z; the rest only win when the live pair proves them.
-const LOOK_MAPPINGS: [(f32, f32, f32); 8] = [
-    (-1.0, 0.0, 1.0),
-    (-1.0, 180.0, -1.0),
-    (1.0, 0.0, 1.0),
-    (1.0, 180.0, -1.0),
-    (-1.0, 0.0, -1.0),
-    (-1.0, 180.0, 1.0),
-    (1.0, 0.0, -1.0),
-    (1.0, 180.0, 1.0),
-];
-
-/// The first mapping under which a camera's `[yaw, pitch]` radians are the player's current
-/// `[pitch, yaw]` degrees, or `None` when the camera is not the one the player follows.
-fn look_mapping(camera: [f32; 2], player: [f32; 2]) -> Option<(f32, f32, f32)> {
-    let [camera_yaw, camera_pitch] = [camera[0] * DEGREES_PER_RADIAN, camera[1] * DEGREES_PER_RADIAN];
-    let [player_pitch, player_yaw] = player;
-    LOOK_MAPPINGS.into_iter().find(|(yaw_sign, offset, pitch_sign)| {
-        wrap_degrees(player_yaw - (yaw_sign * camera_yaw + offset)).abs() <= LOOK_MATCH_DEGREES
-            && (player_pitch - pitch_sign * camera_pitch).abs() <= LOOK_MATCH_DEGREES
-    })
+/// The storage's entity ids, when its vector is readable and holds a camera-sized count.
+fn camera_entities(storage: usize) -> Option<Vec<u32>> {
+    let begin = pe::read::<usize>(storage + ENTITY_BEGIN)?;
+    let end = pe::read::<usize>(storage + ENTITY_END)?;
+    if begin == 0 || end < begin || (end - begin) / 4 > MAX_CAMERAS {
+        return None;
+    }
+    Some((begin..end).step_by(4).filter_map(pe::read::<u32>).collect())
 }
 
 /// Writes the view into every camera the player follows; the number of cameras written.
 ///
-/// The storage is looked up in the registry's own node array (never created), and every element is
-/// read and range-checked before it is written. `-32001 camera.direct_look` when the registry has no
-/// direct-look storage or no camera matches the player's rotation (with the pairs it saw).
+/// - **Direct look** (first person): each camera whose pair is the player's current rotation under
+///   one of [`look::LOOK_MAPPINGS`], with its pending turn cleared.
+/// - **Orbit** (third person, back and front view): each *active* orbit camera the player's rotation
+///   follows (`UpdatePlayerFromCameraComponent` with a look mode the game's own code handles), by
+///   [`look::orbit_angles`]. A direct-look pair cannot be matched in third person: the first-person
+///   camera keeps the pair it had when the view switched while the player turns with the orbit.
+///
+/// Storages are looked up in the registry's own node array (never created), and every element is
+/// read and range-checked before it is written. `-32001 camera.view` when the registry holds neither
+/// storage, or when no camera the player follows was found (with what was seen).
 pub(crate) fn write_camera_look(accessor: usize, player: [f32; 2], pitch: f32, yaw: f32) -> Result<usize, RpcError> {
-    let missing = |data: Value| RpcError::anchor("camera.direct_look").with_data(data);
-    let storage = tree(accessor)
-        .and_then(|tree| storage_of(tree, hash(DIRECT_LOOK)))
-        .ok_or_else(|| missing(json!({ "message": "the client registry holds no camera direct-look storage" })))?;
-    let begin = pe::read::<usize>(storage + ENTITY_BEGIN).unwrap_or(0);
-    let end = pe::read::<usize>(storage + ENTITY_END).unwrap_or(0);
-    if begin == 0 || end < begin || (end - begin) / 4 > MAX_CAMERAS {
-        return Err(missing(json!({ "message": "the camera direct-look storage is not readable" })));
+    let missing = |data: Value| RpcError::anchor("camera.view").with_data(data);
+    let tree = tree(accessor).ok_or_else(|| missing(json!({ "message": "the client registry's node array is not readable" })))?;
+    let direct = storage_of(tree, hash(DIRECT_LOOK));
+    let orbit = storage_of(tree, hash(ORBIT));
+    if direct.is_none() && orbit.is_none() {
+        return Err(missing(json!({ "message": "the client registry holds no camera direct-look or orbit storage" })));
     }
+    let mut direct_seen: Vec<Value> = Vec::new();
+    let mut orbit_seen: Vec<Value> = Vec::new();
     let mut written = 0usize;
-    let mut seen: Vec<Value> = Vec::new();
-    let mut at = begin;
-    while at < end {
-        let entity = pe::read::<u32>(at);
-        at += 4;
-        let Some(element) = entity.and_then(|entity| ecs::element(storage, entity, DIRECT_LOOK_STRIDE)) else {
+    if let Some(storage) = direct {
+        written += write_direct_looks(storage, player, pitch, yaw, &mut direct_seen);
+    }
+    if let Some(storage) = orbit {
+        let update = storage_of(tree, hash(UPDATE_PLAYER));
+        let active = storage_of(tree, hash(ACTIVE_CAMERA));
+        written += write_orbits(storage, update, active, pitch, yaw, &mut orbit_seen);
+    }
+    if written == 0 {
+        return Err(missing(json!({
+            "message": "no camera the player follows: no direct-look pair matches the player's rotation and no active orbit camera updates the player",
+            "player": [player[0], player[1]],
+            "directLook": direct_seen,
+            "orbit": orbit_seen,
+        })));
+    }
+    Ok(written)
+}
+
+/// The direct-look half of [`write_camera_look`]: the cameras written; every pair read goes to `seen`.
+fn write_direct_looks(storage: usize, player: [f32; 2], pitch: f32, yaw: f32, seen: &mut Vec<Value>) -> usize {
+    let Some(entities) = camera_entities(storage) else {
+        seen.push(Value::String(String::from("unreadable")));
+        return 0;
+    };
+    let mut written = 0usize;
+    for entity in entities {
+        let Some(element) = ecs::element(storage, entity, DIRECT_LOOK_STRIDE) else {
             continue;
         };
         let (Some(camera_yaw), Some(camera_pitch)) =
@@ -1522,14 +1546,13 @@ pub(crate) fn write_camera_look(accessor: usize, player: [f32; 2], pitch: f32, y
             continue;
         }
         seen.push(json!([camera_yaw, camera_pitch]));
-        let Some((yaw_sign, offset, pitch_sign)) = look_mapping([camera_yaw, camera_pitch], player) else {
+        let Some(mapping) = look::look_mapping([camera_yaw, camera_pitch], player) else {
             continue;
         };
         if !pe::writable(element, DIRECT_LOOK_TURN + 4) {
             continue;
         }
-        let new_yaw = wrap_degrees(yaw_sign * (yaw - offset)) / DEGREES_PER_RADIAN;
-        let new_pitch = pitch_sign * pitch / DEGREES_PER_RADIAN;
+        let [new_yaw, new_pitch] = look::direct_look_pair(mapping, pitch, yaw);
         // SAFETY: `element` is this camera's direct-look element (the storage's own entity walk, stride
         // checked by the finite pair just read) and its 12 bytes were checked writable.
         unsafe {
@@ -1539,30 +1562,74 @@ pub(crate) fn write_camera_look(accessor: usize, player: [f32; 2], pitch: f32, y
         }
         written += 1;
     }
-    if written == 0 {
-        return Err(missing(json!({
-            "message": "no camera's direct-look pair matches the player's rotation",
-            "player": [player[0], player[1]],
-            "cameras": seen,
-        })));
-    }
-    Ok(written)
+    written
 }
 
-/// `value` inside `(-180, 180]`: the range the game keeps yaw in.
-///
-/// A truncating cast instead of `%` or `rem_euclid`, which compile to the CRT's `fmodf` and are not
-/// linked here.
-fn wrap_degrees(value: f32) -> f32 {
-    let turns = (value / 360.0) as i32;
-    let wrapped = value - turns as f32 * 360.0;
-    if wrapped > 180.0 {
-        wrapped - 360.0
-    } else if wrapped <= -180.0 {
-        wrapped + 360.0
-    } else {
-        wrapped
+/// The orbit half of [`write_camera_look`]: the cameras written; every orbit camera read goes to
+/// `seen` as `{azimuth, polar, active, lookMode}` (angles in radians, `lookMode` `null` when the
+/// player does not follow it).
+fn write_orbits(
+    storage: usize,
+    update: Option<usize>,
+    active: Option<usize>,
+    pitch: f32,
+    yaw: f32,
+    seen: &mut Vec<Value>,
+) -> usize {
+    let (Some(update), Some(active)) = (update, active) else {
+        seen.push(Value::String(String::from(if update.is_none() {
+            "no update-player-from-camera storage"
+        } else {
+            "no active-camera storage"
+        })));
+        return 0;
+    };
+    let Some(entities) = camera_entities(storage) else {
+        seen.push(Value::String(String::from("unreadable")));
+        return 0;
+    };
+    let mut written = 0usize;
+    for entity in entities {
+        let Some(element) = ecs::element(storage, entity, ORBIT_STRIDE) else {
+            continue;
+        };
+        let [current, target] = ORBIT_ANGLES;
+        let read = |at: usize| Some([pe::read::<f32>(element + at)?, pe::read::<f32>(element + at + ORBIT_POLAR_AFTER_AZIMUTH)?]);
+        let (Some([azimuth, polar]), Some([target_azimuth, target_polar])) = (read(current), read(target)) else {
+            continue;
+        };
+        if !look::orbit_plausible(azimuth, polar) || !look::orbit_plausible(target_azimuth, target_polar) {
+            continue;
+        }
+        let is_active = ecs::contains(active, entity);
+        let mode = ecs::element(update, entity, UPDATE_PLAYER_STRIDE)
+            .and_then(pe::read::<u32>)
+            .and_then(look::LookMode::from_raw);
+        seen.push(json!({
+            "azimuth": azimuth,
+            "polar": polar,
+            "active": is_active,
+            "lookMode": mode.map(look::LookMode::name),
+        }));
+        let Some(mode) = mode else {
+            continue;
+        };
+        if !is_active || !pe::writable(element + current, target + 8 - current) {
+            continue;
+        }
+        let [new_azimuth, new_polar] = look::orbit_angles(mode, pitch, yaw);
+        // SAFETY: `element` is this camera's orbit element (the storage's own entity walk, its angle
+        // pairs read and range-checked above), and the bytes from the current to the target pair were
+        // checked writable.
+        unsafe {
+            for at in ORBIT_ANGLES {
+                core::ptr::write_unaligned((element + at) as *mut f32, new_azimuth);
+                core::ptr::write_unaligned((element + at + ORBIT_POLAR_AFTER_AZIMUTH) as *mut f32, new_polar);
+            }
+        }
+        written += 1;
     }
+    written
 }
 
 /// The block the crosshair is on now (the game's own pick against the block's real shape), or `None`
