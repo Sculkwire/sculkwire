@@ -2881,7 +2881,7 @@ fn has_slot(object: usize, entry: usize) -> bool {
 fn screen_manager(entry: usize, anchor: &'static str) -> Result<usize, RpcError> {
     let screen = ui::screen_controller()
         .ok_or_else(|| RpcError::anchor("ui.screen").with_data(json!({ "message": "the open screen's controller is not readable now" })))?;
-    let model_at = MODEL_AT.load(Ordering::Acquire);
+    let model_at = base_model_at(screen, entry).unwrap_or_else(|| MODEL_AT.load(Ordering::Acquire));
     if model_at == 0 {
         return Err(RpcError::anchor("screen.enchanting").with_data(json!({ "message": "the controller's model offset did not resolve" })));
     }
@@ -2892,12 +2892,7 @@ fn screen_manager(entry: usize, anchor: &'static str) -> Result<usize, RpcError>
         if !has_slot(candidate, entry) {
             continue;
         }
-        let model = pe::read::<usize>(candidate + model_at).unwrap_or(0);
-        let alive = pe::read::<usize>(candidate + model_at + 8)
-            .filter(|block| *block != 0)
-            .and_then(|block| pe::read::<u32>(block + 8))
-            .is_some_and(|uses| uses != 0);
-        if model == 0 || !alive || !pe::read::<usize>(model).is_some_and(pe::in_image_data) {
+        if !model_alive(candidate, model_at) {
             return Err(RpcError::invalid_params("the screen's model is gone: the screen is closing"));
         }
         return Ok(candidate);
@@ -2910,6 +2905,66 @@ fn screen_manager(entry: usize, anchor: &'static str) -> Result<usize, RpcError>
     Err(RpcError::anchor(anchor).with_data(json!({
         "message": "the open screen keeps no controller of this screen's class",
     })))
+}
+
+/// True when `controller + at` holds a live `weak_ptr` / `shared_ptr` to an object with a table.
+fn model_alive(controller: usize, at: usize) -> bool {
+    let model = pe::read::<usize>(controller + at).unwrap_or(0);
+    let uses = pe::read::<usize>(controller + at + 8)
+        .filter(|block| *block != 0)
+        .and_then(|block| pe::read::<u32>(block + 8))
+        .is_some_and(|uses| uses != 0);
+    model != 0 && uses && pe::read::<usize>(model).is_some_and(pe::in_image_data)
+}
+
+/// `controller + BASE_MODEL_AT` = the model every container manager controller keeps (a `weak_ptr`
+/// held by the base class), 0 until read from the base class's own destructor.
+static BASE_MODEL_AT: AtomicUsize = AtomicUsize::new(0);
+
+/// `lea rax,[rip+TABLE]; mov [rcx],rax; mov rcx,[rcx+BLOCK]; test rcx,rcx`: a destructor storing its
+/// class's table, then loading the control block of the `weak_ptr` it locks.
+const BASE_DTOR_HEAD: &[Option<u8>] = &[
+    Some(0x48), Some(0x8D), Some(0x05), None, None, None, None, Some(0x48), Some(0x89), Some(0x01), Some(0x48), Some(0x8B),
+    Some(0x49), None, Some(0x48), Some(0x85), Some(0xC9),
+];
+/// `lock cmpxchg [rcx+8],edx; jne; mov r,[rbx+PTR]; mov r,[rbx+BLOCK]`: the lock succeeded, the pointer
+/// and its control block are read.
+const BASE_DTOR_LOCK: &[Option<u8>] =
+    &[Some(0xF0), Some(0x0F), Some(0xB1), Some(0x51), Some(0x08), Some(0x75), None, Some(0x48), Some(0x8B), None, None, Some(0x48), Some(0x8B), None, None];
+
+/// The base manager controller's model field, read once from the controller of the open screen whose
+/// class runs `entry`: its deleting destructor (table slot 0) calls the base destructor, the one that
+/// stores a table holding `entry` itself and then locks the model's `weak_ptr` at `[this+PTR]`,
+/// `[this+PTR+8]`. A crafter, hopper, dispenser or dropper screen uses the base class as is, so its object
+/// ends where a derived class's typed model copy ([`MODEL_AT`]) would start.
+fn base_model_at(screen: usize, entry: usize) -> Option<usize> {
+    match BASE_MODEL_AT.load(Ordering::Acquire) {
+        0 => {}
+        at => return Some(at),
+    }
+    let controller = (0..CONTROLLER_WINDOW)
+        .step_by(8)
+        .filter_map(|offset| pe::read::<usize>(screen + offset).filter(|candidate| *candidate >= 0x1_0000))
+        .find(|candidate| has_slot(*candidate, entry))?;
+    let deleting = pe::read::<usize>(controller).and_then(pe::read::<usize>).filter(|entry| pe::in_image_code(*entry))?;
+    let head = pe::bytes(deleting, 0x80)?;
+    let at = (0..head.len().saturating_sub(5)).filter(|at| head[*at] == 0xE8).find_map(|at| {
+        let dtor = rip_target(deleting, head, at + 1, at + 5).filter(|dtor| pe::in_image_code(*dtor))?;
+        let body = pe::bytes(dtor, 0x80)?;
+        let store = find(body, BASE_DTOR_HEAD)?;
+        let table = rip_target(dtor, body, store + 3, store + 7)?;
+        if !(0..TABLE_SLOTS).any(|slot| pe::read::<usize>(table + slot * 8) == Some(entry)) {
+            return None;
+        }
+        let block = body[store + 13] as usize;
+        let lock = store + find(&body[store..], BASE_DTOR_LOCK)?;
+        let (ptr_rm, ptr) = (body[lock + 9], body[lock + 10] as usize);
+        let (block_rm, block_at) = (body[lock + 13], body[lock + 14] as usize);
+        let rbx_disp8 = |modrm: u8| modrm & 0xC7 == 0x43;
+        (rbx_disp8(ptr_rm) && rbx_disp8(block_rm) && block_at == block && ptr + 8 == block).then_some(ptr)
+    })?;
+    BASE_MODEL_AT.store(at, Ordering::Release);
+    Some(at)
 }
 
 /// The model the manager controller works on (validated alive by [`screen_manager`]).
@@ -2930,12 +2985,7 @@ fn screen_field_manager(field: usize, anchor: &'static str) -> Result<usize, Rpc
     let controller = pe::read::<usize>(screen + field)
         .filter(|controller| *controller >= 0x1_0000 && pe::read::<usize>(*controller).is_some_and(pe::in_image_data))
         .ok_or_else(|| RpcError::anchor(anchor).with_data(json!({ "message": "the open screen keeps no manager controller there" })))?;
-    let alive = pe::read::<usize>(controller + model_at + 8)
-        .filter(|block| *block != 0)
-        .and_then(|block| pe::read::<u32>(block + 8))
-        .is_some_and(|uses| uses != 0);
-    let model = model_of(controller).filter(|model| pe::read::<usize>(*model).is_some_and(pe::in_image_data));
-    if !alive || model.is_none() {
+    if !model_alive(controller, model_at) {
         return Err(RpcError::invalid_params("the screen's model is gone: the screen is closing"));
     }
     Ok(controller)
@@ -4299,13 +4349,20 @@ pub(crate) fn h_screen_act(core: &'static Core, params: &Value) -> Result<Value,
         "craft" => {
             let recipe = optional_text(params, "recipe")?;
             let screen = require_screen(core, &["crafting_table", "inventory", "crafter"], action)?;
+            if kind_of(&screen) == "crafter" {
+                // The crafter's screen runs the plain container manager controller: it has no result to
+                // take and no crafting handler (calling the crafting table's on it faults in the game).
+                return Err(RpcError::invalid_params(
+                    "a crafter crafts when a redstone pulse reaches it, not from its screen: place the recipe with screen.move, close the screen and power the crafter (a button, or setblock a redstone_block next to it); the result drops out of its face",
+                ));
+            }
             // An empty grid and a recipe: the whole craft as `craft.run` does it (place, then take). The
             // take alone on an empty grid throws inside the game (live: `sculk craft run crafting_table`
             // on the inventory screen, "the handler faulted inside the game's frame").
             let open = open_containers()?;
             let grid_empty = open_named(&open, CRAFTING_INPUT)
                 .is_some_and(|grid| (0..grid.size).all(|cell| grid.item(cell).is_none_or(|item| count_of(item) == 0)));
-            if recipe.is_some() && grid_empty && kind_of(&screen) != "crafter" {
+            if recipe.is_some() && grid_empty {
                 return craft_run(core, params);
             }
             let entry = handler(H_CRAFT)?;
