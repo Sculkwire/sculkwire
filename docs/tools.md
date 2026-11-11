@@ -617,7 +617,7 @@ Reads a block's container, or the container screen the player has open.
 |---|---|
 | `action` | `get` or `open` (required) |
 | `x`, `y`, `z` | `get`: the block position |
-| `dimension` | `get`: dimension id, e.g. `minecraft:nether` (default: the player's) |
+| `dimension` | `get`: `overworld`, `nether` or `the_end`; the `minecraft:` id (`minecraft:nether`) and the numeric id `engine_player` reports (0, 1, 2) work too (default: the player's) |
 
 `get` answers `block`, `size` and `slots` for a block that has a container (chest, trapped chest, barrel, shulker box, hopper, dispenser, dropper, furnace family, brewing stand, crafter, ...) in the same slot shape as `player_inventory`; a block without one is `invalid_params` (`-32602`). `open` answers `screen`, `block` and its `position` (`{x, y, z}`) when the screen is a block's (both `null` for an entity's screen or the inventory), `slots` for the screen's own container (not the contents of a shulker box or bundle the player carries; a carried bundle's slot holds them as `contents`) and `playerSlots` for the player's 36 carried slots (hotbar first, then the inventory), and needs an agent.
 
@@ -648,7 +648,7 @@ Uses a block or an entity the way a right click does, through the game's own int
 |---|---|
 | `target` | `block` or `entity` (required) |
 | `x`, `y`, `z` | `block`: the block position |
-| `dimension` | `block`: dimension id, e.g. `minecraft:nether` (default: the player's) |
+| `dimension` | `block`: `overworld`, `nether` or `the_end`; the `minecraft:` id (`minecraft:nether`) and the numeric id `engine_player` reports (0, 1, 2) work too (default: the player's). The retail agent cannot read which dimension the player is in, so it refuses a stated one: leave it out to use the block where the player is |
 | `face` | `block`: which face to use, `down`, `up`, `north`, `south`, `west` or `east` (default: the side the player looks at) |
 | `id` | `entity`: the entity's unique id, a whole number in text, as `game_query` reports it (text because it is a 64-bit integer) |
 

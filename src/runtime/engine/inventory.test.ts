@@ -309,4 +309,23 @@ describe("routes", () => {
     const result = await readContainer({ x: 1.5, y: 64, z: 0 }, detached());
     expect(!result.ok && result.reason).toBe("invalid_params");
   });
+
+  it("sends the dimension as the bare name the agent and the helper pack take, whichever spelling was given", async () => {
+    for (const dimension of ["nether", "minecraft:nether", 1, " Minecraft:Nether "]) {
+      const session = answered({ "container.get": { block: "minecraft:barrel", size: 0, slots: [] } });
+      const call = vi.spyOn(session, "call");
+      await readContainer({ x: 1, y: 64, z: -2, dimension }, session);
+      expect(call.mock.calls[0]?.[1]).toEqual({ x: 1, y: 64, z: -2, dimension: "nether" });
+    }
+    vi.mocked(bridge.query).mockResolvedValue({ block: "minecraft:chest", size: 0, slots: [] });
+    await readContainer({ x: 1, y: 64, z: -2, dimension: "minecraft:the_end" }, detached());
+    expect(bridge.query).toHaveBeenCalledWith("container", { x: 1, y: 64, z: -2, dimension: "the_end" });
+  });
+
+  it("refuses a dimension the agent does not know instead of reading the overworld", async () => {
+    for (const dimension of ["minecraft:aether", 3]) {
+      const result = await readContainer({ x: 1, y: 64, z: -2, dimension }, detached());
+      expect(!result.ok && result.reason).toBe("invalid_params");
+    }
+  });
 });

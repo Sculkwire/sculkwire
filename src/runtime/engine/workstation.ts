@@ -98,12 +98,40 @@ export const SCREEN_ACTIONS = [
 ] as const;
 export type ScreenActAction = (typeof SCREEN_ACTIONS)[number];
 
-/** A block to use like a right click; `dimension` is a dimension id such as `minecraft:nether`. */
+/**
+ * The dimensions the agent takes by name, in the game's own numbering (`VanillaDimensions`: 0, 1, 2). The agent and the
+ * helper pack both take the bare name; callers may also give the `minecraft:` id or the number `engine_player` reports.
+ */
+export const DIMENSIONS = ["overworld", "nether", "the_end"] as const;
+export type Dimension = (typeof DIMENSIONS)[number];
+
+/** Every spelling a dimension input accepts: the bare name, the `minecraft:` id, or the numeric id 0, 1 or 2. */
+export const dimensionSchema = z
+  .union([z.enum([...DIMENSIONS, ...DIMENSIONS.map((name) => `minecraft:${name}` as const)]), z.number().int().min(0).max(2)])
+  .describe("dimension: overworld, nether or the_end, as the bare name, the minecraft: id or the numeric id 0, 1 or 2");
+
+/** The bare name the agent takes for a dimension input (also a numeric id in text, as the CLI passes it), or undefined. */
+export function dimensionName(value: string | number): Dimension | undefined {
+  if (typeof value === "number") return Number.isInteger(value) ? DIMENSIONS[value] : undefined;
+  const text = value.trim().toLowerCase();
+  if (/^\d+$/.test(text)) return DIMENSIONS[Number(text)];
+  const name = text.startsWith("minecraft:") ? text.slice("minecraft:".length) : text;
+  return (DIMENSIONS as readonly string[]).includes(name) ? (name as Dimension) : undefined;
+}
+
+/** The `dimension` parameter for the agent, `{}` when none is given, or why the value is not a dimension. */
+export function dimensionParam(value: string | number | undefined): { dimension?: Dimension } | string {
+  if (value === undefined || (typeof value === "string" && !value.trim())) return {};
+  const name = dimensionName(value);
+  return name ? { dimension: name } : `dimension must be overworld, nether or the_end (bare, minecraft: or 0, 1, 2), not ${value}`;
+}
+
+/** A block to use like a right click; `dimension` is a dimension (`nether`, `minecraft:nether` or 1). */
 export interface BlockUse {
   x: number;
   y: number;
   z: number;
-  dimension?: string;
+  dimension?: string | number;
   face?: BlockFace;
 }
 
@@ -574,12 +602,13 @@ export function interactBlockParams(use: BlockUse): Record<string, unknown> | st
   if (use.face !== undefined && !(BLOCK_FACES as readonly string[]).includes(use.face)) {
     return `face must be one of ${BLOCK_FACES.join(", ")}`;
   }
-  const dimension = use.dimension?.trim();
+  const dimension = dimensionParam(use.dimension);
+  if (typeof dimension === "string") return dimension;
   return {
     x: use.x,
     y: use.y,
     z: use.z,
-    ...(dimension ? { dimension } : {}),
+    ...dimension,
     ...(use.face ? { face: use.face } : {}),
   };
 }
@@ -964,7 +993,7 @@ export function registerWorkstationTools(server: McpServer): void {
         x: z.number().int().optional().describe("block: block x"),
         y: z.number().int().optional().describe("block: block y"),
         z: z.number().int().optional().describe("block: block z"),
-        dimension: z.string().optional().describe("block: dimension id, e.g. minecraft:nether (default: the player's)"),
+        dimension: dimensionSchema.optional().describe("block: overworld, nether or the_end (also minecraft:nether, or 0, 1, 2; default: the player's)"),
         face: z.enum(BLOCK_FACES).optional().describe("block: which face to use (default: the side the player looks at)"),
         id: z.string().optional().describe("entity: the entity's unique id, as a whole number in text (from game_query)"),
       },
@@ -979,7 +1008,7 @@ export function registerWorkstationTools(server: McpServer): void {
           return ok(interactText(result.value), { ok: true, ...result.value });
         }
         if (x === undefined || y === undefined || bz === undefined) return failureOf(invalid("block needs x, y and z"));
-        const result = await interactBlock({ x, y, z: bz, ...(dimension ? { dimension } : {}), ...(face ? { face } : {}) });
+        const result = await interactBlock({ x, y, z: bz, ...(dimension !== undefined ? { dimension } : {}), ...(face ? { face } : {}) });
         if (!result.ok) return agentRequired(result);
         return ok(interactText(result.value), { ok: true, ...result.value });
       } catch (err) {
@@ -1139,7 +1168,7 @@ function positionalsOf(args: string[], names: readonly string[]): string[] {
 }
 
 const INTERACT_USAGE =
-  "usage: sculk interact block <x> <y> <z> [--dimension minecraft:overworld] [--face up|down|north|south|east|west] | sculk interact entity <unique-id>";
+  "usage: sculk interact block <x> <y> <z> [--dimension overworld|nether|the_end] [--face up|down|north|south|east|west] | sculk interact entity <unique-id>";
 
 const interactBlockCommand: CliCommand = {
   name: "interact block",
@@ -1149,7 +1178,11 @@ const interactBlockCommand: CliCommand = {
       const coords = positionalsOf(args, ["dimension", "face"]);
       const dimension = flagOf(args, "dimension");
       const face = flagOf(args, "face");
-      if (coords.length !== 3 || (face !== undefined && !(BLOCK_FACES as readonly string[]).includes(face))) {
+      if (
+        coords.length !== 3 ||
+        (face !== undefined && !(BLOCK_FACES as readonly string[]).includes(face)) ||
+        (dimension !== undefined && !dimensionName(dimension))
+      ) {
         err(INTERACT_USAGE);
         return ExitCode.usage;
       }

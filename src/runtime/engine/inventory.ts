@@ -27,7 +27,7 @@ import {
   type EngineResult,
   type EngineSession,
 } from "./engine.ts";
-import { itemSlotSchema, screenAct } from "./workstation.ts";
+import { dimensionName, dimensionParam, dimensionSchema, itemSlotSchema, screenAct } from "./workstation.ts";
 
 /** A container walk touches every slot; a craft runs the game's own recipe request. Both deserve more than 15 s. */
 const CONTAINER_TIMEOUT_MS = 20_000;
@@ -110,12 +110,12 @@ export interface PlayerInventoryState {
   inventory: PlayerInventory;
 }
 
-/** A block position; `dimension` is a dimension id such as `minecraft:nether`. */
+/** A block position; `dimension` is a dimension (`nether`, `minecraft:nether` or 1), sent to the agent as its bare name. */
 export interface BlockRef {
   x: number;
   y: number;
   z: number;
-  dimension?: string;
+  dimension?: string | number;
 }
 
 /** What a block's container holds. `slots` is exactly `size` entries, empty ones as null. */
@@ -522,7 +522,9 @@ function blockParams(at: BlockRef): Record<string, unknown> | string {
   if (!Number.isInteger(at.x) || !Number.isInteger(at.y) || !Number.isInteger(at.z)) {
     return "x, y and z must be whole block coordinates";
   }
-  return { x: at.x, y: at.y, z: at.z, ...(at.dimension ? { dimension: at.dimension } : {}) };
+  const dimension = dimensionParam(at.dimension);
+  if (typeof dimension === "string") return dimension;
+  return { x: at.x, y: at.y, z: at.z, ...dimension };
 }
 
 /**
@@ -745,7 +747,7 @@ export function registerInventoryTools(server: McpServer): void {
         x: z.number().int().optional().describe("get: block x"),
         y: z.number().int().optional().describe("get: block y"),
         z: z.number().int().optional().describe("get: block z"),
-        dimension: z.string().optional().describe("get: dimension id, e.g. minecraft:nether (default: the player's)"),
+        dimension: dimensionSchema.optional().describe("get: overworld, nether or the_end (also minecraft:nether, or 0, 1, 2; default: the player's)"),
       },
       outputSchema: containerSchema,
     },
@@ -765,7 +767,7 @@ export function registerInventoryTools(server: McpServer): void {
         if (x === undefined || y === undefined || bz === undefined) {
           return failureOf(invalid("get needs x, y and z"));
         }
-        const result = await readContainer({ x, y, z: bz, ...(dimension ? { dimension } : {}) });
+        const result = await readContainer({ x, y, z: bz, ...(dimension !== undefined ? { dimension } : {}) });
         if (!result.ok) return failureOf(result);
         const view = result.value;
         return ok(`${containerText(view)} at ${x} ${y} ${bz}`, { ok: true, action, ...view });
@@ -885,14 +887,14 @@ const playerInventoryCommand: CliCommand = {
 
 const containerCommand: CliCommand = {
   name: "container get",
-  summary: "What a block's container holds: container get <x> <y> <z> [--dimension minecraft:overworld]",
+  summary: "What a block's container holds: container get <x> <y> <z> [--dimension overworld|nether|the_end]",
   async run(args) {
     return oneShot(async () => {
       const dot = args.indexOf("--dimension");
       const coords = dot === -1 ? args : args.slice(0, dot);
       const dimension = dot === -1 ? undefined : args[dot + 1];
-      if (coords.length !== 3 || (dot !== -1 && !dimension)) {
-        err("usage: sculk container get <x> <y> <z> [--dimension minecraft:overworld]");
+      if (coords.length !== 3 || (dot !== -1 && (!dimension || !dimensionName(dimension)))) {
+        err("usage: sculk container get <x> <y> <z> [--dimension overworld|nether|the_end]");
         return ExitCode.usage;
       }
       const [cx, cy, cz] = coords.map(Number);
