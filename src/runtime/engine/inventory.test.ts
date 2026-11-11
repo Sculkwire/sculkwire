@@ -13,6 +13,7 @@ import { bridge, HelperQueryError } from "../client/bridge.ts";
 import { EngineSession, type EngineResult } from "./engine.ts";
 import {
   craftMatchParams,
+  enchantmentName,
   parseAttributes,
   parseContainer,
   parseCraftGrid,
@@ -81,6 +82,21 @@ describe("parseSlot", () => {
       { id: "minecraft:sharpness", level: 5 },
       { id: "minecraft:unbreaking", level: 3 },
     ]);
+  });
+
+  it("names the game's numeric enchantment ids", () => {
+    const pick = parseSlot({ item: "minecraft:iron_pickaxe", enchantments: [{ id: 17, level: 1 }, { id: 15, level: 1 }] });
+    expect(pick?.enchantments).toEqual([
+      { id: "minecraft:unbreaking", level: 1 },
+      { id: "minecraft:efficiency", level: 1 },
+    ]);
+    expect(enchantmentName(0)).toBe("minecraft:protection");
+    expect(enchantmentName(9)).toBe("minecraft:sharpness");
+    expect(enchantmentName(37)).toBe("minecraft:swift_sneak");
+    expect(enchantmentName(40)).toBe("minecraft:breach");
+    expect(enchantmentName(99)).toBe("minecraft:unknown_99");
+    // A negative or fractional number is not an id.
+    expect(parseSlot({ item: "minecraft:stick", enchantments: [{ id: -1 }, { id: 1.5 }] })?.enchantments).toEqual([]);
   });
 
   it("carries a custom name, lore and the contents of a container item", () => {

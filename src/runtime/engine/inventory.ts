@@ -210,18 +210,41 @@ function durabilityOf(raw: unknown): ItemDurability | undefined {
   return { damage: Math.min(Math.max(0, Math.round(damage)), Math.round(max)), max: Math.round(max) };
 }
 
-/** The game's enchantment shape (`{id, level}`), and the Script API's (`{type: {id}, level}`). */
+/**
+ * Bedrock's numeric enchantment ids (the order the game keeps in item data and the network protocol), indexed by
+ * id. The names are the Script API's `minecraft:` enchantment type ids.
+ */
+const ENCHANTMENT_IDS = [
+  "protection", "fire_protection", "feather_falling", "blast_protection", "projectile_protection", "thorns",
+  "respiration", "depth_strider", "aqua_affinity", "sharpness", "smite", "bane_of_arthropods", "knockback",
+  "fire_aspect", "looting", "efficiency", "silk_touch", "unbreaking", "fortune", "power", "punch", "flame",
+  "infinity", "luck_of_the_sea", "lure", "frost_walker", "mending", "binding", "vanishing", "impaling", "riptide",
+  "loyalty", "channeling", "multishot", "piercing", "quick_charge", "soul_speed", "swift_sneak", "wind_burst",
+  "density", "breach",
+] as const;
+
+/** A numeric enchantment id's name; an id past the table reads `minecraft:unknown_<n>` so the level is not lost. */
+export function enchantmentName(id: number): string {
+  return `minecraft:${ENCHANTMENT_IDS[id] ?? `unknown_${id}`}`;
+}
+
+/**
+ * The game's enchantment shape (`{id, level}`, `id` numeric or a name), and the Script API's (`{type: {id}, level}`).
+ */
 export function enchantmentsOf(raw: unknown): ItemEnchantment[] | undefined {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) return undefined;
   const out: ItemEnchantment[] = [];
   for (const entry of raw) {
-    const id = isRecord(entry)
-      ? (itemName(entry.id) ??
-        (typeof entry.type === "string" ? itemName(entry.type) : isRecord(entry.type) ? itemName(entry.type.id) : undefined))
-      : undefined;
+    if (!isRecord(entry)) continue;
+    const numeric = typeof entry.id === "number" ? whole(entry.id) : undefined;
+    const id =
+      numeric !== undefined && numeric >= 0
+        ? enchantmentName(numeric)
+        : (itemName(entry.id) ??
+          (typeof entry.type === "string" ? itemName(entry.type) : isRecord(entry.type) ? itemName(entry.type.id) : undefined));
     if (!id) continue;
-    const level = whole(isRecord(entry) ? entry.level : undefined) ?? 1;
+    const level = whole(entry.level) ?? 1;
     out.push({ id, level: Math.max(1, level) });
   }
   return out;
