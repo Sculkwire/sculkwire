@@ -3,7 +3,7 @@ import { parseArgs } from "node:util";
 import type { CliCommand } from "../../core/cli.ts";
 import { ExitCode, exitCodeFor, formatDiagnostic, summarize } from "../../core/diagnostic.ts";
 import { bench } from "./bench/cli.ts";
-import { bridge } from "./bridge.ts";
+import { bridge, WORLD_WAIT_MAX_S } from "./bridge.ts";
 import { clientDiagnostics, indexProjectPacks, readSince } from "./contentlog.ts";
 import { findInstall, findInstalls, type ClientInstall } from "./install.ts";
 import { gamePids, readLaunchState } from "./launcher.ts";
@@ -55,7 +55,7 @@ const log: CliCommand = {
 const check: CliCommand = {
   name: "game check",
   summary:
-    "Load a project in the real client, collect errors, optional screenshot: game check <dir> [--display window|headless|desktop] [--mute] [--seconds 10] [--screenshot out.png] [--beta-apis]",
+    "Load a project in the real client, collect errors, optional screenshot: game check <dir> [--display window|headless|desktop] [--mute] [--seconds 10] [--screenshot out.png] [--beta-apis] [--world-wait 180]",
   async run(args) {
     const { values, positionals } = parseArgs({
       args,
@@ -67,6 +67,7 @@ const check: CliCommand = {
         display: { type: "string" },
         mute: { type: "boolean" },
         "beta-apis": { type: "boolean" },
+        "world-wait": { type: "string" },
       },
     });
     const project = positionals[0];
@@ -81,11 +82,17 @@ const check: CliCommand = {
         process.stderr.write(`--display must be window, headless or desktop\n`);
         return ExitCode.usage;
       }
+      const worldWait = values["world-wait"] === undefined ? undefined : Number(values["world-wait"]);
+      if (worldWait !== undefined && !(Number.isInteger(worldWait) && worldWait >= 10 && worldWait <= WORLD_WAIT_MAX_S)) {
+        process.stderr.write(`--world-wait must be whole seconds from 10 to ${WORLD_WAIT_MAX_S}\n`);
+        return ExitCode.usage;
+      }
       const st = await bridge.start({
         project,
         ...(display ? { mode: display } : {}),
         ...(values.mute ? { mute: true } : {}),
         betaApis: !!values["beta-apis"],
+        ...(worldWait !== undefined ? { timeoutMs: worldWait * 1000 } : {}),
       });
       process.stderr.write(`in world ${st.world}; debugger ${st.debugger.attached ? "attached" : "not attached"}, /connect clients ${st.connect.clients}\n`);
       await sleep(Number(values.seconds ?? 10) * 1000);

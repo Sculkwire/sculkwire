@@ -41,7 +41,7 @@ import {
 } from "./contentlog.ts";
 import { applyPackDeploy, listDevPacks, packDisplayName, planPackDeploy, readManifestHeader, type PackToDeploy } from "./deploy.ts";
 import { findInstall, optionsFiles, type ClientInstall } from "./install.ts";
-import { debuggerCommandOk, loadFailureMatcher, type FailureMatcher } from "./commandfail.ts";
+import { debuggerCommandOk, helperTraffic, loadFailureMatcher, type FailureMatcher } from "./commandfail.ts";
 import {
   defaultMode,
   hasInput,
@@ -63,13 +63,24 @@ import {
   type LaunchState,
 } from "./launcher.ts";
 import { bridgeOptions, restoreOptions, setOptions } from "./options.ts";
-import type { SettingValue } from "../engine/engine.ts";
+import { engine, type SettingValue } from "../engine/engine.ts";
 import { restoreGameSettings } from "../engine/settings.ts";
 import { Staleness, streamEntities, streamEntity, TickClock, type StreamedEntities } from "./entitystream.ts";
 import { horizontalDistance, PlayerController, type EntityInfo, type Impact, type Loadout, type PlayerState, type PlayerWorld } from "./player.ts";
 import { inputProvider } from "./inputprovider.ts";
-import { createWorld, type CreatedWorld, type Difficulty, type PackRef } from "./world.ts";
-import { currentScreen, NO_SCREENS, pngSize, readShot, recoverJoin, screensInLog, type RecoveryIO, type RecoveryResult, type ScreenState } from "./screens.ts";
+import { createWorld, writeWorldIcon, type CreatedWorld, type Difficulty, type PackRef } from "./world.ts";
+import {
+  currentScreen,
+  NO_SCREENS,
+  pngSize,
+  readShot,
+  recoverJoin,
+  screensFromUi,
+  screensInLog,
+  type RecoveryIO,
+  type RecoveryResult,
+  type ScreenState,
+} from "./screens.ts";
 
 export const DEFAULT_DEBUGGER_PORT = 19151;
 const READY_MARK = "[sculkwire:ready]";
@@ -81,6 +92,42 @@ const HELPER_FOR_MOTION_MS = 1000;
 const SPAWN_MARK = "[sculkwire:spawned]";
 const REPLY_MARK = "[sculkwire:reply] ";
 const STATE_MARK = "[sculkwire:state] ";
+/** How long `start` waits for the game process and then for the world (each), unless told otherwise. */
+export const WORLD_WAIT_MS = 180_000;
+/** The longest wait `game_launch` takes (seconds). */
+export const WORLD_WAIT_MAX_S = 1800;
+/** How long the bridge keeps waiting in the background when the user starts the game or enters the world by hand. */
+const BACKGROUND_WAIT_MS = 30 * 60_000;
+/** Start of the manual step a launch with `keepOnTimeout` leaves while the world has not loaded. */
+const WORLD_NOT_LOADED = "the world has not loaded yet";
+/** Start of the manual step on an install the user starts (launcher.ts writes it). */
+const START_YOURSELF = "start Minecraft yourself";
+/** Start of the manual steps the bridge leaves when it could not walk into the world by itself. */
+const OPEN_YOURSELF = "open the world yourself";
+/** How long the game sits on the start or Play screen, no world opening, before the bridge walks into the world itself. */
+const AUTO_ENTER_IDLE_MS = 6_000;
+/** At most one walk into the world per this long, and this many in all: an input the user makes is not fought. */
+const AUTO_ENTER_EVERY_MS = 20_000;
+const AUTO_ENTER_ATTEMPTS = 3;
+/** One walk's limit. */
+const AUTO_ENTER_TIMEOUT_MS = 90_000;
+/** On an install the user starts, attach the in-game agent once the start screen shows, or this long after the process came up. */
+const AUTO_ATTACH_AFTER_MS = 30_000;
+
+/** The bridge's own walk into the world while it waits (`#autoEnter`). */
+interface AutoEnter {
+  /** When the game process was found. */
+  since: number;
+  attachTried: boolean;
+  attempts: number;
+  /** When the last walk ended. */
+  lastAt: number;
+  /** The menu screen the game sits on, and since when. */
+  idle?: { since: number; kind: string };
+}
+
+/** A wait in `start` ran out: the game process or the world did not come up in time. */
+export class WaitTimeout extends Error {}
 
 /**
  * A helper pack query that answered `ok: false`. `reason` is the helper's own machine-readable label when it sent one
@@ -183,7 +230,13 @@ export interface BridgeStartOptions {
   fps?: number;
   connectPort?: number;
   debuggerPort?: number;
+  /** How long to wait for the game process, and then for the world to load (ms each; default WORLD_WAIT_MS). */
   timeoutMs?: number;
+  /**
+   * When a wait runs out, keep the game running and return a not-ready status with the step to enter the world, and
+   * keep waiting in the background (as when the user starts the game) instead of stopping the game.
+   */
+  keepOnTimeout?: boolean;
 }
 
 export interface DeployedPack {
@@ -381,7 +434,7 @@ export class ClientBridge {
     const install = await findInstall();
     this.install = install;
     const mode = opts.mode ?? (await defaultMode(install));
-    const timeoutMs = opts.timeoutMs ?? 180_000;
+    const timeoutMs = opts.timeoutMs ?? WORLD_WAIT_MS;
     this.#manual = [];
     this.#packs = [];
     this.#deployDiagnostics = [];
@@ -437,33 +490,58 @@ export class ClientBridge {
       await this.stop();
       throw new Error(`could not start the client: ${errorMessage(e)}`);
     }
-    this.#manual.push(...this.launchState.notes);
+    // With an input provider, the user only starts the game: the bridge attaches it and walks into the world itself.
+    const walks = !install.launch && inputProvider() !== undefined;
+    this.#manual.push(
+      ...this.launchState.notes.map((note) =>
+        walks && note.startsWith(START_YOURSELF)
+          ? `${START_YOURSELF} (set SCULKWIRE_CLIENT_LAUNCH to let sculkwire start it); once the start screen is up sculkwire ` +
+            `attaches its in-game agent and opens "${this.world?.name}" itself, nothing else to do`
+          : note,
+      ),
+    );
     await inputProvider()?.launched({ mode: this.launchState.mode, pid: this.launchState.pid });
+    const since = this.#printSeq;
     if (!install.launch) {
       // The user starts the game: return now so the agent can relay the steps; game_status shows when it is ready.
-      this.#finishStart(30 * 60_000).catch((e: unknown) => this.#manual.push(`client did not reach the world: ${errorMessage(e)}`));
+      this.#finishStart(BACKGROUND_WAIT_MS, since).catch((e: unknown) => this.#manual.push(`client did not reach the world: ${errorMessage(e)}`));
       return this.status();
     }
     try {
-      await this.#finishStart(timeoutMs);
+      await this.#finishStart(timeoutMs, since);
     } catch (e) {
+      if (opts.keepOnTimeout && e instanceof WaitTimeout && this.running) {
+        // Enter the world by hand (a launch command that cannot open it, a slow sign-in): keep the game and keep waiting.
+        this.#manual.push(
+          `${WORLD_NOT_LOADED} (${errorMessage(e)}): the game keeps running. In the game choose Play, then "${this.world.name}" on the Worlds tab ` +
+            `(start Minecraft first if it is not up). game_status turns ready once the world is in; sculkwire keeps waiting up to ${BACKGROUND_WAIT_MS / 60_000} min`,
+        );
+        this.#finishStart(BACKGROUND_WAIT_MS, since).catch((err: unknown) => this.#manual.push(`client did not reach the world: ${errorMessage(err)}`));
+        return this.status();
+      }
       await this.stop();
       throw new Error(`client did not reach the world: ${errorMessage(e)}`);
     }
     return this.status();
   }
 
-  async #finishStart(timeoutMs: number): Promise<void> {
-    const gamePid = await waitForGame(this.install as ClientInstall, timeoutMs);
+  /** Wait for the game process, then for the world (each up to `timeoutMs`), counting helper prints after `since`. */
+  async #finishStart(timeoutMs: number, since: number): Promise<void> {
+    let gamePid: number;
+    try {
+      gamePid = await waitForGame(this.install as ClientInstall, timeoutMs);
+    } catch (e) {
+      throw new WaitTimeout(errorMessage(e));
+    }
     if (this.launchState) this.launchState.gamePid = gamePid;
-    await this.#waitForWorld(timeoutMs);
+    await this.#waitForWorld(timeoutMs, since);
     // Windows mutes the game's audio sessions, which exist once it plays sound: by now it surely opened its device.
     if (this.launchState?.muteRequested) {
       const note = await muteWindowsGame(this.launchState, gamePid);
       if (note) this.#manual.push(note);
     }
     this.#ready = true;
-    this.#manual = this.#manual.filter((m) => !m.startsWith("start Minecraft yourself"));
+    this.#manual = this.#manual.filter((m) => !m.startsWith(START_YOURSELF) && !m.startsWith(WORLD_NOT_LOADED) && !m.startsWith(OPEN_YOURSELF));
     await this.#attachConnect();
   }
 
@@ -473,16 +551,20 @@ export class ClientBridge {
    * connection-error screen ("An error has occurred. You need to authenticate to Microsoft services."), or sign-in
    * finishes while the world loads and the game closes the world and shows the start screen. `returnToWorld` then
    * walks the menus back into the test world. The game is never relaunched for this.
+   *
+   * The bridge also walks in when the game just sits on the start or Play screen (`#autoEnter`): an install the user
+   * starts opens no world by itself, so there the in-game agent is attached once the start screen is up.
    */
-  async #waitForWorld(timeoutMs: number): Promise<void> {
-    const since = this.#printSeq;
+  async #waitForWorld(timeoutMs: number, since = this.#printSeq): Promise<void> {
     const printed = (mark: string) => this.#prints.some((p) => p.seq > since && p.message.includes(mark));
     let deadline = Date.now() + timeoutMs;
+    const auto: AutoEnter = { since: Date.now(), attachTried: false, attempts: 0, lastAt: 0 };
     for (;;) {
       if (printed(READY_MARK) && printed(SPAWN_MARK)) return;
       await this.#readJoinLog();
       if (this.#joinState.failed) {
-        if (!(this.launchState && hasInput(this.launchState))) {
+        if (!this.#canWalkMenus()) await this.#attachForEntry(auto);
+        if (!this.#canWalkMenus()) {
           if (!this.install?.launch) {
             // The user started the game and only they can press the button: say so once and wait for their fix.
             const note =
@@ -506,14 +588,87 @@ export class ClientBridge {
         deadline = Date.now() + timeoutMs;
         continue;
       }
+      if (await this.#autoEnter(auto)) {
+        deadline = Date.now() + timeoutMs;
+        continue;
+      }
       if (Date.now() > deadline) {
         // Scripts loaded but the spawn print never came: commands that do not target the player still work.
         if (printed(READY_MARK)) return;
-        throw new Error(`timed out after ${timeoutMs} ms waiting for the game`);
+        throw new WaitTimeout(`timed out after ${timeoutMs} ms waiting for the game`);
       }
       if (this.launchState && !(await readLaunchState())) throw new Error("the game stopped");
       await sleep(500);
     }
+  }
+
+  /** Whether the menus can be walked: host input reaches the game, or the in-game agent drives its UI. */
+  #canWalkMenus(): boolean {
+    return !!this.launchState && (hasInput(this.launchState) || engine.attached);
+  }
+
+  /**
+   * On an install the user starts, attach the in-game agent (the input provider) once, so the bridge can walk into the
+   * world. Fails open: the user is told to open the world themselves.
+   */
+  async #attachForEntry(auto: AutoEnter): Promise<void> {
+    if (this.install?.launch || auto.attachTried || engine.attached) return;
+    auto.attachTried = true;
+    const provider = inputProvider();
+    const name = this.world?.name ?? "the test world";
+    if (!provider) return;
+    try {
+      await provider.attach();
+    } catch (e) {
+      this.#manual.push(`${OPEN_YOURSELF}: sculkwire could not attach its in-game agent (${errorMessage(e)}). In the game choose Play, then "${name}"`);
+    }
+  }
+
+  /**
+   * Walk into the world when the game sits on the start or Play screen with no world opening for `AUTO_ENTER_IDLE_MS`,
+   * through the in-game agent (attached here on an install the user starts; on one sculkwire starts only when it is
+   * already attached). At most one walk per `AUTO_ENTER_EVERY_MS` and `AUTO_ENTER_ATTEMPTS` in all, so a user who
+   * opens a menu meanwhile is not fought. True when a walk got into the world.
+   */
+  async #autoEnter(auto: AutoEnter): Promise<boolean> {
+    const world = this.world;
+    if (!world || !this.launchState || auto.attempts >= AUTO_ENTER_ATTEMPTS) return false;
+    const menu = (kind: string) => kind === "start" || kind === "play";
+    if (!engine.attached) {
+      if (this.install?.launch || auto.attachTried) return false;
+      if (!menu(currentScreen(this.#screens)) && Date.now() - auto.since < AUTO_ATTACH_AFTER_MS) return false;
+      await this.#attachForEntry(auto);
+      if (!engine.attached) return false;
+    }
+    const screen = await engine.uiScreen();
+    if (screen.ok) this.#screens = screensFromUi(screen.value, this.#screens);
+    const kind = currentScreen(this.#screens);
+    const now = Date.now();
+    if (!menu(kind)) {
+      auto.idle = undefined;
+      return false;
+    }
+    if (!auto.idle || auto.idle.kind !== kind) {
+      auto.idle = { since: now, kind };
+      return false;
+    }
+    if (now - auto.idle.since < AUTO_ENTER_IDLE_MS || now - auto.lastAt < AUTO_ENTER_EVERY_MS) return false;
+    auto.attempts++;
+    let why: string;
+    try {
+      const result = await this.returnToWorld(AUTO_ENTER_TIMEOUT_MS);
+      if (result.recovered) return true;
+      why = result.reason ?? "unknown";
+    } catch (e) {
+      why = errorMessage(e);
+    } finally {
+      auto.lastAt = Date.now();
+      auto.idle = undefined;
+    }
+    if (auto.attempts >= AUTO_ENTER_ATTEMPTS) {
+      this.#manual.push(`${OPEN_YOURSELF}: sculkwire tried ${auto.attempts} times and could not (${why}). In the game choose Play, then "${world.name}"`);
+    }
+    return false;
   }
 
   /** Read what the engine log (`Debug_Log`) said since the last look; keeps the join and screen states current. */
@@ -547,30 +702,49 @@ export class ClientBridge {
 
   /**
    * Walk the game from whatever screen it shows back into the test world (`recoverJoin` in screens.ts): Back to menu
-   * on the error screen, Escape out of the Marketplace or any other screen, Play on the start screen, the test world's
-   * tile on the Play screen, waiting out loading screens, for up to `timeoutMs`.
+   * on the error screen, Escape out of the Marketplace or any other screen, Play on the start screen, the tile showing
+   * the test world's icon on the Play screen, waiting out loading screens, for up to `timeoutMs`. Host input and
+   * screenshots where they reach the game, the in-game agent's UI calls and screenshots otherwise. The world's icon is
+   * written again first: the game replaces it with a picture of the world when it saves and quits it.
    */
   async returnToWorld(timeoutMs = 180_000): Promise<RecoveryResult> {
     const state = this.launchState;
     const world = this.world;
     if (!state || !world) throw new Error("the game is not running");
-    if (!hasInput(state)) throw new Error(this.#joinNoInputMessage());
+    if (!this.#canWalkMenus()) throw new Error(this.#joinNoInputMessage());
     this.#joinRecovery = { attempts: 0, recovered: false, ...(this.#joinState.lines.length ? { log: this.#joinState.lines.join("\n") } : {}) };
+    // The game replaces the icon with its own picture when it saves and quits the world: write it again, but only while
+    // the game does not have the world open (it would write over it on the next Save & Quit anyway).
+    if (!(this.#screens.inWorld && this.#screens.opened === world.levelId)) await writeWorldIcon(world);
     const shots = dataDir("client", "screenshots");
+    const host = hasInput(state);
     const io: RecoveryIO = {
       readLog: () => this.#readJoinLog(),
       key: async (keys) => {
+        if (!host) throw new Error("no host keyboard reaches this game; keys go through the in-game agent");
         await sendInput(state, { action: "key", keys });
       },
-      click: async (x: number, y: number, count = 1) => {
-        const frame = this.#frame ?? { width: state.width ?? 1280, height: state.height ?? 720 };
-        for (let i = 0; i < count; i++) {
-          await sendInput(state, { action: "click", x: Math.round(frame.width * x), y: Math.round(frame.height * y) });
-          if (i + 1 < count) await sleep(120);
-        }
-      },
+      ...(host
+        ? {
+            click: async (x: number, y: number, count = 1) => {
+              const frame = this.#frame ?? { width: state.width ?? 1280, height: state.height ?? 720 };
+              for (let i = 0; i < count; i++) {
+                await sendInput(state, { action: "click", x: Math.round(frame.width * x), y: Math.round(frame.height * y) });
+                if (i + 1 < count) await sleep(120);
+              }
+            },
+          }
+        : {}),
       screenshot: async (label) => {
-        const shot = await readShot((await screenshot(state, `${shots}/${label}-${state.startedAt}-${Date.now()}.png`)).path);
+        const path = `${shots}/${label}-${state.startedAt}-${Date.now()}.png`;
+        let file: string;
+        if (host) file = (await screenshot(state, path)).path;
+        else {
+          const taken = await engine.screenshot(path);
+          if (!taken.ok) throw new Error(taken.message);
+          file = taken.value.path;
+        }
+        const shot = await readShot(file);
         this.#frame = pngSize(shot.png) ?? this.#frame;
         return shot;
       },
@@ -595,6 +769,24 @@ export class ClientBridge {
     };
     if (result.reason) this.#joinRecovery.log = `${this.#joinRecovery.log ? `${this.#joinRecovery.log}\n` : ""}${result.reason}`;
     return result;
+  }
+
+  /**
+   * Walk into the test world from the menus (`returnToWorld`), then wait until its helper pack printed ready again:
+   * leaving a world ends its scripts and the script debugger session, and the game dials the debugger again when the
+   * world loads. `helperMs` is how long that took, `helperLost` why it did not happen.
+   */
+  async reenterWorld(timeoutMs = 90_000, helperWaitMs = 60_000): Promise<{ recovery: RecoveryResult; helperMs?: number; helperLost?: string }> {
+    const since = this.#printSeq;
+    const recovery = await this.returnToWorld(timeoutMs);
+    if (!recovery.recovered) return { recovery };
+    const started = Date.now();
+    const back = await this.waitForPrint((p) => p.message.includes(READY_MARK), helperWaitMs, since).then(
+      () => true,
+      () => false,
+    );
+    if (!back) return { recovery, helperLost: `the helper pack did not print ready within ${helperWaitMs / 1000} s of entering the world` };
+    return { recovery, helperMs: Date.now() - started };
   }
 
   /** What to tell the agent when the menus did not lead back into the world. */
@@ -754,19 +946,20 @@ export class ClientBridge {
     const since = this.#printSeq;
     session.command(command);
     const echo = await this.waitForPrint((p) => p.message.includes(`Executing command [${command}]`), 10_000, since);
-    // Output follows the echo; stop after a quiet gap.
+    // Output follows the echo; stop after a quiet gap. Only the command's own lines extend it: the helper's traffic
+    // (a `play` run sends queries four times a second, each with an echo, a confirmation and a reply) never lets it go quiet.
     let last = echo.seq;
     let quietUntil = Date.now() + 600;
     const deadline = Date.now() + 5_000;
     while (Date.now() < quietUntil && Date.now() < deadline) {
       await sleep(100);
       if (this.#printSeq > last) {
+        const seen = last;
         last = this.#printSeq;
-        quietUntil = Date.now() + 400;
+        if (this.#prints.some((p) => p.seq > seen && !helperTraffic(p.message))) quietUntil = Date.now() + 400;
       }
     }
-    // `[sculkwire:…]` lines are the helper pack's own messages, not command output.
-    const output = this.#prints.filter((p) => p.seq > echo.seq && p.seq <= last && !p.message.startsWith("[sculkwire:")).map((p) => p.message.trim());
+    const output = this.#prints.filter((p) => p.seq > echo.seq && p.seq <= last && !helperTraffic(p.message)).map((p) => p.message.trim());
     return { command, via: "debugger", ok: debuggerCommandOk(output, await this.#failureMatcher()), output };
   }
 

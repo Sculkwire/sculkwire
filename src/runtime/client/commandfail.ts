@@ -70,6 +70,15 @@ export function debuggerCommandOk(output: readonly string[], failed: FailureMatc
 }
 
 /**
+ * A debugger print that belongs to the helper pack's own traffic, not to a command's output: its `[sculkwire:…]`
+ * lines (state stream, query replies) and the game's echo and confirmation of the `scriptevent sculkwire:query`
+ * command every helper query is sent with.
+ */
+export function helperTraffic(message: string): boolean {
+  return message.startsWith("[sculkwire:") || message.includes("sculkwire:query");
+}
+
+/**
  * The failure matcher for an installed game: `en_US` plus the language in `game_language` of its options.txt, from
  * `<gameDir>/data/resource_packs/vanilla/texts/`. Missing files are skipped.
  */

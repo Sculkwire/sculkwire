@@ -18,6 +18,7 @@ import { inflateSync } from "node:zlib";
 import { engine, type EngineResult } from "../engine/engine.ts";
 import { isStoreScreen, type UiControl, type UiScreen } from "../engine/ui.ts";
 import { CLIENT_JOINED, joinStateInLog, NO_JOIN_YET, type JoinState } from "./contentlog.ts";
+import { findIconTile, iconCells } from "./icon.ts";
 
 export type ScreenKind =
   /** The title screen: Play, Settings, Marketplace. */
@@ -153,9 +154,29 @@ export function currentScreen(state: ScreenState): ScreenKind | "unknown" {
 }
 
 /**
+ * A screen's kind from the OreUI route `ui.screen` reports for an OreUI page (every one is named
+ * `ui://./hbui/index.html`): a store route, the Play screen (`/play`, `/play/all`, `/play/worlds`), or undefined.
+ */
+export function kindOfRoute(route: string): ScreenKind | undefined {
+  if (isStoreScreen(route)) return "store";
+  if (/^\/play(?:[/?]|$)/.test(route)) return "play";
+  return undefined;
+}
+
+/**
+ * The Play screen's tab from its OreUI route (`/play/worlds`, `/play/all`, `/play?tab=realms`), lower case; `all` for
+ * a bare `/play`; undefined when no route is known.
+ */
+export function playTab(route: string | null | undefined): string | undefined {
+  if (!route) return undefined;
+  const [path = "", query = ""] = route.split("?");
+  return (new URLSearchParams(query).get("tab") ?? path.split("/").filter(Boolean)[1] ?? "all").toLowerCase();
+}
+
+/**
  * The stack the agent reports (`ui.screen`), which needs no inference from the log. `opened` stays what the log said,
  * because only the log says which world the game opened; a world screen anywhere in the stack means the client is in
- * a world, as it is under the pause menu.
+ * a world, as it is under the pause menu. On an OreUI page the route names the screen.
  */
 export function screensFromUi(screen: UiScreen, state: ScreenState): ScreenState {
   // The always-present overlays (the debug screen is created on every launch) are never what the player looks at.
@@ -163,6 +184,7 @@ export function screensFromUi(screen: UiScreen, state: ScreenState): ScreenState
   const stack: Screen[] = names.map((name) => ({ kind: kindOfScreenName(name), name }));
   if (!stack.length) stack.push({ kind: kindOfScreenName(screen.name), name: screen.name });
   const top = stack.at(-1) as Screen;
+  if (screen.route && top.name === screen.name) top.kind = kindOfRoute(screen.route) ?? top.kind;
   const before = state.stack.at(-1);
   return {
     stack,
@@ -183,9 +205,12 @@ export const LAYOUT = {
   play: { x: 0.5, y: 0.499 },
   /**
    * Play screen, Worlds tab: 4 columns by 2 visible rows of tiles. Featured servers come first as "LAN world" tiles,
-   * then the local worlds, most recently played first. `slot` is the tile's place in reading order.
+   * then the local worlds, most recently played first. `slot` is the tile's place in reading order. The recovery
+   * opens a tile only by its thumbnail (icon.ts), never by its slot.
    */
   worldTile: (slot: number) => ({ x: 0.137 + (slot % 4) * 0.2375, y: slot < 4 ? 0.374 : 0.74 }),
+  /** Play screen: where the world list is scrolled, the middle of the tile grid (below the tab strip). */
+  worldList: { x: 0.5, y: 0.6 },
   /** Pause screen: "Save & Quit". */
   saveAndQuit: { x: 0.293, y: 0.662 },
 } as const;
@@ -291,10 +316,12 @@ export interface UiRecovery {
   key(key: string): Promise<void>;
   /** `ui.click`: `count` clicks at client pixels, the same frame the screenshots show. */
   click(x: number, y: number, count?: number): Promise<void>;
+  /** `ui.scroll`: `delta` wheel notches at client pixels, positive up. Without it the world list is never scrolled. */
+  scroll?(x: number, y: number, delta: number): Promise<void>;
 }
 
 /** The attached agent as a `UiRecovery`, or undefined when no agent is attached (then the log and the keys are used). */
-function engineUi(sleep: (ms: number) => Promise<void>): UiRecovery | undefined {
+export function engineUi(sleep: (ms: number) => Promise<void>): UiRecovery | undefined {
   if (!engine.attached) return undefined;
   const value = <T>(result: EngineResult<T>): T => {
     if (!result.ok) throw new Error(`${result.reason}: ${result.message}`);
@@ -311,6 +338,7 @@ function engineUi(sleep: (ms: number) => Promise<void>): UiRecovery | undefined 
         if (i + 1 < count) await sleep(120);
       }
     },
+    scroll: async (x, y, delta) => void value(await engine.uiScroll(x, y, delta)),
   };
 }
 
@@ -333,7 +361,7 @@ export interface RecoveryIO {
 }
 
 export interface RecoveryOptions {
-  /** Level id (folder under minecraftWorlds) of the test world. */
+  /** Level id (folder under minecraftWorlds) of the test world; its icon (icon.ts) identifies its tile. */
   levelId: string;
   /** Give up after this long (default 3 minutes). */
   timeoutMs?: number;
@@ -350,6 +378,16 @@ export interface RecoveryResult {
   screenshot?: string;
   screens: ScreenState;
   join: JoinState;
+  /** Inputs sent: keys, presses, clicks and scrolls. */
+  presses: number;
+  /** Times the world list was scrolled looking for the tile. */
+  scrolls: number;
+  /** A tile was opened because its thumbnail showed the world's icon. */
+  foundByIcon: boolean;
+  /** Level ids the game opened during the recovery, in order. */
+  opened: string[];
+  /** The screens seen during the recovery, in order: the game's name, and the OreUI route when the agent read one. */
+  seen: string[];
   /** Why it stopped without the world. */
   reason?: string;
 }
@@ -372,8 +410,23 @@ const SETTLE_MS: Record<ScreenKind, number> = {
 const PATIENCE_MS = 4000;
 /** A world tile press starts a world-loading screen within this time. */
 const OPEN_PATIENCE_MS = 8000;
+/** Looks at a Play screen without the tile before scrolling: the thumbnails load after the list. */
+const THUMBNAIL_LOOKS = 2;
+/** Scrolls of one Play screen's list before giving up on it, the wheel notches of each, and the wait after one. */
+const MAX_SCROLLS = 3;
+const SCROLL_NOTCHES = 5;
+const LOOK_PATIENCE_MS = 1500;
+/**
+ * A tile whose visible cells match but whose others are cut off by the list's edge is scrolled into view, at most this
+ * many times by these notches; then it is opened when at least `PARTIAL_CELLS` of its cells were seen and matched.
+ */
+const MAX_NUDGES = 2;
+const NUDGE_NOTCHES = 2;
+const PARTIAL_CELLS = 4;
+/** Worlds other than the test world that may open (through a tile that showed its icon) before the recovery stops. */
+const MAX_WRONG_WORLDS = 2;
 
-type Press = { label: string; run: () => Promise<void>; patienceMs?: number };
+type Press = { label: string; run: () => Promise<void>; patienceMs?: number; /** False for a wait that sends nothing. */ input?: boolean };
 
 /** How the recovery presses and clicks: the agent's own UI when it answers, the keyboard and mouse route otherwise. */
 interface Touch {
@@ -383,23 +436,31 @@ interface Touch {
   canPress(): boolean;
   key(keys: string, labels?: readonly string[]): Press;
   click(label: string, at: { x: number; y: number }, count?: number, patienceMs?: number): Press;
+  /** The control named by one of `labels` through the agent, else a click at its known place. */
+  named(label: string, labels: readonly string[], at: { x: number; y: number }, patienceMs?: number): Press;
 }
 
 /**
- * Press a control of the current screen that answers to one of these labels, by the name the game gives it or the text
- * the player reads. False when the screen has none, so the caller sends the key instead.
+ * The control of the current screen that answers to one of these labels, by the name the game gives it or the text the
+ * player reads; with `exact` only a whole match counts. Undefined when the screen has none.
  */
-async function pressControl(ui: UiRecovery, labels: readonly string[]): Promise<boolean> {
+async function findControl(ui: UiRecovery, labels: readonly string[], exact = false): Promise<string | undefined> {
   const controls = await ui.controls().catch(() => [] as UiControl[]);
   for (const label of labels) {
     const want = label.toLowerCase();
-    const exact = controls.find((c) => c.enabled && (c.name.toLowerCase() === want || c.text?.toLowerCase() === want));
-    const control = exact ?? controls.find((c) => c.enabled && (c.name.toLowerCase().includes(want) || c.text?.toLowerCase().includes(want)));
-    if (!control) continue;
-    await ui.press(control.name);
-    return true;
+    const whole = controls.find((c) => c.enabled && (c.name.toLowerCase() === want || c.text?.toLowerCase() === want));
+    const control = whole ?? (exact ? undefined : controls.find((c) => c.enabled && (c.name.toLowerCase().includes(want) || c.text?.toLowerCase().includes(want))));
+    if (control) return control.name;
   }
-  return false;
+  return undefined;
+}
+
+/** Press the control `findControl` finds. False when the screen has none, so the caller sends the key instead. */
+async function pressControl(ui: UiRecovery, labels: readonly string[]): Promise<boolean> {
+  const name = await findControl(ui, labels);
+  if (name === undefined) return false;
+  await ui.press(name);
+  return true;
 }
 
 /**
@@ -409,9 +470,22 @@ async function pressControl(ui: UiRecovery, labels: readonly string[]): Promise<
  * the background mouse are what they always were.
  */
 function touchRoute(io: RecoveryIO, route: () => UiRecovery | undefined, frame: () => { width: number; height: number } | undefined): Touch {
-  const clickable = (): boolean => route() !== undefined || io.click !== undefined;
+  const click = (label: string, at: { x: number; y: number }, count = 1, patienceMs?: number): Press => ({
+    label: `${label} (click ${at.x.toFixed(3)},${at.y.toFixed(3)})`,
+    run: async () => {
+      const ui = route();
+      const size = frame();
+      if (ui && size) {
+        await ui.click(Math.round(size.width * at.x), Math.round(size.height * at.y), count);
+        return;
+      }
+      if (!io.click) throw new Error("no background mouse input and no agent UI to click through on this platform");
+      await io.click(at.x, at.y, count);
+    },
+    ...(patienceMs ? { patienceMs } : {}),
+  });
   return {
-    canClick: clickable,
+    canClick: () => route() !== undefined || io.click !== undefined,
     canPress: () => route() !== undefined,
     key: (keys, labels = []) => ({
       label: route() !== undefined && labels.length ? `${keys} (or press ${labels[0] ?? "the button"})` : keys,
@@ -425,30 +499,40 @@ function touchRoute(io: RecoveryIO, route: () => UiRecovery | undefined, frame: 
         await ui.key(keys);
       },
     }),
-    click: (label, at, count = 1, patienceMs) => ({
-      label: `${label} (click ${at.x.toFixed(3)},${at.y.toFixed(3)})`,
-      run: async () => {
-        const ui = route();
-        const size = frame();
-        if (ui && size) {
-          await ui.click(Math.round(size.width * at.x), Math.round(size.height * at.y), count);
-          return;
-        }
-        if (!io.click) throw new Error("no background mouse input and no agent UI to click through on this platform");
-        await io.click(at.x, at.y, count);
-      },
-      ...(patienceMs ? { patienceMs } : {}),
-    }),
+    click,
+    named: (label, labels, at, patienceMs) => {
+      const fallback = click(label, at, 1, patienceMs);
+      return {
+        ...fallback,
+        label: route() !== undefined ? `press ${label}` : fallback.label,
+        run: async () => {
+          const ui = route();
+          if (!ui) {
+            await fallback.run();
+            return;
+          }
+          // Through the agent only the named control: a pixel next to it may be a store entry ("Browse Add-ons!" sits
+          // right above Save & Quit on the pause screen).
+          if (!(await pressControl(ui, labels))) throw new Error(`the screen lists no ${label} control; not clicking near it`);
+        },
+      };
+    },
   };
 }
 
 /**
  * Drive the game from wherever it is back into the test world, never relaunching it: the connection-error screen
- * gets "Back to menu", the start screen "Play", the Play screen a double-click on the test world (the most recently
- * played, so the first tile), any other screen Escape until the start screen comes back; loading screens are waited
+ * gets "Back to menu", the start screen "Play", the Play screen a double-click on the tile whose thumbnail shows the
+ * test world's icon (icon.ts), any other screen Escape until the start screen comes back; loading screens are waited
  * out. With the in-game agent attached the screen comes from `ui.screen` and every press goes through the agent, so
  * this works in the background; otherwise the engine log tells which screen is up and the keys are pressed on the
  * host. Either way the log says whether each press moved the game on.
+ *
+ * On the Play screen nothing is clicked but that one tile: never a tile by its place in the list, never the tab strip.
+ * When the agent reports the Play screen's route, the Worlds tab is pressed by its exact name first, and a tab that
+ * lists no local worlds (Realms, Servers) is left with Escape. A list without the tile is looked at again, reopened
+ * once (it may hold thumbnails read before the icon was written again) and scrolled (through the agent); after that
+ * the recovery stops and says the tile was not found. Through the agent, Save & Quit is pressed only by its name.
  */
 export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promise<RecoveryResult> {
   const deadline = io.now() + (opts.timeoutMs ?? 180_000);
@@ -467,9 +551,23 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
   let pressed: { changes: number; at: number; patienceMs: number } | undefined;
   /** Presses per screen kind over the whole recovery, to cycle through the ways of pressing. */
   const tries: Partial<Record<ScreenKind, number>> = {};
-  /** World tiles that opened the wrong world. */
-  let tile = 0;
+  /** The OreUI route of the screen, when the agent read one this round. */
+  let route: string | null | undefined;
+  /** On the way out of a world that is not the test world, and how many of those opened. */
   let wrongWorld = false;
+  let wrongWorlds = 0;
+  const cells = iconCells(opts.levelId);
+  /** The Play screen that is up: looks without the tile, scrolls, presses of the Worlds tab. A new one starts over. */
+  let list = { looks: 0, scrolls: 0, worldsTab: 0, nudges: 0 };
+  /** The Play screen was left once to reload its thumbnails. */
+  let reopened = false;
+  let presses = 0;
+  let scrolls = 0;
+  let looks = 0;
+  let foundByIcon = false;
+  const opened: string[] = [];
+  let lastOpened = screens.opened;
+  const seen: string[] = [];
   const uiRoute = (): UiRecovery | undefined => (uiDown ? undefined : (io.ui ?? engineUi(io.sleep)));
   const touches = touchRoute(io, uiRoute, () => frame);
   const shoot = async (label: string) => {
@@ -483,6 +581,11 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
     ...(evidence ? { screenshot: evidence } : {}),
     screens,
     join,
+    presses,
+    scrolls,
+    foundByIcon,
+    opened,
+    seen,
     ...(reason ? { reason } : {}),
   });
 
@@ -494,24 +597,36 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
       join = joinStateInLog(text, join);
     }
     const ui = uiRoute();
+    route = undefined;
     if (ui) {
       const screen = await ui.screen().catch(() => undefined);
       if (screen) {
         screens = screensFromUi(screen, screens);
+        route = screen.route;
         uiFailures = 0;
       } else if (++uiFailures >= 2) {
         uiDown = true;
         steps.push("the agent's UI stopped answering: back to the log and the keyboard route");
       }
     }
+    const top = screens.stack.at(-1);
+    const shown = top ? `${top.name}${route ? ` ${route}` : ""}` : undefined;
+    if (shown && seen.at(-1) !== shown) seen.push(shown);
+    if (screens.opened !== undefined && screens.opened !== lastOpened) opened.push(screens.opened);
+    lastOpened = screens.opened;
     if (screens.inWorld && screens.opened === opts.levelId) return done(true);
     if (screens.inWorld && screens.opened !== undefined && screens.opened !== opts.levelId && !wrongWorld) {
-      // The tile was another world: leave it through the pause menu and try the next tile.
+      // A safety net: the tile showed the icon but another world opened. Leave it through the pause menu.
       wrongWorld = true;
-      tile++;
+      wrongWorlds++;
       steps.push(`opened ${screens.opened} instead of ${opts.levelId}: leaving it`);
     }
-    if (!screens.inWorld && wrongWorld && currentScreen(screens) !== "pause" && currentScreen(screens) !== "world") wrongWorld = false;
+    const showing = currentScreen(screens);
+    if (!screens.inWorld && wrongWorld && showing !== "pause" && showing !== "world") {
+      wrongWorld = false;
+      if (wrongWorlds >= MAX_WRONG_WORLDS) return done(false, `${wrongWorlds} times a world other than ${opts.levelId} opened: stopped instead of opening more`);
+    }
+    if (showing !== "play") list = { looks: 0, scrolls: 0, worldsTab: 0, nudges: 0 };
     if (io.now() > deadline) return done(false, `the world did not come back within ${Math.round((opts.timeoutMs ?? 180_000) / 1000)} s`);
     if (evidence === undefined) evidence = (await shoot("join-error"))?.path ?? "";
 
@@ -534,20 +649,74 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
     let known: ScreenKind = kind === "unknown" ? "other" : kind;
     // An unnamed Ore UI screen may be the Play screen before its log lines come (up to ~9 s): its tiles tell.
     const unnamedOre = known === "other" && screens.stack.at(-1)?.name === "ore";
-    let localTiles: number[] = [];
+    let press: Press | undefined;
     if ((known === "play" || unnamedOre) && touches.canClick()) {
-      const shot = await shoot("play");
-      const image = shot && decodePng(shot.png);
-      localTiles = image ? localWorldTiles(image) : [];
-      if (unnamedOre && localTiles.length) known = "play";
-      else if (known === "play" && !localTiles.length) steps.push("play: no local world tile found in the screenshot");
+      const tab = known === "play" ? playTab(route) : undefined;
+      if (tab !== undefined && tab !== "worlds" && ui && list.worldsTab < 2) {
+        list.worldsTab++;
+        // The Worlds tab by its exact name through the game's handler: never a click in the tab strip.
+        const worlds = await findControl(ui, ["Worlds"], true);
+        if (worlds !== undefined) press = { label: `press the Worlds tab (${worlds})`, run: () => ui.press(worlds) };
+      }
+      // A tab that lists no local worlds (Realms, Servers, ...): leave it, never click on it.
+      if (!press && tab !== undefined && tab !== "worlds" && tab !== "all") press = touches.key("Escape");
+      if (!press) {
+        const shot = await shoot("play");
+        const image = shot && decodePng(shot.png);
+        const tile = image ? findIconTile(image, cells) : undefined;
+        looks++;
+        if (unnamedOre && (tile || (image && localWorldTiles(image).length))) known = "play";
+        if (known === "play") {
+          const scroll = ui?.scroll?.bind(ui);
+          const wheel = (label: string, notches: number): Press => ({
+            label,
+            run: async () => {
+              const size = frame ?? { width: 1280, height: 720 };
+              await scroll?.(Math.round(size.width * LAYOUT.worldList.x), Math.round(size.height * LAYOUT.worldList.y), notches);
+            },
+            patienceMs: LOOK_PATIENCE_MS,
+          });
+          if (tile && image && !tile.whole && scroll && list.nudges < MAX_NUDGES) {
+            // Part of the tile is under the list's edge: bring it into view, never scroll it away.
+            list.nudges++;
+            scrolls++;
+            press = wheel(`scroll the tile of ${opts.levelId} into view (its ${tile.hidden} is hidden)`, tile.hidden === "top" ? NUDGE_NOTCHES : -NUDGE_NOTCHES);
+          } else if (tile && image && (tile.whole || tile.visibleCells >= PARTIAL_CELLS)) {
+            foundByIcon = true;
+            const at = { x: tile.at.x / image.width, y: tile.at.y / image.height };
+            const what = tile.whole ? "the tile showing the icon" : `the visible part of the tile showing the icon (${tile.visibleCells} of 8 cells)`;
+            press = touches.click(`${what} of ${opts.levelId}`, at, 2, OPEN_PATIENCE_MS);
+          } else if (list.looks < THUMBNAIL_LOOKS) {
+            list.looks++;
+            press = { label: "no tile shows the world's icon yet: looking again", run: async () => undefined, patienceMs: LOOK_PATIENCE_MS, input: false };
+          } else if (!reopened) {
+            // The list may show thumbnails it read before sculkwire wrote the icon again: reopen it once first.
+            reopened = true;
+            press = { ...touches.key("Escape"), label: "Escape (leave the Play screen once, so it reloads the thumbnails)" };
+          } else if (scroll && list.scrolls < MAX_SCROLLS) {
+            list.scrolls++;
+            scrolls++;
+            press = wheel(`scroll the world list down (${list.scrolls} of ${MAX_SCROLLS})`, -SCROLL_NOTCHES);
+          } else {
+            return done(
+              false,
+              `the tile of ${opts.levelId} was not found on the Play screen: no thumbnail showed its sculkwire icon in ${looks} looks ` +
+                `(the list reopened once, ${scrolls} scrolls). The game may not show the world's world_icon.jpeg as its thumbnail, ` +
+                "or may still show the picture it took when the world was last left; nothing was opened by guess",
+            );
+          }
+        }
+      }
     }
-    const n = tries[known] ?? 0;
-    tries[known] = n + 1;
-    const press = fixedPress(touches, known, n, tile, wrongWorld, localTiles);
+    if (!press) {
+      const n = tries[known] ?? 0;
+      tries[known] = n + 1;
+      press = fixedPress(touches, known, n, wrongWorld);
+    }
     steps.push(`${known}: ${press.label}`);
     try {
       await press.run();
+      if (press.input !== false) presses++;
     } catch (e) {
       steps.push(`${known}: ${press.label} failed: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -558,9 +727,10 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
 /**
  * The fixed ways to get past each screen, tried in turn (`n` counts the presses on that kind of screen so far).
  * A named control first where the button is what matters (through the agent's UI it is the button itself, not a
- * coordinate), the key next, the button's known place last.
+ * coordinate), the key next, the button's known place last. The Play screen's tile is not here: `recoverJoin` opens
+ * it only by its icon.
  */
-function fixedPress(t: Touch, kind: ScreenKind, n: number, tile: number, wrongWorld: boolean, localTiles: number[]): Press {
+function fixedPress(t: Touch, kind: ScreenKind, n: number, wrongWorld: boolean): Press {
   switch (kind) {
     case "disconnect": {
       // "Back to menu" has the focus when the screen opens: Return presses it.
@@ -576,18 +746,11 @@ function fixedPress(t: Touch, kind: ScreenKind, n: number, tile: number, wrongWo
         : [t.click("Play", LAYOUT.play), t.key("Return"), t.key("Escape")];
       return ways[n % ways.length] as Press;
     }
-    case "play": {
-      // Only a tile the screenshot shows as a local world is opened; without one, leave and come back to the list.
-      const slot = localTiles[tile];
-      if (!t.canClick() || slot === undefined) return t.key("Escape");
-      return t.click(`world tile ${slot + 1} (local world ${tile + 1})`, LAYOUT.worldTile(slot), 2, OPEN_PATIENCE_MS);
-    }
     case "pause":
-      return wrongWorld && t.canClick() ? t.click("Save & Quit", LAYOUT.saveAndQuit, 1, OPEN_PATIENCE_MS) : t.key("Escape");
-    case "world":
-      // Only reached in a wrong world: Escape opens the pause menu.
-      return t.key("Escape");
+      return wrongWorld && t.canClick() ? t.named("Save & Quit", ["Save & Quit"], LAYOUT.saveAndQuit, OPEN_PATIENCE_MS) : t.key("Escape");
     default:
+      // The Play screen without a way to click, a wrong world (Escape opens its pause menu), a store or any other
+      // screen: Escape.
       return t.key("Escape");
   }
 }

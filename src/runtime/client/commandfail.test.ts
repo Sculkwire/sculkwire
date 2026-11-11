@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { debuggerCommandOk, failureMatcher, isFailureKey, loadFailureMatcher, parseLang } from "./commandfail.ts";
+import { debuggerCommandOk, failureMatcher, helperTraffic, isFailureKey, loadFailureMatcher, parseLang } from "./commandfail.ts";
 
 /** A made-up slice of a `.lang` file in the game's format. */
 const LANG = [
@@ -29,6 +29,15 @@ describe("debugger command failures", () => {
     expect(isFailureKey("commands.blockdata.placeFailed")).toBe(true);
     expect(isFailureKey("commands.fill.success")).toBe(false);
     expect(isFailureKey("item.stone.name")).toBe(false);
+  });
+
+  it("tells the helper pack's query traffic from command output", () => {
+    // The three lines every helper query prints, as the debugger delivered them on 1.26.63.
+    expect(helperTraffic('Executing command [scriptevent sculkwire:query {"kind":"deaths","since":12,"id":7}]')).toBe(true);
+    expect(helperTraffic("Script event sculkwire:query has been sent")).toBe(true);
+    expect(helperTraffic('[sculkwire:reply] {"id":7,"ok":true,"result":{"tick":40,"deaths":[]}}')).toBe(true);
+    expect(helperTraffic("Executing command [testfor @a]")).toBe(false);
+    expect(helperTraffic("Found Steve")).toBe(false);
   });
 
   it("parses lang lines and drops trailing comments", () => {
