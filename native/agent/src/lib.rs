@@ -19,6 +19,7 @@ extern crate alloc;
 
 mod anchors;
 mod capture;
+mod click;
 mod command;
 mod ecs;
 mod hooks;
@@ -30,6 +31,7 @@ mod methods;
 mod options;
 mod pe;
 mod recover;
+mod registries;
 mod route;
 mod screens;
 mod server;
@@ -237,11 +239,13 @@ impl Engine for Retail {
         server::run(server::Request::Command { line: String::from(line), quiet: true }, QUIET_TIMEOUT_MS).map(|_| ())
     }
 
-    /// The lock's camera gate and key clearing run from the tick (`live::observe`). Per frame, after
+    /// The lock's camera gate and key clearing run from the tick (`live::observe`). Per drain, after
     /// the queue, no handler is running on this thread, so an item-registry scope still open here was
-    /// left by a handler the game unwound past, and is closed.
+    /// left by a handler the game unwound past, and is closed; and a click waiting for the game's
+    /// crosshair pick gets this drain (`click`).
     fn lock_frame(&'static self, core: &'static Core) {
         input::close_abandoned_scopes(usize::MAX);
+        input::frame();
         live::lock_frame(core)
     }
 

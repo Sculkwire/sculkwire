@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 
 use crate::ecs;
 use crate::pe;
+use crate::registries;
 
 /// A player reading older than this means the player is gone (menus, world change): not in a world.
 const FRESH_MS: u64 = 2_000;
@@ -130,49 +131,71 @@ const LOOK_DONE: u8 = 2;
 /// This is the accessor the game itself passes to `getStorage(accessor, hash)` — the object inside the
 /// `EntityContext` at `+0x30` (`area-player` §1.1). Capturing it from the getter is what makes the
 /// client tick independent of any one system: every system that reads a component hands it over, many
-/// times per tick, on the thread that owns that registry.
-const ACCESSOR_SLOTS: usize = 4;
-static ACCESSORS: [AtomicUsize; ACCESSOR_SLOTS] =
-    [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)];
-static ACCESSOR_THREADS: [AtomicU32; ACCESSOR_SLOTS] =
-    [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)];
+/// times per tick, on the thread that owns that registry. Each slot also keeps when it was captured and
+/// the client frame the game last used it in, so a world change cannot leave the tick reading a
+/// registry the game dropped ([`crate::registries`]).
+const ACCESSOR_SLOTS: usize = registries::SLOTS;
+static ACCESSORS: [AtomicUsize; ACCESSOR_SLOTS] = [const { AtomicUsize::new(0) }; ACCESSOR_SLOTS];
+static ACCESSOR_THREADS: [AtomicU32; ACCESSOR_SLOTS] = [const { AtomicU32::new(0) }; ACCESSOR_SLOTS];
+/// The capture sequence number of each slot (newer is larger).
+static ACCESSOR_CAPTURED: [AtomicU64; ACCESSOR_SLOTS] = [const { AtomicU64::new(0) }; ACCESSOR_SLOTS];
+/// The client frame ([`CLIENT_FRAME`]) in which the game last passed each slot's accessor.
+static ACCESSOR_SEEN: [AtomicU64; ACCESSOR_SLOTS] = [const { AtomicU64::new(0) }; ACCESSOR_SLOTS];
 static ACCESSOR_NEXT: AtomicUsize = AtomicUsize::new(0);
+/// Client ticks so far: the clock [`ACCESSOR_SEEN`] is kept in.
+static CLIENT_FRAME: AtomicU64 = AtomicU64::new(0);
 /// The accessor a tick read this client's local player through.
 static CLIENT_ACCESSOR: AtomicUsize = AtomicUsize::new(0);
 
 /// Records the registry accessor one `getStorage` call was made with.
 ///
 /// Two reads and an atomic compare: this runs inside the game's own component lookup, so it must cost
-/// nothing it does not need. An accessor already known is dropped before anything but the compare, and
-/// a value that could not be an object (below the lowest committed address, or unreadable) is never
-/// stored.
+/// nothing it does not need. An accessor already known only has its frame refreshed (a load and, once
+/// per frame, a store), and a value that could not be an object (below the lowest committed address,
+/// or unreadable) is never stored.
 pub fn note_accessor(accessor: usize) {
     if accessor < 0x1_0000 {
         return;
     }
-    for slot in &ACCESSORS {
+    let frame = CLIENT_FRAME.load(Ordering::Relaxed);
+    for (index, slot) in ACCESSORS.iter().enumerate() {
         if slot.load(Ordering::Acquire) == accessor {
+            if ACCESSOR_SEEN[index].load(Ordering::Relaxed) != frame {
+                ACCESSOR_SEEN[index].store(frame, Ordering::Relaxed);
+            }
             return;
         }
     }
     if !pe::readable(accessor, 8) {
         return;
     }
-    let index = ACCESSOR_NEXT.fetch_add(1, Ordering::AcqRel) % ACCESSOR_SLOTS;
+    let sequence = ACCESSOR_NEXT.fetch_add(1, Ordering::AcqRel);
+    let index = sequence % ACCESSOR_SLOTS;
+    // Empty the slot first, so a reader never pairs the new accessor with the old slot's facts.
+    ACCESSORS[index].store(0, Ordering::Release);
     ACCESSOR_THREADS[index].store(agent_core::win::current_thread_id(), Ordering::Release);
+    ACCESSOR_CAPTURED[index].store(sequence as u64 + 1, Ordering::Release);
+    ACCESSOR_SEEN[index].store(frame, Ordering::Release);
     ACCESSORS[index].store(accessor, Ordering::Release);
 }
 
-/// An accessor captured on this thread: the registry the caller's own side of the world uses.
-fn accessor_here() -> Option<usize> {
-    let thread = agent_core::win::current_thread_id();
-    for (index, slot) in ACCESSORS.iter().enumerate() {
-        let accessor = slot.load(Ordering::Acquire);
-        if accessor != 0 && ACCESSOR_THREADS[index].load(Ordering::Acquire) == thread {
-            return Some(accessor);
+/// The slots as the hook left them; a slot rewritten while it was read comes back empty.
+fn captures() -> [registries::Capture; ACCESSOR_SLOTS] {
+    let mut out = [registries::Capture::default(); ACCESSOR_SLOTS];
+    for (index, capture) in out.iter_mut().enumerate() {
+        let accessor = ACCESSORS[index].load(Ordering::Acquire);
+        if accessor == 0 {
+            continue;
         }
+        let thread = ACCESSOR_THREADS[index].load(Ordering::Acquire);
+        let captured = ACCESSOR_CAPTURED[index].load(Ordering::Acquire);
+        let seen = ACCESSOR_SEEN[index].load(Ordering::Relaxed);
+        if ACCESSORS[index].load(Ordering::Acquire) != accessor {
+            continue;
+        }
+        *capture = registries::Capture { accessor, thread, captured, seen };
     }
-    None
+    out
 }
 
 /// Every captured accessor and its thread (debug-rpc's `debug.hit`).
@@ -218,6 +241,8 @@ struct Observed {
     thread: AtomicU32,
     level: AtomicUsize,
     role: AtomicU8,
+    /// `GetTickCount64` of the last call: a silent object's slot is reused ([`registries::object_slot`]).
+    last_ms: AtomicU64,
 }
 
 impl Observed {
@@ -228,7 +253,17 @@ impl Observed {
             thread: AtomicU32::new(0),
             level: AtomicUsize::new(0),
             role: AtomicU8::new(ROLE_UNKNOWN),
+            last_ms: AtomicU64::new(0),
         }
+    }
+
+    /// Forgets everything learned about the object in this slot: a new one, or the same address after
+    /// its world was left, whose role is proved again on its next call.
+    fn forget(&self) {
+        self.calls.store(0, Ordering::Relaxed);
+        self.thread.store(0, Ordering::Release);
+        self.level.store(0, Ordering::Release);
+        self.role.store(ROLE_UNKNOWN, Ordering::Release);
     }
 }
 
@@ -242,8 +277,13 @@ static SERVER_TICK_MS: AtomicU64 = AtomicU64::new(0);
 static ROLES_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// Records one `sim.update` call and returns the object's role.
+///
+/// An object silent for [`registries::OBJECT_SILENT_MS`] belongs to a world that was left: called
+/// again, its role is proved again, and a new object takes its slot when none is free, so a session
+/// that changes worlds many times keeps classifying the current world's server and keeps its stream.
 pub fn observe_tick(minecraft: usize, level: Option<usize>) -> u8 {
     let thread = agent_core::win::current_thread_id();
+    let now = agent_core::win::tick_ms();
     let mut slot = None;
     for (index, observed) in OBSERVED.iter().enumerate() {
         if observed.ptr.load(Ordering::Acquire) == minecraft {
@@ -252,25 +292,34 @@ pub fn observe_tick(minecraft: usize, level: Option<usize>) -> u8 {
         }
     }
     let index = match slot {
-        Some(index) => index,
-        None => {
-            let mut claimed = 0;
-            for (index, observed) in OBSERVED.iter().enumerate() {
-                if observed.ptr.load(Ordering::Acquire) != 0 {
-                    continue;
-                }
-                if observed.ptr.compare_exchange(0, minecraft, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-                    claimed = index + 1;
-                    break;
-                }
+        Some(index) => {
+            if registries::object_silent(OBSERVED[index].last_ms.load(Ordering::Acquire), now) {
+                OBSERVED[index].forget();
             }
-            if claimed == 0 {
+            index
+        }
+        None => {
+            let slots: [(usize, u64); OBJECTS] = core::array::from_fn(|index| {
+                (OBSERVED[index].ptr.load(Ordering::Acquire), OBSERVED[index].last_ms.load(Ordering::Acquire))
+            });
+            let Some(index) = registries::object_slot(&slots, now) else {
+                return ROLE_UNKNOWN;
+            };
+            let old = slots[index].0;
+            if OBSERVED[index].ptr.compare_exchange(old, minecraft, Ordering::AcqRel, Ordering::Acquire).is_err() {
                 return ROLE_UNKNOWN;
             }
-            claimed - 1
+            OBSERVED[index].forget();
+            // The server object whose slot this was is gone: the new world's server proves itself.
+            if old != 0 {
+                let _ = SERVER_OBJECT.compare_exchange(old, 0, Ordering::AcqRel, Ordering::Acquire);
+                agent_core::log::fmt(format_args!("minecraft: 0x{minecraft:x} takes the slot of silent 0x{old:x}"));
+            }
+            index
         }
     };
     let observed = &OBSERVED[index];
+    observed.last_ms.store(now, Ordering::Release);
     observed.calls.fetch_add(1, Ordering::Relaxed);
     let _ = observed.thread.compare_exchange(0, thread, Ordering::AcqRel, Ordering::Acquire);
     if let Some(level) = level {
@@ -735,7 +784,11 @@ pub fn observe(context: usize) {
     if !pe::readable(accessor, 8) {
         return;
     }
-    if observe_accessor(accessor) != 0 {
+    let Some(reading) = ecs::read(accessor) else {
+        note_player_missing(accessor);
+        return;
+    };
+    if publish_reading(accessor, reading) != 0 {
         CLIENT_ACCESSOR.store(accessor, Ordering::Release);
     }
 }
@@ -746,35 +799,48 @@ pub fn observe(context: usize) {
 /// simulation step is, and the accessor it reads through is captured by the `component.getter` hook
 /// ([`note_accessor`]). This is the same read [`observe`] makes, keyed on that accessor.
 ///
+/// Only registries the game used in the last client frame are read, newest capture first, and the
+/// first that holds a local player wins ([`registries::candidates`]): after a world change (a left
+/// world, a failed join, a rejoin) the old world's registry ages out within two client frames instead
+/// of being read for as long as it sits in a lower slot. When no current registry holds a local player
+/// nothing is published, the reading ages, and the tick stream stops sending it
+/// ([`registries::stream_fresh`]).
+///
 /// Returns the entity it published, or 0 when no local player could be read.
 pub fn client_tick() -> u32 {
-    let accessor = match accessor_here() {
-        Some(accessor) => accessor,
-        None => CLIENT_ACCESSOR.load(Ordering::Acquire),
-    };
-    if accessor == 0 {
-        return 0;
+    // This frame's systems have not run yet: the frame that just ended is the newest one with uses.
+    let frame = CLIENT_FRAME.fetch_add(1, Ordering::AcqRel);
+    let thread = agent_core::win::current_thread_id();
+    let (candidates, count) =
+        registries::candidates(&captures(), thread, frame, CLIENT_ACCESSOR.load(Ordering::Acquire));
+    for &accessor in &candidates[..count] {
+        let Some(reading) = ecs::read(accessor) else {
+            continue;
+        };
+        let entity = publish_reading(accessor, reading);
+        if entity != 0 {
+            CLIENT_ACCESSOR.store(accessor, Ordering::Release);
+            return entity;
+        }
     }
-    let entity = observe_accessor(accessor);
-    if entity != 0 {
-        CLIENT_ACCESSOR.store(accessor, Ordering::Release);
+    // No registry the game is using holds a local player. The last good accessor stays recorded (it is
+    // only read again while the game still uses it), and the reading ages out of the tick stream.
+    if let Some(&first) = candidates[..count].first() {
+        note_player_missing(first);
     }
-    entity
+    0
 }
 
-/// The client's registry accessor, once a tick has read the local player through it.
+/// The client's registry accessor, once a tick has read the local player through it: the last one a
+/// client tick read the local player through, which is always a registry the game was using then.
 pub fn client_accessor() -> Option<usize> {
     let accessor = CLIENT_ACCESSOR.load(Ordering::Acquire);
     (accessor != 0).then_some(accessor)
 }
 
-/// Reads and publishes one tick's local player through `accessor`; returns its entity, 0 on failure.
-fn observe_accessor(accessor: usize) -> u32 {
+/// Publishes one tick's local player read through `accessor`; returns its entity, 0 on failure.
+fn publish_reading(accessor: usize, mut reading: ecs::Reading) -> u32 {
     let Some(core) = agent_core::hub::started() else {
-        return 0;
-    };
-    let Some(mut reading) = ecs::read(accessor) else {
-        note_player_missing(accessor);
         return 0;
     };
     note_player_found(&reading, accessor);
@@ -927,28 +993,25 @@ pub fn sim_tick(minecraft: usize) {
     LIVE.sim_stamp.store(agent_core::win::tick_ms(), Ordering::Release);
     crate::server::drain(minecraft);
 
+    // A reading the client tick has not renewed lately is no longer the player: a world change or a
+    // registry with no local player left the slots at the old world's position. Those ticks still go
+    // out (their `tick` numbers stay continuous) with the player fields null, which the client treats
+    // as "no reading" rather than as a player standing still.
+    let current = registries::stream_fresh(LIVE.stamp.load(Ordering::Acquire), agent_core::win::tick_ms());
+    let slot = |value: &AtomicU32| if current { float(value.load(Ordering::Relaxed)) } else { f32::NAN };
     let ticks = timer_ticks(minecraft);
     for _ in 0..ticks {
         let tick = LIVE.tick.fetch_add(1, Ordering::AcqRel) + 1;
-        let rotation = [float(LIVE.rotation[0].load(Ordering::Relaxed)), float(LIVE.rotation[1].load(Ordering::Relaxed))];
         core.tick(&TickSample {
             tick,
-            position: [
-                float(LIVE.position[0].load(Ordering::Relaxed)),
-                float(LIVE.position[1].load(Ordering::Relaxed)),
-                float(LIVE.position[2].load(Ordering::Relaxed)),
-            ],
+            position: [slot(&LIVE.position[0]), slot(&LIVE.position[1]), slot(&LIVE.position[2])],
             // A non-finite rotation renders as `null` on the wire: the client drops the sample
             // instead of believing a made-up view.
-            rotation,
-            velocity: [
-                float(LIVE.velocity[0].load(Ordering::Relaxed)),
-                float(LIVE.velocity[1].load(Ordering::Relaxed)),
-                float(LIVE.velocity[2].load(Ordering::Relaxed)),
-            ],
-            on_ground: match LIVE.ground.load(Ordering::Acquire) {
-                1 => Some(true),
-                2 => Some(false),
+            rotation: [slot(&LIVE.rotation[0]), slot(&LIVE.rotation[1])],
+            velocity: [slot(&LIVE.velocity[0]), slot(&LIVE.velocity[1]), slot(&LIVE.velocity[2])],
+            on_ground: match (current, LIVE.ground.load(Ordering::Acquire)) {
+                (true, 1) => Some(true),
+                (true, 2) => Some(false),
                 _ => None,
             },
             // Neither the attribute map walk nor the hotbar binding is decoded: null, never a guess.

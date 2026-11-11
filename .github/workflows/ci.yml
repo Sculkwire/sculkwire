@@ -28,7 +28,7 @@ jobs:
       # The agent's pure modules (`look.rs`: the view math, `screens.rs`: the screen rules) also build on their own
       # as host test crates.
       - shell: bash
-        run: for m in look screens; do rustc --edition 2021 --test agent/src/$m.rs -o target/$m-test.exe && ./target/$m-test.exe || exit 1; done
+        run: for m in look screens registries click; do rustc --edition 2021 --test agent/src/$m.rs -o target/$m-test.exe && ./target/$m-test.exe || exit 1; done
 
   test:
     strategy:

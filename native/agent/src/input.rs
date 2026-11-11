@@ -81,7 +81,10 @@
 //! `+0x2c` hit position `Vec3`, `+0x48` the target's `EntityId`. An entity is reported only when that id
 //! has an `ActorUniqueIDComponent` in the player's registry *and* stands within [`HIT_REACH`] blocks;
 //! its type comes from `ActorDefinitionIdentifierComponent` only when the full name equals
-//! `namespace:identifier`. Anything that does not check out answers `null`.
+//! `namespace:identifier`. Anything that does not check out answers `null`. The queue is empty in
+//! part of every tick (the holder's own clear empties it until the next pick is pushed), so a click
+//! that finds it empty waits for the next frame that holds a pick, bounded by [`crate::click`], and
+//! reads the target and clicks in that frame.
 //!
 //! # Live checks
 //!
@@ -112,9 +115,9 @@ use serde_json::{json, Value};
 
 use agent_core::hub::Movement;
 use agent_core::sync::SpinLock;
-use agent_core::{gameinput, hook, log, message_loop, win, Anchor, Core, Image, RpcError};
+use agent_core::{gameinput, hook, log, message_loop, queue, win, Anchor, Core, Image, RpcError};
 
-use crate::{anchors, ecs, live, look, pe};
+use crate::{anchors, click, ecs, live, look, pe};
 
 /* ------------------------------------------------------------------------------------------------
  * Params
@@ -1686,25 +1689,264 @@ fn crosshair_now() -> Option<Crosshair> {
     Player::open().and_then(|player| player.crosshair())
 }
 
+/// The pick as a click finds it: [`Pick::Empty`] while the game's queue holds no pick this frame.
+enum Pick {
+    Empty,
+    Read(Option<Crosshair>),
+}
+
+/// The button a click presses.
+#[derive(Clone, Copy)]
+enum Button {
+    Attack,
+    Use,
+}
+
+impl Button {
+    fn press(self) -> Result<(), RpcError> {
+        match self {
+            // A click ends a hold first, so the held state cannot outlive it.
+            Self::Attack => {
+                release_held(&ATTACK);
+                click_button(&ATTACK_HANDLER, &ATTACK_TABLE, "input.attack", false)
+            }
+            Self::Use => use_click(),
+        }
+    }
+
+    /// The method's answer for a click that ran with `target` under the crosshair.
+    fn answer(self, target: Option<&Crosshair>) -> Value {
+        let json_target = target.map_or(Value::Null, Crosshair::json);
+        match self {
+            Self::Attack => {
+                json!({ "hit": target.map_or(Value::Null, Crosshair::entity_id), "target": json_target, "route": "action" })
+            }
+            Self::Use => json!({ "held": false, "target": json_target, "route": "action" }),
+        }
+    }
+
+    /// Reads the pick and clicks in the same frame.
+    fn run(self, target: Option<Crosshair>) -> Result<Value, RpcError> {
+        #[cfg(feature = "debug-rpc")]
+        CLICKS.fetch_add(1, Ordering::AcqRel);
+        self.press()?;
+        Ok(self.answer(target.as_ref()))
+    }
+}
+
+/// A click that found the game's pick queue empty and waits for the frame that fills it.
+struct WaitingClick {
+    deferred: queue::Deferred,
+    button: Button,
+    since: u64,
+}
+
+static WAITING_CLICK: SpinLock<Option<WaitingClick>> = SpinLock::new(None);
+
+/// One click of `button`, in a frame in which the game's crosshair pick is there ([`crate::click`]):
+/// now when it is, else deferred to [`frame`], which runs it in the first frame that has the pick (or
+/// at the wait's bound, with whatever the crosshair is on then). The target is read in the frame the
+/// click runs in, so the answer never names what the crosshair has left.
+fn click_when_picked(core: &'static Core, button: Button) -> Result<Value, RpcError> {
+    // A click still waiting runs first, so clicks keep their order.
+    run_waiting(true);
+    match Player::open().map(|player| player.pick()) {
+        // Only the per-frame hook can run a waiting click: without it the click runs now.
+        Some(Pick::Empty) if frame_hook_alive() && !core.stopping() => match core.defer() {
+            Some(deferred) => {
+                *WAITING_CLICK.lock() = Some(WaitingClick { deferred, button, since: win::tick_ms() });
+                Err(RpcError::deferred())
+            }
+            None => button.run(None),
+        },
+        Some(Pick::Read(target)) => button.run(target),
+        Some(Pick::Empty) | None => button.run(None),
+    }
+}
+
+/// `GetTickCount64` of the last [`frame`]: a waiting click needs the per-drain call to be running.
+static FRAME_MS: AtomicU64 = AtomicU64::new(0);
+
+/// True when a drain ran [`frame`] within the last quarter of a second.
+fn frame_hook_alive() -> bool {
+    let last = FRAME_MS.load(Ordering::Acquire);
+    last != 0 && win::tick_ms().saturating_sub(last) < 250
+}
+
+/// After every main-thread drain (the engine's `lock_frame`), on the game's main thread: gives a
+/// waiting click its turn. The drains run from the message loop and the client's step, several per
+/// frame; the frame hook itself is not where they run on this build.
+pub fn frame() {
+    FRAME_MS.store(win::tick_ms(), Ordering::Release);
+    run_waiting(false);
+    #[cfg(feature = "debug-rpc")]
+    sample_pick();
+}
+
+/// Clicks `input.attack` and `input.use` have sent (debug-rpc's `pickFrames` marks them).
+#[cfg(feature = "debug-rpc")]
+static CLICKS: AtomicU64 = AtomicU64::new(0);
+
+/// One sampled drain for `debug.hit`'s `pickFrames` (debug-rpc only).
+#[cfg(feature = "debug-rpc")]
+#[derive(Clone, Copy)]
+struct PickFrame {
+    /// The performance counter, in microseconds.
+    us: u64,
+    /// What the release reader made of it: 0 empty, 1 on nothing, 2 block, 3 entity.
+    state: u8,
+    /// Main-thread requests this drain ran, and clicks among them.
+    requests: u8,
+    clicks: u8,
+    /// Entries queued (each a pair of `HitResult`s).
+    count: u8,
+    /// The first [`PICK_SAMPLE_ENTRIES`] entries, oldest first: per half, `(type, entity, distance from
+    /// the eye to the hit position)`; type 255 / distance -1 when unreadable.
+    entries: [[(u8, u32, f32); 2]; PICK_SAMPLE_ENTRIES],
+}
+
+#[cfg(feature = "debug-rpc")]
+const PICK_SAMPLE_ENTRIES: usize = 4;
+#[cfg(feature = "debug-rpc")]
+const PICK_SAMPLE_FRAMES: usize = 256;
+#[cfg(feature = "debug-rpc")]
+const PICK_FRAME_EMPTY: PickFrame =
+    PickFrame { us: 0, state: 0, requests: 0, clicks: 0, count: 0, entries: [[(255, 0, -1.0); 2]; PICK_SAMPLE_ENTRIES] };
+/// The ring, its next index, and the request and click counters at the previous sample.
+#[cfg(feature = "debug-rpc")]
+static PICK_FRAMES: SpinLock<([PickFrame; PICK_SAMPLE_FRAMES], usize, u64, u64)> =
+    SpinLock::new(([PICK_FRAME_EMPTY; PICK_SAMPLE_FRAMES], 0, 0, 0));
+
+/// Records this drain's pick queue: what the reader decides, and every queued entry raw.
+#[cfg(feature = "debug-rpc")]
+fn sample_pick() {
+    if !live::in_world() {
+        return;
+    }
+    let Some(player) = Player::open() else {
+        return;
+    };
+    let mut frame = PICK_FRAME_EMPTY;
+    frame.us = win::qpc_micros();
+    frame.state = match player.pick() {
+        Pick::Empty => 0,
+        Pick::Read(None) => 1,
+        Pick::Read(Some(Crosshair::Block { .. })) => 2,
+        Pick::Read(Some(Crosshair::Entity { .. })) => 3,
+    };
+    if let Some((begin, end)) = player.pick_bounds() {
+        if end > begin && (end - begin) % HIT_ENTRY == 0 && (end - begin) / HIT_ENTRY <= HIT_MAX_ENTRIES {
+            let count = (end - begin) / HIT_ENTRY;
+            frame.count = count.min(255) as u8;
+            let eye = player.reading.sample.position;
+            for (index, slot) in frame.entries.iter_mut().enumerate().take(count) {
+                for (half, out) in slot.iter_mut().enumerate() {
+                    let at = begin + index * HIT_ENTRY + half * (HIT_ENTRY / 2);
+                    let kind = pe::read::<u32>(at + HIT_TYPE).map_or(255, |kind| kind.min(254) as u8);
+                    let entity = pe::read::<u32>(at + HIT_ENTITY).unwrap_or(0);
+                    let distance = read_vec3(at + HIT_POSITION).map_or(-1.0, |p| {
+                        let (dx, dy, dz) = (p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]);
+                        libm_sqrt(dx * dx + dy * dy + dz * dz)
+                    });
+                    *out = (kind, entity, distance);
+                }
+            }
+        }
+    }
+    let ran = queue::ran();
+    let clicks = CLICKS.load(Ordering::Acquire);
+    let mut frames = PICK_FRAMES.lock();
+    let (ring, next, last_ran, last_clicks) = &mut *frames;
+    frame.requests = ran.saturating_sub(*last_ran).min(255) as u8;
+    frame.clicks = clicks.saturating_sub(*last_clicks).min(255) as u8;
+    *last_ran = ran;
+    *last_clicks = clicks;
+    ring[*next % PICK_SAMPLE_FRAMES] = frame;
+    *next += 1;
+}
+
+/// A square root without `std` (Newton steps from the float's own exponent; debug output only).
+#[cfg(feature = "debug-rpc")]
+fn libm_sqrt(value: f32) -> f32 {
+    if !(value > 0.0) || !value.is_finite() {
+        return 0.0;
+    }
+    let mut guess = f32::from_bits((value.to_bits() >> 1) + 0x1FC0_0000);
+    for _ in 0..4 {
+        guess = 0.5 * (guess + value / guess);
+    }
+    guess
+}
+
+/// The sampled drains, oldest first, as `[us, state, requests, clicks, count, [[[type, entity, distance] ×2] …]]`.
+#[cfg(feature = "debug-rpc")]
+fn pick_frames() -> Value {
+    let frames = PICK_FRAMES.lock();
+    let (ring, next, _, _) = &*frames;
+    let count = (*next).min(PICK_SAMPLE_FRAMES);
+    Value::Array(
+        (0..count)
+            .map(|i| ring[(*next - count + i) % PICK_SAMPLE_FRAMES])
+            .map(|frame| {
+                let entries: Vec<Value> = frame.entries[..usize::from(frame.count).min(PICK_SAMPLE_ENTRIES)]
+                    .iter()
+                    .map(|pair| Value::Array(pair.iter().map(|(kind, entity, distance)| json!([kind, entity, distance])).collect()))
+                    .collect();
+                json!([frame.us, frame.state, frame.requests, frame.clicks, frame.count, entries])
+            })
+            .collect(),
+    )
+}
+
+/// Runs the waiting click when its frame has the pick or its wait is over (`now`: run it regardless).
+fn run_waiting(now: bool) {
+    let mut slot = WAITING_CLICK.lock();
+    let Some(waiting) = slot.as_ref() else {
+        return;
+    };
+    let pick = Player::open().map(|player| player.pick());
+    let ready = matches!(pick, Some(Pick::Read(_)));
+    if !now && !click::run_now(ready, win::tick_ms().saturating_sub(waiting.since)) {
+        return;
+    }
+    let Some(waiting) = slot.take() else {
+        return;
+    };
+    // The game is called below: no lock is held across it.
+    drop(slot);
+    let result = world().and_then(|()| {
+        let target = match pick {
+            Some(Pick::Read(target)) => target,
+            _ => None,
+        };
+        waiting.button.run(target)
+    });
+    match result {
+        Ok(value) => {
+            waiting.deferred.resolve(value);
+        }
+        Err(error) => {
+            waiting.deferred.fail(error);
+        }
+    }
+}
+
 /// `input.attack {hold?}` → `{hit, target, route}` (`{held, target, route}` with `hold`): one left click
 /// through the client's own `button.destroy_or_attack` handler, or the held left button (`hold: true`,
 /// renewed by repeating it) that keeps breaking the block under the crosshair until an
 /// `input.attack {hold: false}`, an `input.release`, or [`HOLD_MS`] of silence. `target` is what the
 /// crosshair was on when it ran (a block with its face, or an entity with its id and type; `null` when
-/// nothing in reach or nothing validated), and `hit` the struck entity's id alone.
-pub fn h_input_attack(_core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+/// nothing in reach or nothing validated), and `hit` the struck entity's id alone. A click waits up to
+/// [`click::WAIT_MS`] for a frame in which the game holds its crosshair pick ([`click_when_picked`]).
+pub fn h_input_attack(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     world()?;
     expire();
-    let target = crosshair_now();
-    let json_target = target.as_ref().map_or(Value::Null, Crosshair::json);
     match params.get("hold") {
-        None => {
-            // A click ends a hold first, so the held state cannot outlive it.
-            release_held(&ATTACK);
-            click_button(&ATTACK_HANDLER, &ATTACK_TABLE, "input.attack", false)?;
-            Ok(json!({ "hit": target.as_ref().map_or(Value::Null, Crosshair::entity_id), "target": json_target, "route": "action" }))
+        None => click_when_picked(core, Button::Attack),
+        Some(_) => {
+            let target = crosshair_now().as_ref().map_or(Value::Null, Crosshair::json);
+            held_button(&ATTACK, flag(params, "hold")?, target)
         }
-        Some(_) => held_button(&ATTACK, flag(params, "hold")?, json_target),
     }
 }
 
@@ -1712,18 +1954,17 @@ pub fn h_input_attack(_core: &'static Core, params: &Value) -> Result<Value, Rpc
 /// `button.build_or_interact` handler, or the held right button (`hold: true`, renewed by repeating it)
 /// that lasts until an `input.use {hold: false}`, an `input.release`, or [`HOLD_MS`] of silence. The
 /// button is its own domain — `input.move` restates the movement and leaves it alone. `target` is the
-/// crosshair's target when the click (or the hold) began, as `input.attack` reports it.
-pub fn h_input_use(_core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+/// crosshair's target when the click (or the hold) began, as `input.attack` reports it; a click waits
+/// for the pick as `input.attack`'s does.
+pub fn h_input_use(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     world()?;
     expire();
-    let target = crosshair_now().as_ref().map_or(Value::Null, Crosshair::json);
     match params.get("hold") {
-        None => {
-            // A click ends a hold first, so the held state cannot outlive it.
-            use_click()?;
-            Ok(json!({ "held": false, "target": target, "route": "action" }))
+        None => click_when_picked(core, Button::Use),
+        Some(_) => {
+            let target = crosshair_now().as_ref().map_or(Value::Null, Crosshair::json);
+            held_button(&USE, flag(params, "hold")?, target)
         }
-        Some(_) => held_button(&USE, flag(params, "hold")?, target),
     }
 }
 
@@ -1807,18 +2048,21 @@ fn wanted_hashes() -> [u32; 4] {
 }
 
 /// The client's component registry, discovering it if this world has not been seen yet.
+///
+/// The accessor the client's own tick last read the local player through comes first, ahead of the
+/// cache: it is the registry the game is using now ([`crate::registries`]), so `player.state` and the
+/// tick stream read the same player, and a world change that leaves the old registry readable cannot
+/// keep this answering from it.
 pub(crate) fn registry() -> Option<usize> {
-    let cached = REGISTRY.load(Ordering::Acquire);
-    if cached != 0 && valid(cached) {
-        return Some(cached);
-    }
-    // The accessor the client's own tick reads through is the one the game handed to `getStorage`
-    // on this world, so it wins over anything captured earlier or found by a scan.
     if let Some(accessor) = live::client_accessor() {
         if valid(accessor) {
             REGISTRY.store(accessor, Ordering::Release);
             return Some(accessor);
         }
+    }
+    let cached = REGISTRY.load(Ordering::Acquire);
+    if cached != 0 && valid(cached) {
+        return Some(cached);
     }
     let found = discover()?;
     REGISTRY.store(found, Ordering::Release);
@@ -2002,8 +2246,29 @@ impl Player {
     }
 
     /// The newest crosshair pick, decoded (see the module documentation), or `None` when the component,
-    /// its holder or the entry does not check out.
+    /// its holder or the entry does not check out, or the game's queue is empty right now.
     fn crosshair(&self) -> Option<Crosshair> {
+        match self.pick() {
+            Pick::Read(crosshair) => crosshair,
+            Pick::Empty => None,
+        }
+    }
+
+    /// The crosshair pick, telling an empty queue (the game has not pushed this tick's pick yet: wait for
+    /// it, [`crate::click`]) from a pick that was read, on something or on nothing.
+    fn pick(&self) -> Pick {
+        let Some((begin, end)) = self.pick_bounds() else {
+            return Pick::Read(None);
+        };
+        match click::queue(begin, end, HIT_ENTRY, HIT_MAX_ENTRIES) {
+            click::Queue::Empty => Pick::Empty,
+            click::Queue::Bad => Pick::Read(None),
+            click::Queue::Newest(pick) => Pick::Read(self.decode_pick(pick)),
+        }
+    }
+
+    /// The pick queue's `begin`/`end`, from the component's holder once it checks out.
+    fn pick_bounds(&self) -> Option<(usize, usize)> {
         let element = self.element("HitResultComponent", HIT_STRIDE)?;
         let holder = pe::read::<usize>(element)?;
         if holder < 0x1_0000 || !pe::readable(holder, 0x18) {
@@ -2013,12 +2278,11 @@ impl Player {
         if pe::read::<usize>(holder).is_none_or(|vtable| !pe::in_image_data(vtable)) {
             return None;
         }
-        let begin = pe::read::<usize>(holder + HIT_BEGIN)?;
-        let end = pe::read::<usize>(holder + HIT_END)?;
-        if begin == 0 || end <= begin || (end - begin) % HIT_ENTRY != 0 || (end - begin) / HIT_ENTRY > HIT_MAX_ENTRIES {
-            return None;
-        }
-        let pick = end - HIT_ENTRY;
+        Some((pe::read::<usize>(holder + HIT_BEGIN)?, pe::read::<usize>(holder + HIT_END)?))
+    }
+
+    /// One queued pick entry, decoded.
+    fn decode_pick(&self, pick: usize) -> Option<Crosshair> {
         if !pe::readable(pick, HIT_ENTRY) {
             return None;
         }
@@ -2167,7 +2431,7 @@ pub fn h_debug_hit(_core: &'static Core, _params: &Value) -> Result<Value, RpcEr
         }
         registries.push(json!({ "accessor": format!("{accessor:#x}"), "thread": thread, "counts": counts }));
     }
-    Ok(json!({ "crosshair": crosshair, "local": player.entity(), "accessor": format!("{:#x}", player.accessor), "registries": registries, "storage": storage.map(|s| format!("{s:#x}")), "entities": entities, "storages": storages, "strides": strides }))
+    Ok(json!({ "crosshair": crosshair, "local": player.entity(), "accessor": format!("{:#x}", player.accessor), "registries": registries, "storage": storage.map(|s| format!("{s:#x}")), "entities": entities, "storages": storages, "strides": strides, "pickFrames": pick_frames() }))
 }
 
 /// `AttributesComponent` element stride and the container's fields (`area-player` §2.7).

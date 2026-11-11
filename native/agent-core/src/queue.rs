@@ -173,6 +173,14 @@ fn take_for(_method: &str, slot: &Slot) -> bool {
     slot.state.compare_exchange(FREE, QUEUED, Ordering::AcqRel, Ordering::Acquire).is_ok()
 }
 
+/// Main-thread handlers run so far ([`ran`]).
+static RAN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// How many main-thread handlers [`drain`] has run since the agent loaded.
+pub fn ran() -> u64 {
+    RAN.load(Ordering::Acquire)
+}
+
 /// Runs every queued request on the calling (main) thread.
 ///
 /// `resolve` maps a queued method name to its handler; it is called here, on the main thread, so the
@@ -199,6 +207,7 @@ pub fn drain(resolve: impl Fn(&'static str) -> Option<Handler>) {
         };
 
         CURRENT.store(index, Ordering::Release);
+        RAN.fetch_add(1, Ordering::AcqRel);
         let result = handler(crate::hub::instance(), &params);
         let _ = CURRENT.compare_exchange(index, NO_SLOT, Ordering::AcqRel, Ordering::Acquire);
 
