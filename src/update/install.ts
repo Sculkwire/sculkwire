@@ -17,9 +17,10 @@ import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node
 import { chmod, mkdir, open, readdir, readFile, readlink, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { REPO_URL } from "../core/meta.ts";
 import { dataDir } from "../core/paths.ts";
 
-export const DEFAULT_REPO = "https://github.com/ve3dy/sculkwire.git";
+export const DEFAULT_REPO = `${REPO_URL}.git`;
 export const CHANNELS = ["release", "main", "off"] as const;
 export type Channel = (typeof CHANNELS)[number];
 export const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;

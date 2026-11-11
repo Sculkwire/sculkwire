@@ -11,7 +11,7 @@ How to set up a checkout, what to run before a pull request, where new code goes
 | rustup and cargo | Stable toolchain with the `x86_64-pc-windows-msvc` target | The in-game agent in `native/` |
 
 ```sh
-git clone https://github.com/ve3dy/sculkwire.git
+git clone https://github.com/Sculkwire/sculkwire.git
 cd sculkwire
 npm ci
 node src/cli.ts --help
@@ -57,6 +57,10 @@ docs: plain /reload does not register new function files; game_reload all does
 ```
 
 Common areas: `knowledge`, `validate`, `bds`, `client`, `engine` (the TypeScript side of the agent), `agent` (the Rust side), `play`, `player_act`, `gamefiles`, `update`, `docs`, `release`. A user-visible change also gets a line in `CHANGELOG.md` under `## Unreleased`.
+
+## Where Changes Go
+
+The home of sculkwire is GitHub, [github.com/Sculkwire/sculkwire](https://github.com/Sculkwire/sculkwire): open issues and pull requests there. [gitlab.com/sculkwire/sculkwire](https://gitlab.com/sculkwire/sculkwire) is a read-only mirror. The `mirror` workflow pushes every branch and tag from GitHub to it on each push, so merged pull requests reach it on their own; never push to GitLab by hand.
 
 ## Tests
 

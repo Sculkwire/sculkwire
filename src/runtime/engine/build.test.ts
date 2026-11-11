@@ -89,7 +89,7 @@ describe("cargo build command", () => {
 describe("release archive", () => {
   it("names and locates the asset of the running version", () => {
     expect(prebuiltName("1.2.3")).toBe("sculkwire-agent-1.2.3-x86_64-windows.zip");
-    expect(prebuiltUrl("1.2.3")).toBe("https://github.com/ve3dy/sculkwire/releases/download/v1.2.3/sculkwire-agent-1.2.3-x86_64-windows.zip");
+    expect(prebuiltUrl("1.2.3")).toBe("https://github.com/Sculkwire/sculkwire/releases/download/v1.2.3/sculkwire-agent-1.2.3-x86_64-windows.zip");
     expect(prebuiltUrl()).toContain(`/v${VERSION}/`);
   });
 

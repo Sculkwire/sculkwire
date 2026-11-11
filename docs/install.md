@@ -30,7 +30,7 @@ Steps for an AI agent that was asked to install sculkwire. Work in the clone of 
 | `--yes` | `-Yes` | `SCULKWIRE_YES=1` | Ask nothing. No client is registered unless `--register` is given |
 | `--register <clients>` | `-Register <clients>` | `SCULKWIRE_REGISTER` | Comma separated: `omp`, `claude` |
 | `--channel <channel>` | `-Channel <channel>` | `SCULKWIRE_CHANNEL` | `release` (default), `main` or `off` |
-| `--repo <url>` | `-Repo <url>` | `SCULKWIRE_REPO` | Repository to install from, a git URL or a local path. Default `https://github.com/ve3dy/sculkwire.git` |
+| `--repo <url>` | `-Repo <url>` | `SCULKWIRE_REPO` | Repository to install from, a git URL or a local path. Default `https://github.com/Sculkwire/sculkwire.git` |
 | `--no-path` | `-NoPath` | `SCULKWIRE_NO_PATH=1` | Leave PATH alone |
 | `--help` | `-Help` | | Print the options |
 
@@ -39,14 +39,14 @@ A flag wins over its environment variable. The variables exist for piped runs, w
 Without a clone, install in one line:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ve3dy/sculkwire/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Sculkwire/sculkwire/main/install.sh | sh
 ```
 
 ```powershell
-irm https://raw.githubusercontent.com/ve3dy/sculkwire/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Sculkwire/sculkwire/main/install.ps1 | iex
 ```
 
-Piped, `install.sh` takes flags after `sh -s --` (`curl ... | sh -s -- --yes`) and `install.ps1` takes them as a script block: `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ve3dy/sculkwire/main/install.ps1))) -Yes`. Piped through `iex`, `install.ps1` never closes your PowerShell window: it sets `$LASTEXITCODE` instead of exiting.
+Piped, `install.sh` takes flags after `sh -s --` (`curl ... | sh -s -- --yes`) and `install.ps1` takes them as a script block: `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Sculkwire/sculkwire/main/install.ps1))) -Yes`. Piped through `iex`, `install.ps1` never closes your PowerShell window: it sets `$LASTEXITCODE` instead of exiting.
 
 CI runs both installers on every push, from the checkout under test (`--channel main --repo <checkout>`), then runs the installed `sculk --version` and `sculk doctor`, and on Windows `cmd /c <data>\bin\sculk.cmd --version` the way an MCP client starts it.
 

@@ -4,7 +4,7 @@
 # is the Windows twin: same options, prompts and output.
 set -eu
 
-REPO="${SCULKWIRE_REPO:-https://github.com/ve3dy/sculkwire.git}"
+REPO="${SCULKWIRE_REPO:-https://github.com/Sculkwire/sculkwire.git}"
 REPO_GIVEN=0
 [ -n "${SCULKWIRE_REPO:-}" ] && REPO_GIVEN=1
 YES="${SCULKWIRE_YES:-0}"
@@ -21,7 +21,7 @@ Usage: install.sh [--yes] [--register omp,claude] [--channel release|main|off] [
   --yes       ask nothing (no client registration unless --register)
   --register  MCP clients to register sculkwire with (omp, claude). The JSON for any other client is printed
   --channel   update channel: release (default), main, or off for no automatic updates
-  --repo      git URL or local path to install from (default https://github.com/ve3dy/sculkwire.git)
+  --repo      git URL or local path to install from (default https://github.com/Sculkwire/sculkwire.git)
   --no-path   do not put sculk on PATH (default: a symlink in $SCULKWIRE_BIN_DIR, else ~/.local/bin)
 
 Every option can also come from the environment, which works when the script is piped: SCULKWIRE_YES=1,

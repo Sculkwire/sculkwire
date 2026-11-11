@@ -1,0 +1,43 @@
+name: mirror
+
+# Every branch and tag pushed here is pushed on to the GitLab mirror, so the mirror follows merges from anyone.
+on:
+  push:
+    branches: ["**"]
+    tags: ["**"]
+  delete:
+  workflow_dispatch:
+
+concurrency:
+  group: mirror
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  gitlab:
+    # Forks have no mirror key: only the home repository mirrors.
+    if: github.repository_owner == 'Sculkwire'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Push branches and tags to GitLab
+        env:
+          GITLAB_MIRROR_SSH_KEY: ${{ secrets.GITLAB_MIRROR_SSH_KEY }}
+        shell: bash
+        run: |
+          test -n "$GITLAB_MIRROR_SSH_KEY" || { echo "secret GITLAB_MIRROR_SSH_KEY is not set"; exit 1; }
+          mkdir -p ~/.ssh
+          printf '%s\n' "$GITLAB_MIRROR_SSH_KEY" > ~/.ssh/mirror
+          chmod 600 ~/.ssh/mirror
+          # GitLab.com's published ed25519 host key (docs.gitlab.com/user/gitlab_com/#ssh-host-keys-fingerprints).
+          echo "gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAfuCHKVTjquxvt6CM6tdG4SLp1Btn/nOeHHE5UOzRdf" > ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/mirror -o IdentitiesOnly=yes -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes"
+          git remote add gitlab "git@gitlab.com:sculkwire/${GITHUB_REPOSITORY#*/}.git"
+          git remote set-head origin -d 2>/dev/null || true
+          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+          # --prune removes branches and tags on the mirror that were deleted here.
+          git push --prune gitlab '+refs/remotes/origin/*:refs/heads/*' '+refs/tags/*:refs/tags/*'

@@ -54,7 +54,7 @@ You need Node.js 22.18 or newer and git. Both install paths give you a `sculk` c
 Paste this into your AI agent harness:
 
 ```text
-Install the sculkwire MCP server: clone https://github.com/ve3dy/sculkwire.git and follow the "Agent Install" steps in its docs/install.md.
+Install the sculkwire MCP server: clone https://github.com/Sculkwire/sculkwire.git and follow the "Agent Install" steps in its docs/install.md.
 ```
 
 The agent installs sculkwire, registers it and runs `sculk doctor`.
@@ -64,7 +64,7 @@ The agent installs sculkwire, registers it and runs `sculk doctor`.
 Linux and macOS:
 
 ```sh
-git clone https://github.com/ve3dy/sculkwire.git
+git clone https://github.com/Sculkwire/sculkwire.git
 cd sculkwire
 ./install.sh
 ```
@@ -72,7 +72,7 @@ cd sculkwire
 Windows (Windows PowerShell 5.1 or PowerShell 7):
 
 ```powershell
-git clone https://github.com/ve3dy/sculkwire.git
+git clone https://github.com/Sculkwire/sculkwire.git
 cd sculkwire
 .\install.ps1
 ```
@@ -84,11 +84,11 @@ The installer asks which MCP clients to register with.
 Or install in one line:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ve3dy/sculkwire/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Sculkwire/sculkwire/main/install.sh | sh
 ```
 
 ```powershell
-irm https://raw.githubusercontent.com/ve3dy/sculkwire/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Sculkwire/sculkwire/main/install.ps1 | iex
 ```
 
 Run `sculk doctor` any time. It lists each problem on your machine with a fix.

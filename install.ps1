@@ -36,7 +36,7 @@ Usage: install.ps1 [-Yes] [-Register omp,claude] [-Channel release|main|off] [-R
   -Yes       ask nothing (no client registration unless -Register)
   -Register  MCP clients to register sculkwire with (omp, claude). The JSON for any other client is printed
   -Channel   update channel: release (default), main, or off for no automatic updates
-  -Repo      git URL or local path to install from (default https://github.com/ve3dy/sculkwire.git)
+  -Repo      git URL or local path to install from (default https://github.com/Sculkwire/sculkwire.git)
   -NoPath    do not put sculk on PATH (default: add `$env:SCULKWIRE_BIN_DIR with a sculk.cmd, else the managed
              bin folder, to the user PATH)
 
@@ -56,7 +56,7 @@ SCULKWIRE_REGISTER, SCULKWIRE_CHANNEL, SCULKWIRE_REPO, SCULKWIRE_NO_PATH=1.
     $channelOpt = if ($Channel) { $Channel } else { "$env:SCULKWIRE_CHANNEL" }
     $repoOpt = if ($Repo) { $Repo } else { "$env:SCULKWIRE_REPO" }
     $repoGiven = $repoOpt -ne ""
-    if (-not $repoGiven) { $repoOpt = "https://github.com/ve3dy/sculkwire.git" }
+    if (-not $repoGiven) { $repoOpt = "https://github.com/Sculkwire/sculkwire.git" }
 
     if ($channelOpt -notin "", "release", "main", "off") { Fail "-Channel must be release, main or off" }
 

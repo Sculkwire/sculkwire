@@ -52,4 +52,4 @@ Engine work (anything in `native/agent/` or a new agent method) starts with `doc
 - An input provider's input lock fails open: a missing or bad signal must never block the user's own input.
 
 ## Remotes
-`origin` is GitHub, [github.com/ve3dy/sculkwire](https://github.com/ve3dy/sculkwire) (meant to be public; private for now). `gitlab` is its mirror, [gitlab.com/ve3dy/sculkwire](https://gitlab.com/ve3dy/sculkwire). `git push origin` pushes to both. Push `main` and release tags.
+`origin` is GitHub, [github.com/Sculkwire/sculkwire](https://github.com/Sculkwire/sculkwire) (public), the source of truth: pull requests and pushes go there. Push `main` and release tags to `origin` only. `gitlab` is the read-only mirror, [gitlab.com/sculkwire/sculkwire](https://gitlab.com/sculkwire/sculkwire): the `mirror` workflow (`.github/workflows/mirror.yml`) pushes every branch and tag to it on each push. Never push to GitLab by hand.

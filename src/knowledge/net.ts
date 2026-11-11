@@ -2,13 +2,11 @@
 import { execFile } from "node:child_process";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { VERSION } from "../core/meta.ts";
+import { USER_AGENT } from "../core/meta.ts";
 
 export function progress(message: string): void {
   process.stderr.write(`[knowledge] ${message}\n`);
 }
-
-const USER_AGENT = `sculkwire/${VERSION} (+https://github.com/ve3dy/sculkwire)`;
 
 async function request(url: string, headers: Record<string, string> = {}, timeoutMs = 60_000): Promise<Response> {
   let lastError: unknown;

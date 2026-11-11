@@ -26,7 +26,7 @@ import { homedir } from "node:os";
 import { dirname, join, posix, relative, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { unzip } from "fflate";
-import { VERSION } from "../../core/meta.ts";
+import { REPO_SLUG, USER_AGENT, VERSION } from "../../core/meta.ts";
 import { cacheDir } from "../../core/paths.ts";
 import { findOnPath } from "../../core/which.ts";
 
@@ -165,7 +165,7 @@ export function prebuiltName(version: string = VERSION): string {
 }
 
 /** The download URL of the prebuilt agent: the `v<version>` release of the public repository. */
-export function prebuiltUrl(version: string = VERSION, repo = "ve3dy/sculkwire"): string {
+export function prebuiltUrl(version: string = VERSION, repo = REPO_SLUG): string {
   return `https://github.com/${repo}/releases/download/v${version}/${prebuiltName(version)}`;
 }
 
@@ -194,7 +194,7 @@ export type FetchBytes = (url: string) => Promise<Uint8Array>;
 
 async function fetchBytes(url: string): Promise<Uint8Array> {
   const res = await fetch(url, {
-    headers: { "user-agent": `sculkwire/${VERSION} (+https://github.com/ve3dy/sculkwire)` },
+    headers: { "user-agent": USER_AGENT },
     signal: AbortSignal.timeout(180_000),
   });
   if (!res.ok) throw new Error(`GET ${url}: HTTP ${res.status}`);
