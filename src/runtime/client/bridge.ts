@@ -54,6 +54,7 @@ import {
   sendInput,
   stop as stopGame,
   typeChatCommand,
+  unavailableInput,
   waitForGame,
   type InputAction,
   type InputRoute,
@@ -797,16 +798,18 @@ export class ClientBridge {
     this.#streamEvery = every;
   }
 
-  /** Held keys, mouse look and buttons for the running game. */
-  playerInput(): PlayerInput {
-    this.#requireRunning();
-    return playerInput(this.launchState as LaunchState);
-  }
-
   /** The game as the player controller sees it: streamed state, entity lookups and player input. */
   playerWorld(): PlayerWorld {
-    const input = this.playerInput();
     const provider = inputProvider();
+    this.#requireRunning();
+    let input: PlayerInput;
+    try {
+      input = playerInput(this.launchState as LaunchState);
+    } catch (err) {
+      // A Linux desktop window has no keyboard route, but an input provider's engine route still drives the player.
+      if (!provider) throw err;
+      input = unavailableInput(err instanceof Error ? err.message : String(err));
+    }
     return {
       state: (maxAgeMs) => this.playerState(maxAgeMs),
       sample: () => this.#playerSample(),

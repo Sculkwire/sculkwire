@@ -1196,13 +1196,16 @@ export class PlayerController {
    */
   async selectInput(mode: InputMode = "auto"): Promise<InputKind> {
     this.inputNote = undefined;
+    const noKeyboard = this.world.input.unavailable;
     if (mode === "keyboard") {
+      if (noKeyboard) throw new Error(noKeyboard);
       await this.#use(this.#keyboard);
       return "keyboard";
     }
     const engine = this.world.engine;
     if (!engine) {
       if (mode === "engine") throw new Error(`no engine route for this game: ${NO_INPUT_PROVIDER}`);
+      if (noKeyboard) throw new Error(noKeyboard);
       await this.#use(this.#keyboard);
       return "keyboard";
     }
@@ -1212,6 +1215,7 @@ export class PlayerController {
       const why = err instanceof Error ? err.message : String(err);
       if (mode === "engine") throw new Error(`engine input is not available: ${why}`, { cause: err });
       if (!(await engine.reachable().catch(() => false))) {
+        if (noKeyboard) throw new Error(`engine input is not available (${why}), and the keyboard route is unavailable: ${noKeyboard}`, { cause: err });
         this.inputNote = `engine route not used: ${why}`;
         await this.#use(this.#keyboard);
         return "keyboard";
@@ -1636,7 +1640,8 @@ export class PlayerController {
   /**
    * Run one action. An aborted `signal` stops it promptly, releases every key and button and returns "cancelled".
    * When the engine route fails during the action, everything is let go, the controller switches to the keyboard
-   * for good (until `selectInput` again) and the action runs again from the start; the message says so.
+   * for good (until `selectInput` again) and the action runs again from the start; the message says so. A game with
+   * no keyboard route (`PlayerInput.unavailable`) fails the action instead, with the engine error and why.
    * On the engine route, an action does not start while the user holds control (F9), and one that runs when the user
    * takes control stops, lets go of everything and fails with TAKEOVER_MESSAGE.
    */
@@ -1676,6 +1681,8 @@ export class PlayerController {
         await this.releaseAll();
         if (signal?.aborted) return result(false, "cancelled", kind);
         if (!(err instanceof EngineInputError) || kind !== "engine") return result(false, text(err), kind);
+        const noKeyboard = this.world.input.unavailable;
+        if (noKeyboard) return result(false, `engine input failed (${err.message}), and the keyboard route is unavailable: ${noKeyboard}`, "engine");
         await this.#use(this.#keyboard);
         const note = `engine input failed (${err.message}), finished with keyboard input`;
         try {

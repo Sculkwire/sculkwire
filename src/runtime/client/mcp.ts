@@ -623,8 +623,9 @@ export function register(server: McpServer): void {
         "goal_done or the time limit. `play` runs in the background and the call returns at once with a job id. " +
         "Follow it with player_job (status, wait, stop), which returns the stop reason, kills, hits, critical hits, " +
         "damage taken and a trace of every tactic once it ends. `play` must be the last action. Only one play job runs at a time, a new one " +
-        "stops the old one, and other actions are refused while one runs. Needs game_launch with display window or " +
-        "headless on Linux, or any display on Windows.",
+        "stops the old one, and other actions are refused while one runs. The keyboard route needs game_launch with " +
+        "display window or headless on Linux, or any display on Windows; with the in-game agent attached, the engine " +
+        "route also drives a Linux desktop-mode game (input auto or engine; keyboard is refused there).",
       inputSchema: {
         actions: z.array(actionSchema).min(1).max(50),
         continueOnError: z.boolean().optional(),

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { drive, fakeClock, seededRandom } from "../../testing/faketime.ts";
-import type { PlayerInput } from "./launcher.ts";
+import { unavailableInput, type PlayerInput } from "./launcher.ts";
 import {
   angleDiff,
   estimateVelocity,
@@ -504,5 +504,29 @@ describe("PlayerController on the engine route", () => {
     expect(pc.input).toBe("keyboard");
     // The next action stays on the keyboard until the route is picked again.
     expect(await pc.run({ action: "look_at", yaw: -100, pitch: 30 })).toMatchObject({ ok: true, input: "keyboard" });
+  });
+  it("drives a game without a keyboard route (a Linux desktop window) on the engine alone", async () => {
+    const reason = "player control needs window or off-screen mode on Linux (game_launch with display: window or headless), or Windows";
+    const game = (engine: { failAfter?: number; prepareFails?: boolean }) => {
+      const fake = fakeWorld(0.26, { latencyMs: 20, engine });
+      return { ...fake, world: { ...fake.world, input: unavailableInput(reason) } };
+    };
+    const { world, s } = game({});
+    const pc = new PlayerController(world);
+    expect(await pc.selectInput("auto")).toBe("engine");
+    expect(await pc.run({ action: "look_at", yaw: 60, pitch: 10 })).toMatchObject({ ok: true, input: "engine" });
+    expect(Math.abs(angleDiff(s.rotation.y, 60))).toBeLessThanOrEqual(2);
+    await expect(pc.selectInput("keyboard")).rejects.toThrow(reason);
+    // An agent that does not answer leaves no route at all.
+    await expect(new PlayerController(game({ prepareFails: true }).world).selectInput("auto")).rejects.toThrow(
+      `engine input is not available (not_attached: no agent is listening), and the keyboard route is unavailable: ${reason}`,
+    );
+    // An engine failure mid-action fails the action instead of redoing it on a keyboard that is not there.
+    const failing = new PlayerController(game({ failAfter: 5 }).world);
+    await failing.selectInput();
+    const r = await failing.run({ action: "look_at", yaw: -120, pitch: 30 });
+    expect(r).toMatchObject({ ok: false, input: "engine" });
+    expect(r.message).toBe(`engine input failed (disconnected: agent closed the connection), and the keyboard route is unavailable: ${reason}`);
+    await failing.releaseAll();
   });
 });

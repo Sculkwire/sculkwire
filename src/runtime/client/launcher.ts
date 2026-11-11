@@ -573,6 +573,17 @@ export interface PlayerInput {
   close?(): void;
   /** Windows: the foreground the input depends on. Absent where input does not need it (gamescope). */
   foreground?: ForegroundGate;
+  /** Why this game has no keyboard and mouse route (a Linux desktop window); every method then rejects with it. */
+  unavailable?: string;
+}
+
+/**
+ * The keyboard and mouse route of a game that has none, for a player driven through the engine route alone: every
+ * call rejects with `reason`, and `close` does nothing.
+ */
+export function unavailableInput(reason: string): PlayerInput {
+  const refuse = async (): Promise<never> => Promise.reject(new Error(reason));
+  return { keyDown: refuse, keyUp: refuse, look: refuse, button: refuse, close: () => undefined, unavailable: reason };
 }
 
 /**
