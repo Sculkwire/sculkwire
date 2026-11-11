@@ -1,4 +1,5 @@
 /** Per-scenario aggregates and the markdown table the bench prints. Pure, so the tests check the numbers. */
+import type { WorldEntry } from "../bridge.ts";
 import type { StalenessSummary } from "../entitystream.ts";
 import type { Metric, RunOutcome } from "./types.ts";
 import type { BenchStance } from "./stance.ts";
@@ -11,8 +12,12 @@ export interface RunRecord {
   extra: Record<string, Metric>;
   /** The play trace's tactic summary or the action message, for reading failures. */
   note: string;
+  /** The goal the run's `play` pursued (a scenario with `goals` plays one phrasing per run). */
+  goal?: string;
   /** What the fight saw around every hit the player took (`CombatStats.events`), for finding out why it landed. */
   trace?: string[];
+  /** Each task step of the plan: a header (kind, clause, status, failure reason and message) and its action lines, at most 60 lines. */
+  steps?: string[];
 }
 
 export interface ScenarioReport {
@@ -99,4 +104,15 @@ export function markdownTable(reports: readonly ScenarioReport[]): string {
     return `| ${r.scenario} | ${r.input} |${views ? ` ${r.view ?? ""} |` : ""}${stances ? ` ${r.stance ?? ""} |` : ""} ${s.successes}/${s.runs} | ${s.avgTimeS} | ${s.avgDamage} | ${s.avgHealthLeft} | ${s.minHealthLeft} | ${s.deaths} | ${s.kills} | ${s.lost} | ${s.blastDamage} | ${s.falls} | ${extra} |`;
   });
   return [head, rule, ...rows].join("\n");
+}
+
+/**
+ * How the bench's world was reached, from whatever knows (the bridge's `entry()`): the report's `entry` field and the
+ * line under the table.
+ */
+export function worldEntryOf(source: { entry(): WorldEntry | undefined }): { entry?: WorldEntry; footer: string } {
+  const entry = source.entry();
+  if (!entry) return { footer: "World entry: not recorded (the world never turned ready)" };
+  const clicks = entry.clicks !== undefined ? `, ${entry.clicks} inputs walking the menus` : "";
+  return { entry, footer: `World entry: ${entry.by} in ${entry.seconds} s from the bridge's start${clicks}` };
 }

@@ -112,6 +112,13 @@ export function summonCommand(m: MobSpawn, origin: Vec3): string {
   return `summon ${t} ${at.x + 0.5} ${at.y} ${at.z + 0.5}${event ? ` 0 0 ${event}` : ""}`;
 }
 
+/** Puts `m.held` into the main hand of the mob just summoned at `m.at` (the nearest of its type within 2 blocks). */
+export function heldCommand(m: MobSpawn, origin: Vec3): string | undefined {
+  if (!m.held) return undefined;
+  const at = offsetAt(origin, m.at);
+  return `replaceitem entity @e[type=${typeId(m.type).replace(/^minecraft:/, "")},x=${at.x + 0.5},y=${at.y},z=${at.z + 0.5},r=2,c=1] slot.weapon.mainhand 0 ${m.held}`;
+}
+
 /** Every entity but players in and around the arena, for the reset between runs. */
 export function clearMobsCommand(s: Pick<Scenario, "area">, origin: Vec3): string {
   return `kill @e[type=!player,x=${origin.x},y=${origin.y},z=${origin.z},r=${s.area.radius + 24}]`;

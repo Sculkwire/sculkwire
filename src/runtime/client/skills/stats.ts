@@ -5,18 +5,7 @@
  * for its per-run trace.
  */
 import type { PlayerController } from "../player.ts";
-import type { Stance } from "./pack.ts";
 import type { FightStats } from "./types.ts";
-
-/** What the fight opens with against a far target: the bow (any hostile) or, as by default, melee (the bow only on a creeper). */
-export type Opener = "melee" | "bow";
-
-/** Standing orders `play` sets while a fight runs (its plan-level adviser); the fight reads them every tick. */
-export interface StandingOrders {
-  /** Overrides the fight action's stance while set. */
-  stance?: Stance;
-  opener?: Opener;
-}
 
 /** One mob as a fight tick saw it. */
 export interface TraceMob {
@@ -103,8 +92,6 @@ export interface CombatStats {
    * was taken as lit (the hands' clock). Kept across duels, so a fight that turns to a creeper knows it lit.
    */
   creepers: Map<string, { closeAt?: number; fuseSince?: number }>;
-  /** Standing orders from `play`; unset: the fight decides as it always does. */
-  orders?: StandingOrders;
   /** One frame per fight tick, oldest first, at most `MAX_TRACE_FRAMES`; present only while tracing is on. */
   trace?: TraceFrame[];
 }

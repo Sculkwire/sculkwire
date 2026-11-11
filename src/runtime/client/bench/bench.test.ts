@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { arenaCommands, arenaOrigin, FILL_LIMIT, fillBox, playerCommands, summonCommand } from "./arena.ts";
-import { markdownTable, summarize, type RunRecord } from "./report.ts";
-import { loadScenarios, tracePathFor } from "./run.ts";
+import { markdownTable, summarize, worldEntryOf, type RunRecord } from "./report.ts";
+import { CommandWrong, loadScenarios, tracePathFor, withPhrasing, wrongCommand } from "./run.ts";
 import cornered, { pen } from "./scenarios/combat-cornered.ts";
 import husks3 from "./scenarios/combat-husks3.ts";
 import mixed from "./scenarios/combat-mixed.ts";
@@ -12,7 +12,8 @@ import type { BenchContext, RunOutcome } from "./types.ts";
 import { parseViews, viewValue } from "./view.ts";
 import type { EntityInfo } from "../player.ts";
 import { parseGoal } from "../skills/goal.ts";
-import type { PlayAction } from "../skills/play.ts";
+import type { PlayAction, PlayResult } from "../skills/play.ts";
+import { offerText, planStepLines } from "./plankit.ts";
 import type { TraceFrame, TraceMob } from "../skills/stats.ts";
 
 describe("arena commands", () => {
@@ -37,6 +38,53 @@ describe("arena commands", () => {
     expect(p).toContain("replaceitem entity @a slot.weapon.offhand 0 minecraft:shield 1");
     expect(p.at(-1)).toBe(`tp @a ${o.x + 0.5} ${o.y} ${o.z + 0.5} 0 0`);
     expect(summonCommand({ type: "zombie", at: { dx: 0, dy: 0, dz: 10 } }, o)).toBe(`summon minecraft:zombie ${o.x + 0.5} ${o.y} ${o.z + 10.5} 0 0 minecraft:as_adult`);
+  });
+});
+
+describe("build commands", () => {
+  const LINE = "summon minecraft:villager_v2 5480.5 -60 1004.5 0 0 minecraft:spawn_farmer";
+  const SYNTAX = 'Syntax error: Unexpected "minecraft:villager_v2": at "summon >>minecraft:villager_v2<< 5480.5 -6"';
+  it("turns a syntax error into the run's failure with the game's text, whatever the success flag said", () => {
+    const wrong = wrongCommand(LINE, [SYNTAX]);
+    expect(wrong).toBeInstanceOf(CommandWrong);
+    expect(wrong?.message).toBe(`/${LINE} failed: ${SYNTAX}`);
+    expect(wrongCommand("summon x", ["", SYNTAX])).toBeInstanceOf(CommandWrong);
+    expect(wrongCommand("frobnicate", ["Unknown command: frobnicate. Please check that the command exists"])).toBeInstanceOf(CommandWrong);
+  });
+  it("lets a command that found nothing to change pass", () => {
+    expect(wrongCommand("kill @e[type=!player]", ["No targets matched selector"])).toBeUndefined();
+    expect(wrongCommand("fill 0 0 0 1 1 1 air", ["0 blocks filled"])).toBeUndefined();
+  });
+  it("summons villagers by the name the summon command takes (villager, not villager_v2)", async () => {
+    const o = arenaOrigin(2);
+    const ctx = { origin: o, at: (x: { dx: number; dy: number; dz: number }) => ({ x: o.x + x.dx, y: o.y + x.dy, z: o.z + x.dz }) } as BenchContext;
+    const summons = (await loadScenarios()).flatMap((s) => ("build" in s && s.build ? s.build(ctx) : [])).filter((line) => line.startsWith("summon "));
+    expect(summons.some((line) => line.startsWith("summon minecraft:villager "))).toBe(true);
+    expect(summons.filter((line) => /_v2\b/.test(line))).toEqual([]);
+  });
+  it("fixes the trade villager's profession with become_farmer and reports what it offered", async () => {
+    const trade = (await loadScenarios()).find((s) => s.suite === "task" && s.name === "trade");
+    const o = arenaOrigin(2);
+    const ctx = { origin: o, at: (x: { dx: number; dy: number; dz: number }) => ({ x: o.x + x.dx, y: o.y + x.dy, z: o.z + x.dz }) } as BenchContext;
+    const build = trade && "build" in trade && trade.build ? trade.build(ctx) : [];
+    expect(build.filter((line) => line.startsWith("summon "))).toEqual([`summon minecraft:villager ${o.x + 0.5} ${o.y} ${o.z + 4.5} 0 0 minecraft:become_farmer`]);
+    const line = "offers of the villager at 1 64 4: 1 emerald for 32 stick; 6 bread for 1 emerald";
+    const play = { plan: [{ text: "trade for an emerald", kind: "trade", by: "builtin", status: "failed", ok: false, message: "", ms: 1, actions: ["walked to the villager at 1 64 4", line] }] } as unknown as PlayResult;
+    expect(offerText(play)).toBe(line);
+    expect(offerText(undefined)).toBe("");
+  });
+  it("writes each task step's header and actions into the run record, at most 60 lines", () => {
+    const play = {
+      plan: [
+        { text: "fetch all diamonds", kind: "fetch", by: "builtin", status: "failed", ok: false, message: "took 1 of the 3 diamond", ms: 1, reason: "not_found", actions: ["walked to the chest at 3 64 4", "moved 1 diamond"] },
+        { text: "go home", kind: "free", by: "builtin", status: "pending", ok: false, message: "", ms: 0 },
+      ],
+    } as unknown as PlayResult;
+    expect(planStepLines(play)).toEqual(['fetch "fetch all diamonds": failed not_found: took 1 of the 3 diamond', "  walked to the chest at 3 64 4", "  moved 1 diamond"]);
+    const long = { plan: [{ text: "t", kind: "fetch", by: "builtin", status: "done", ok: true, message: "ok", ms: 1, actions: Array.from({ length: 100 }, (_, i) => `a${i}`) }] } as unknown as PlayResult;
+    const lines = planStepLines(long);
+    expect(lines).toHaveLength(60);
+    expect(lines.at(-1)).toBe("... 42 more lines");
   });
 });
 
@@ -96,6 +144,33 @@ describe("stances", () => {
     expect(withStance({ action: "fight", target: "zombie" }, "kite")).toEqual({ action: "fight", target: "zombie", stance: "kite" });
     expect(withStance({ action: "goto", x: 1, z: 2 }, "kite")).toEqual({ action: "goto", x: 1, z: 2 });
     expect(withStance({ action: "play", goal: "kill 3 husks" }, undefined)).toEqual({ action: "play", goal: "kill 3 husks" });
+  });
+});
+
+describe("phrasings", () => {
+  it("plays phrasing i on run i, and leaves other actions alone", () => {
+    const goals = ["a", "b", "c"];
+    expect([1, 2, 3, 4].map((run) => (withPhrasing({ action: "play", goal: "x" }, goals, run) as PlayAction).goal)).toEqual(["a", "b", "c", "a"]);
+    expect(withPhrasing({ action: "goto", x: 1, z: 2 }, goals, 1)).toEqual({ action: "goto", x: 1, z: 2 });
+  });
+  it("gives every goal and task scenario ten different phrasings", async () => {
+    const all = await loadScenarios();
+    const phrased = all.filter((s) => s.suite === "goal" || s.suite === "task");
+    expect(phrased.map((s) => `${s.suite}/${s.name}`).sort()).toEqual([
+      "goal/kill-phrased",
+      "goal/reach-phrased",
+      "goal/two-step",
+      "task/blocked-chest",
+      "task/blocked-chest-villager",
+      "task/far-table",
+      "task/nested-shulker",
+      "task/smelt-craft",
+      "task/trade",
+    ]);
+    for (const s of phrased) {
+      const goals = "goals" in s ? (s.goals ?? []) : [];
+      expect(new Set(goals).size).toBe(10);
+    }
   });
 });
 
@@ -279,5 +354,17 @@ describe("spawned mobs", () => {
     expect(countKills(spawns, found, extra)).toEqual({ resolved: 1, unresolved: 2 });
     // Every spawn resolved: other player kills of the type do not count.
     expect(countKills(spawns, [found[0], { id: "b", typeId: "minecraft:husk" }, { id: "c", typeId: "minecraft:husk" }], extra)).toEqual({ resolved: 1, unresolved: 0 });
+  });
+});
+
+describe("world entry", () => {
+  it("reports how the bridge reached the world, and says so when it never did", () => {
+    const walked = worldEntryOf({ entry: () => ({ by: "auto-enter", seconds: 146.4, clicks: 3 }) });
+    expect(walked.entry).toEqual({ by: "auto-enter", seconds: 146.4, clicks: 3 });
+    expect(walked.footer).toBe("World entry: auto-enter in 146.4 s from the bridge's start, 3 inputs walking the menus");
+    expect(worldEntryOf({ entry: () => ({ by: "launch", seconds: 41 }) }).footer).toBe("World entry: launch in 41 s from the bridge's start");
+    const never = worldEntryOf({ entry: () => undefined });
+    expect(never.entry).toBeUndefined();
+    expect(never.footer).toMatch(/not recorded/);
   });
 });

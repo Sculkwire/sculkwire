@@ -1,9 +1,10 @@
 /**
  * The bench runner: launch a sculkwire world (waiting for the user on an install they start by hand), attach the
  * input provider when one is installed, set the camera for each `--view`, then for every `--stance`, scenario and run
- * clear and build its arena, set the player up, spawn the mobs (before the action, or during it with `spawnAfterMs`),
- * run the action or `play` goal (with the stance) with the fight's per-tick trace on, measure, and reset. Ends with
- * the camera put back and the game stopped (unless asked to keep it).
+ * clear and build its arena, set the player up, spawn the mobs (before the action, or during it with
+ * `spawnAfterMs`), run the action or `play` goal (with the stance and, for a scenario with `goals`, the run's
+ * phrasing) with the fight's per-tick trace on, measure, and reset. Ends with the camera put back
+ * and the game stopped (unless asked to keep it). The report says how the world was reached (`entry`).
  */
 import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -13,16 +14,18 @@ import { cacheDir } from "../../../core/paths.ts";
 import { engine, type GameSetting, type SettingValue } from "../../engine/engine.ts";
 import { getSetting, setSetting } from "../../engine/settings.ts";
 import { inputProvider } from "../inputprovider.ts";
-import { bridge, type BridgeStatus } from "../bridge.ts";
+import { bridge, type BridgeStatus, type WorldEntry } from "../bridge.ts";
 import type { LaunchMode } from "../launcher.ts";
 import { FOREGROUND_MESSAGE } from "../windows.ts";
 import type { ActionResult, EntityInfo, InputMode, Loadout, PlayerAction, PlayerController } from "../player.ts";
-import { play, type Death, type PlayAction, type PlayResult } from "../skills/play.ts";
+import { play, type Death, type PlayAction, type PlayEnvironment, type PlayResult } from "../skills/play.ts";
 import { combatStats, traceFights, type TraceFrame } from "../skills/stats.ts";
-import { arenaCommands, arenaOrigin, clearMobsCommand, offsetAt, playerCommands, summonCommand, WORLD_RULES } from "./arena.ts";
-import { markdownTable, summarize, type RunRecord, type ScenarioReport } from "./report.ts";
+import { arenaCommands, arenaOrigin, clearMobsCommand, heldCommand, offsetAt, playerCommands, summonCommand, WORLD_RULES } from "./arena.ts";
+import { markdownTable, summarize, worldEntryOf, type RunRecord, type ScenarioReport } from "./report.ts";
+import { planStepLines } from "./plankit.ts";
 import { claimSpawned, countKills, SPAWN_FIND_MS, SPAWN_POLL_MS, type SpawnedMob } from "./spawns.ts";
 import { withStance, type BenchStance } from "./stance.ts";
+import { liveTaskEnv } from "../tasks/live.ts";
 import type { BenchContext, Hurt, Metric, RunOutcome, Scenario } from "./types.ts";
 import { VIEW_OPTION, viewValue, type BenchView } from "./view.ts";
 
@@ -76,6 +79,8 @@ export interface BenchReport {
   suite: string;
   startedAt: string;
   input: string;
+  /** How the world was reached: launched into, walked into by sculkwire, opened by hand, or already open. */
+  entry?: WorldEntry;
   reports: ScenarioReport[];
   table: string;
   jsonPath: string;
@@ -91,7 +96,19 @@ let route: "auto" | "debugger" = "auto";
  * a failure (`No targets matched`, `0 blocks filled`, `no items to remove`, a door half already placed), which the
  * reset hits every run, so only these count.
  */
-const COMMAND_WRONG = /^Syntax error|^Unknown command/i;
+const COMMAND_WRONG = /^\s*(Syntax error|Unknown command)/im;
+
+/** A build or reset command the game could not parse: retrying it cannot help, and the run must not go on. */
+export class CommandWrong extends Error {}
+
+/**
+ * The error for a command whose answer says it is wrong (`Syntax error: ...`, `Unknown command: ...`), whatever the
+ * route's success flag says; undefined for any other answer.
+ */
+export function wrongCommand(line: string, output: readonly string[]): CommandWrong | undefined {
+  const wrong = output.find((text) => COMMAND_WRONG.test(text));
+  return wrong === undefined ? undefined : new CommandWrong(`/${line} failed: ${output.join(" ")}`);
+}
 
 /**
  * Whether commands go through the in-game agent: it runs a command on the game's next tick and answers with its
@@ -103,7 +120,8 @@ async function command(line: string): Promise<void> {
   if (agentCommands) {
     const done = await engine.command(line);
     if (done.ok) {
-      if (done.value.success === false && COMMAND_WRONG.test(done.value.message)) throw new Error(`/${line} failed: ${done.value.message}`);
+      const wrong = wrongCommand(line, [done.value.message ?? ""]);
+      if (wrong) throw wrong;
       return;
     }
     // The agent stopped answering (a screen over the HUD, an unload): the bridge's routes from here on.
@@ -117,7 +135,8 @@ async function command(line: string): Promise<void> {
     route = "debugger";
     r = await bridge.command(line, route);
   }
-  if (!r.ok && r.output.some((o) => COMMAND_WRONG.test(o))) throw new Error(`/${line} failed: ${r.output.join(" ")}`);
+  const wrong = wrongCommand(line, r.output);
+  if (wrong) throw wrong;
 }
 
 /** Commands that touch blocks fail while the chunks load: retry a few times. */
@@ -127,7 +146,7 @@ async function commandRetry(line: string, tries = 6): Promise<void> {
       await command(line);
       return;
     } catch (err) {
-      if (i >= tries) throw err;
+      if (err instanceof CommandWrong || i >= tries) throw err;
       await sleep(500);
     }
   }
@@ -141,12 +160,13 @@ async function deathsSince(since: number): Promise<{ tick: number; deaths: Death
   return (await bridge.query("deaths", { since })) as { tick: number; deaths: Death[] };
 }
 
-function playEnv(controller: PlayerController) {
+function playEnv(controller: PlayerController, plan: Pick<PlayEnvironment, "tasks">): PlayEnvironment {
   return {
     controller,
     entities: async (radius: number) => (controller.world.entities ? controller.world.entities(radius) : ((await bridge.query("entities", { radius, limit: 50 })) as EntityInfo[])),
     loadout: async () => (await bridge.query("loadout")) as Loadout,
     deaths: (since: number) => deathsSince(since),
+    ...plan,
   };
 }
 
@@ -175,7 +195,18 @@ function shortNote(play: PlayResult | undefined, action: ActionResult | undefine
   return action ? action.message : "";
 }
 
-async function runOnce(s: Scenario, index: number, run: number, controller: PlayerController, log: (l: string) => void, stance?: BenchStance): Promise<{ record: RunRecord; frames?: TraceFrame[] }> {
+/** Run `run` (1-based) of a scenario with `goals` plays phrasing `run`, wrapping around; without `goals` the action is unchanged. */
+export function withPhrasing(spec: PlayerAction | PlayAction, goals: readonly string[] | undefined, run: number): PlayerAction | PlayAction {
+  if (!goals?.length || spec.action !== "play") return spec;
+  return { ...spec, goal: goals[(run - 1) % goals.length] as string };
+}
+
+interface RunOptions {
+  stance?: BenchStance | undefined;
+  plan: Pick<PlayEnvironment, "tasks">;
+}
+
+async function runOnce(s: Scenario, index: number, run: number, controller: PlayerController, log: (l: string) => void, opts: RunOptions): Promise<{ record: RunRecord; frames?: TraceFrame[] }> {
   const origin = arenaOrigin(index);
   const at = (o: { dx: number; dy: number; dz: number }) => offsetAt(origin, o);
   const start = at(s.player.at ?? { dx: 0, dy: 0, dz: 0 });
@@ -207,7 +238,11 @@ async function runOnce(s: Scenario, index: number, run: number, controller: Play
   let found: (SpawnedMob | undefined)[] = (s.mobs ?? []).map(() => undefined);
   const spawn = async () => {
     const mobs = s.mobs ?? [];
-    for (const m of mobs) await commandRetry(summonCommand(m, origin));
+    for (const m of mobs) {
+      await commandRetry(summonCommand(m, origin));
+      const held = heldCommand(m, origin);
+      if (held) await commandRetry(held);
+    }
     // Look right away and every SPAWN_POLL_MS until every spawn is claimed: slow summons and quick kills both happen.
     const deadline = Date.now() + SPAWN_FIND_MS;
     while (mobs.length > 0) {
@@ -224,7 +259,7 @@ async function runOnce(s: Scenario, index: number, run: number, controller: Play
   const hurtTick = (await hurtsSince(Number.MAX_SAFE_INTEGER))?.tick;
   const deathTick = (await deathsSince(Number.MAX_SAFE_INTEGER)).tick;
   const healthStart = before.health ?? 20;
-  const spec = withStance(s.action(ctx), stance);
+  const spec = withPhrasing(withStance(s.action(ctx), opts.stance), s.goals, run);
   const ctrl = new AbortController();
   let died = false;
   let lowest = healthStart;
@@ -264,7 +299,7 @@ async function runOnce(s: Scenario, index: number, run: number, controller: Play
           });
   try {
     if (spec.action === "play") {
-      played = await play({ ...(spec as PlayAction), durationMs: (spec as PlayAction).durationMs ?? s.timeoutMs }, playEnv(controller), { signal: ctrl.signal });
+      played = await play({ ...(spec as PlayAction), durationMs: (spec as PlayAction).durationMs ?? s.timeoutMs }, playEnv(controller, opts.plan), { signal: ctrl.signal });
     } else {
       action = await controller.run(spec as PlayerAction, ctrl.signal);
     }
@@ -319,14 +354,19 @@ async function runOnce(s: Scenario, index: number, run: number, controller: Play
   const success = s.success ? s.success(outcome, extra) : outcome.ok && outcome.deaths === 0;
   const note = shortNote(played, action);
   log(
-    `${s.name} run ${run}: ${success ? "ok" : "FAIL"} in ${(durationMs / 1000).toFixed(1)} s, health ${healthStart} -> ${healthEnd}, ` +
+    `${s.name} run ${run}: ${success ? "ok" : "FAIL"} in ${(durationMs / 1000).toFixed(1)} s${s.goals ? ` ("${(spec as PlayAction).goal}")` : ""}, health ${healthStart} -> ${healthEnd}, ` +
       `damage ${outcome.damageTaken}${outcome.blastDamage ? ` (blast ${outcome.blastDamage})` : ""}, kills ${kills}, lost ${outcome.lost}, deaths ${playerDeaths}. ${note}`,
   );
   await command(clearMobsCommand(s, origin)).catch(() => undefined);
   const { hurts: _h, state: _s, action: _a, play: _p, frames: _f, ...rest } = outcome;
   // The helper's hurt log (who hit, how hard) and what the fight saw around each hit.
   const trace = played ? [...hurts.map((h) => `hurt tick ${h.tick} ${h.damage} by ${h.damager ?? h.cause ?? "?"}`), ...combatStats(controller).events] : [];
-  return { record: { run, success, outcome: { ...rest, hurts: hurts.length }, extra, note, ...(trace.length ? { trace } : {}) }, ...(frames ? { frames } : {}) };
+  const goal = spec.action === "play" ? (spec as PlayAction).goal : undefined;
+  const steps = planStepLines(played);
+  return {
+    record: { run, success, outcome: { ...rest, hurts: hurts.length }, extra, note, ...(goal ? { goal } : {}), ...(trace.length ? { trace } : {}), ...(steps.length ? { steps } : {}) },
+    ...(frames ? { frames } : {}),
+  };
 }
 
 /** A bench option that cannot work in this setup (exit 2), e.g. `--view` with no in-game agent to change the option. */
@@ -341,7 +381,7 @@ const WAIT_POLL_MS = 2000;
  */
 async function waitForWorld(status: BridgeStatus, waitS: number, log: (l: string) => void): Promise<void> {
   if (status.ready) return;
-  log(`start the game yourself and open the world ${status.world ?? "sculkwire-bench"}; waiting up to ${waitS} s (--wait)`);
+  log(`waiting up to ${waitS} s (--wait) for the world ${status.world ?? "sculkwire-bench"}; to do:`);
   const shown = new Set<string>();
   const show = (steps: readonly string[]) => {
     for (const step of steps) {
@@ -426,10 +466,15 @@ export async function runBench(opts: BenchOptions): Promise<BenchReport> {
   const reports: ScenarioReport[] = [];
   const traces: BenchTrace[] = [];
   let originalView: GameSetting | undefined;
+  let entry = worldEntryOf(bridge);
   try {
     await waitForWorld(started, opts.waitS ?? DEFAULT_WAIT_S, log);
+    entry = worldEntryOf(bridge);
+    log(entry.footer);
     await attachProvider(opts.input, log);
     const controller = bridge.playerController();
+    // The task steps' environment every `play` run uses.
+    const plan: Pick<PlayEnvironment, "tasks"> = { tasks: () => liveTaskEnv({ controller }) };
     const input = await controller.selectInput(opts.input);
     log(`input: ${input}`);
     agentCommands = input === "engine" && (await engine.reachable());
@@ -461,7 +506,7 @@ export async function runBench(opts: BenchOptions): Promise<BenchReport> {
           for (let run = 1; run <= n; run++) {
             try {
               if (gate?.userHasControl) throw new Error(`${FOREGROUND_MESSAGE}; bring it back to the front for the remaining runs`);
-              const done = await runOnce(s, index, run, controller, log, stance);
+              const done = await runOnce(s, index, run, controller, log, { stance, plan });
               runs.push(done.record);
               if (done.frames) traces.push({ scenario: s.name, ...(view ? { view } : {}), ...(stance ? { stance } : {}), run, frames: done.frames });
             } catch (err) {
@@ -498,12 +543,21 @@ export async function runBench(opts: BenchOptions): Promise<BenchReport> {
     }
     if (!opts.keep) await bridge.stop().catch((err: unknown) => log(`stopping the game failed: ${err instanceof Error ? err.message : String(err)}`));
   }
-  const table = markdownTable(reports);
+  const table = `${markdownTable(reports)}\n\n${entry.footer}`;
   const stamp = startedAt.replace(/[:.]/g, "-");
   const jsonPath = cacheDir("bench", `${opts.suite}${opts.scenario ? `-${opts.scenario.replace(/,/g, "+")}` : ""}-${stamp}.json`);
   await mkdir(dirname(jsonPath), { recursive: true });
   const tracePath = traces.length ? tracePathFor(jsonPath) : undefined;
-  const report: BenchReport = { suite: opts.suite, startedAt, input: reports[0]?.input ?? opts.input, reports, table, jsonPath, ...(tracePath ? { tracePath } : {}) };
+  const report: BenchReport = {
+    suite: opts.suite,
+    startedAt,
+    input: reports[0]?.input ?? opts.input,
+    ...(entry.entry ? { entry: entry.entry } : {}),
+    reports,
+    table,
+    jsonPath,
+    ...(tracePath ? { tracePath } : {}),
+  };
   if (tracePath) await writeFile(tracePath, `${JSON.stringify(traces)}\n`);
   await writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`);
   return report;

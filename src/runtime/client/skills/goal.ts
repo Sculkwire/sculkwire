@@ -18,8 +18,8 @@ export const GOAL_RADIUS = 24;
 const PASSIVE = ["cow", "pig", "sheep", "chicken", "rabbit", "horse", "donkey", "mule", "llama", "goat", "villager", "cat", "fox", "parrot", "panda", "turtle", "frog", "armadillo", "camel", "sniffer", "axolotl", "squid", "mooshroom", "ocelot", "bat", "strider", "allay", "dolphin", "cod", "salmon", "tropicalfish", "pufferfish", "trader_llama", "wandering_trader", "snow_golem"];
 const KNOWN = new Set([...Object.keys(MOBS), ...PASSIVE]);
 const IRREGULAR: Record<string, string> = { endermen: "enderman", wolves: "wolf", sheep: "sheep", fish: "cod", mice: "silverfish", "zombie pigmen": "zombified_piglin", "zombified piglins": "zombified_piglin" };
-const NUMBERS: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
-const HOSTILE_WORDS = /\b(hostile mobs?|hostiles|monsters?|enemies|enemy|mobs)\b/;
+export const NUMBERS: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+export const HOSTILE_WORDS = /\b(hostile mobs?|hostiles|monsters?|enemies|enemy|mobs)\b/;
 
 /** `zombies` -> `zombie`, `cave spiders` -> `cave_spider`, or undefined when it is not a mob. */
 export function mobType(words: string): string | undefined {
@@ -31,7 +31,7 @@ export function mobType(words: string): string | undefined {
 }
 
 /** The first mob named in `text`, its words, and whether it was plural. */
-function findMob(text: string): { type: string; plural: boolean; index: number } | undefined {
+export function findMob(text: string): { type: string; plural: boolean; index: number } | undefined {
   const words = text.split(/[^a-z_]+/).filter(Boolean);
   for (let i = 0; i < words.length; i++) {
     for (const n of [2, 1]) {

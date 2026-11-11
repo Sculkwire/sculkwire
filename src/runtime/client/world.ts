@@ -5,7 +5,7 @@
 import { cp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readLevelDat, TAG, writeLevelDat } from "../bds/nbt.ts";
+import { TAG, writeLevelDat } from "../bds/nbt.ts";
 import type { NbtCompound, NbtTag } from "../bds/nbt.ts";
 import { parseGameVersion } from "../../core/version.ts";
 import { ICON_FILE, worldIcon } from "./icon.ts";
@@ -178,20 +178,6 @@ export async function listWorlds(install: ClientInstall): Promise<CreatedWorld[]
 export async function writeWorldIcon(world: CreatedWorld): Promise<void> {
   if (!world.levelId.startsWith(WORLD_PREFIX)) throw new Error(`refusing to write into world folder ${world.levelId}`);
   await writeFile(join(world.dir, ICON_FILE), worldIcon(world.levelId));
-}
-
-/**
- * Make a `sculkwire-` world the most recently played one (`LastPlayed` now), so the Play screen lists it first. Only
- * for a world the game does not have loaded (`loaded` is the level id it has open): the game rewrites level.dat itself
- * while a world is open.
- */
-export async function markPlayedLast(world: CreatedWorld, loaded: string | undefined): Promise<void> {
-  if (!world.name.startsWith(WORLD_PREFIX) || !world.levelId.startsWith(WORLD_PREFIX)) throw new Error(`refusing to change non-sculkwire world ${world.name}`);
-  if (world.levelId === loaded) throw new Error(`refusing to change ${world.name} while the game has it loaded`);
-  const file = join(world.dir, "level.dat");
-  const level = readLevelDat(new Uint8Array(await readFile(file)));
-  level.root.set("LastPlayed", long(BigInt(Math.floor(Date.now() / 1000))));
-  await writeFile(file, writeLevelDat(level));
 }
 
 /** Remove a world this tool created (name must carry the prefix). */

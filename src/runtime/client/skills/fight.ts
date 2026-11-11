@@ -9,7 +9,7 @@
  * lighting its fuse (about 3 blocks) and gets out past 7 blocks, shield up, once it burns, shoots a creeper from range
  * when there is a bow, weaves toward archers, waits for a leaping spider to land, and moves on to the next hostile.
  */
-import { angleDiff, horizontalDistance, turnDurationMs, yawTo, type EntityInfo, type Follow, type Loadout, type PlayerController, type Vec3 } from "../player.ts";
+import { angleDiff, horizontalDistance, turnDurationMs, yawTo, type EntityInfo, type Follow, type Loadout, type PlayerController } from "../player.ts";
 import { navigate } from "../nav/navigate.ts";
 import { CROWD_RADIUS, crowdMove, isolated, pickDuelTarget } from "./crowd.ts";
 import { clearRun, CLOSE_IN_MARGIN, CLOSE_IN_SETTLE_MS, closeInTicks, CREEPER_MARGIN, CREEPER_STANDING, creeperStandFrom, STEP_TAP_MS, STRUCK_THROW, STRUCK_THROW_MS, CREEPER_START, CREEPER_STOP, creeperMove, critSafe, crowdedCreeper, findCover, type FuseMemory, openHeading, readyInMs, spiderAirborne, trackFuse, weaveDeg } from "./defense.ts";
@@ -47,12 +47,10 @@ const EYE_HEIGHT = 1.62;
 const REACH = 3;
 /** Shortest time between two clicks, so a missed swing is not repeated every frame. */
 const MIN_SWING_GAP_MS = 150;
-/** A bow is worth drawing on a creeper (or, with the `bow` opener, any hostile) this far away; closer, the sword. */
-export const BOW_MIN_DISTANCE = 5;
+/** A bow is worth drawing on a creeper this far away; closer, the sword. */
+const BOW_MIN_DISTANCE = 5;
 /** Toward a standing creeper the sprint stops this far out: a sprint let go carries the player on for nearly a block. */
 const SPRINT_TO = 5;
-/** The `bow` opener shoots only while no other hostile is this close. */
-export const BOW_OPEN_CLEAR = 6;
 
 export function isEntityId(s: string): boolean {
   return /^-?\d+$/.test(s);
@@ -213,8 +211,6 @@ interface FightContext {
   lastSwing: number;
   pending?: Pending;
   airborneSince?: number;
-  /** A duel handed this mob back for the `bow` opener: the loop shoots it without checking again. */
-  openBow?: string;
   /** Blocks around (walls, holes) for the footwork, cover against archers. */
   nav?: GridCache;
   navScan: number;
@@ -306,13 +302,8 @@ export async function fight(pc: PlayerController, args: FightArgs, signal?: Abor
   let cancelled = false;
   try {
     while (target) {
-      const aim = target;
-      const exploder = mobInfo(aim.typeId).kind === "exploder";
-      const opening = ctx.openBow === aim.id;
-      delete ctx.openBow;
-      if (kit.bow && (exploder || (stats.orders?.opener === "bow" && (opening || (await bowOpening(pc, aim, ctx)))))) {
-        // The `bow` opener on any other hostile stops once a second one comes within `BOW_OPEN_CLEAR`.
-        const shot = await archery(pc, target, kit.bow.slot, ctx.deadline, signal, exploder ? undefined : (me) => crowdNear(ctx, me, aim.id));
+      if (kit.bow && mobInfo(target.typeId).kind === "exploder") {
+        const shot = await archery(pc, target, kit.bow.slot, ctx.deadline, signal);
         arrows += shot.shots;
         if (shot.dead) {
           ctx.skip.add(target.id);
@@ -361,31 +352,11 @@ export async function fight(pc: PlayerController, args: FightArgs, signal?: Abor
   };
 }
 
-/** Another hostile than `target` within `BOW_OPEN_CLEAR` of the player, from the crowd the fight polls. */
-function crowdNear(ctx: FightContext, me: Vec3, target: string): boolean {
-  return ctx.crowd.some((m) => m.id !== target && horizontalDistance(me, m.location) < BOW_OPEN_CLEAR);
-}
-
-/** The `bow` opener applies: the target is farther than `BOW_MIN_DISTANCE` and no other hostile is within `BOW_OPEN_CLEAR`. */
-async function bowOpening(pc: PlayerController, target: EntityInfo, ctx: FightContext): Promise<boolean> {
-  const me = (await pc.world.state(200)).location;
-  if (horizontalDistance(me, target.location) <= BOW_MIN_DISTANCE) return false;
-  const around = (await pc.world.entities?.(BOW_OPEN_CLEAR + 1).catch(() => undefined)) ?? ctx.crowd;
-  return !around.some((m) => m.id !== target.id && isHostile(m.typeId) && horizontalDistance(me, m.location) < BOW_OPEN_CLEAR);
-}
-
 /**
  * Shoot a creeper while it is farther than `BOW_MIN_DISTANCE`, walking backward to keep the distance. Returns when
  * it is dead, gone, or too close for the bow.
  */
-async function archery(
-  pc: PlayerController,
-  target: EntityInfo,
-  slot: number,
-  deadline: number,
-  signal?: AbortSignal,
-  stop?: (me: Vec3) => boolean,
-): Promise<{ dead: boolean; shots: number }> {
+async function archery(pc: PlayerController, target: EntityInfo, slot: number, deadline: number, signal?: AbortSignal): Promise<{ dead: boolean; shots: number }> {
   const h = pc.hands;
   let shots = 0;
   if (!(await h.selectSlot(slot, signal))) return { dead: false, shots };
@@ -395,7 +366,7 @@ async function archery(
       if (!e) return { dead: shots > 0, shots };
       const s = await pc.world.state(200);
       const dist = horizontalDistance(s.location, e.location);
-      if (dist < BOW_MIN_DISTANCE || h.now() > deadline || signal?.aborted || stop?.(s.location)) return { dead: false, shots };
+      if (dist < BOW_MIN_DISTANCE || h.now() > deadline || signal?.aborted) return { dead: false, shots };
       // Back away while drawing (slowed, but it keeps the gap), unless the creeper is still far.
       await h.walk(dist < 9 ? yawTo(s.location, e.location) + 180 : undefined, false);
       const r = await pc.shoot({ entity: target.id, shots: 1, timeoutMs: 3000 }, signal);
@@ -586,12 +557,6 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
         .filter((m) => !ctx.skip.has(m.id) || m.id === target.id)
         .map((m) => (m.id === target.id ? { ...m, location: e.location } : m.velocity ? { ...m, location: { x: m.location.x + m.velocity.x * ticks, y: m.location.y, z: m.location.z + m.velocity.z * ticks } } : m));
       const mobs = polled.some((m) => m.id === target.id) ? polled : [...polled, { ...target, location: e.location }];
-      // Standing order `bow` (from `play`'s adviser): a far target with nothing close is shot first. The fight's loop
-      // runs the bow and comes back to the duel; without the order nothing here changes.
-      if (stats.orders?.opener === "bow" && kit.bow && !exploder && dist > BOW_MIN_DISTANCE && !mobs.some((m) => m.id !== target.id && horizontalDistance(s.location, m.location) < BOW_OPEN_CLEAR)) {
-        ctx.openBow = target.id;
-        return { outcome: "switch", next: target };
-      }
       // What the footwork steers around: a creeper widely (its fuse lights within 3), the others by their reach.
       const avoid = mobs.map((m) => ({ location: m.location, ...(mobInfo(m.typeId).kind === "exploder" ? { clearance: CREEPER_START + 1 } : {}) }));
       // The other creepers around: remember when they came close or lit, for a later duel against them.
@@ -807,7 +772,7 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
         }
         else await h.walk(group ? openHeading({ me: s.location, desired: group.heading, spreadDeg: 60, mobs: avoid, clear }) : toward + 90 * strafe, false);
       } else if (info.kind === "melee") {
-        const stance = stats.orders?.stance ?? ctx.stance;
+        const stance = ctx.stance;
         // `guard` steps out until its next block once its clocks left no window to swing in.
         if (ctx.stepOutSince !== undefined && (ctx.blockedAt > ctx.stepOutSince || now - ctx.stepOutSince > 2 * GUARD_STEP_OUT_MS)) delete ctx.stepOutSince;
         const mv = packMove({
@@ -952,7 +917,7 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
       // `guard` steps out after `GUARD_STEP_OUT_MS` behind the shield without a swing (the windows its clocks leave are
       // too rare or too short to strike in), when there is room.
       const unswung = ctx.blocking && ctx.disciplined ? now - Math.max(ctx.lastSwing, ctx.guardSince) : 0;
-      if ((stats.orders?.stance ?? ctx.stance) === "guard" && unswung >= GUARD_STEP_OUT_MS && ctx.room >= ROOM_NEEDED && ctx.stepOutSince === undefined) ctx.stepOutSince = now;
+      if (ctx.stance === "guard" && unswung >= GUARD_STEP_OUT_MS && ctx.room >= ROOM_NEEDED && ctx.stepOutSince === undefined) ctx.stepOutSince = now;
       const forced = !windowNow && stalled >= NO_WINDOW_MS && ctx.room < ROOM_NEEDED && now - ctx.blockedAt <= AFTER_BLOCK_MS;
       const shieldOpen = windowNow || forced;
       const onTarget = shieldOpen && mayStrike && (aimedAt || aimedClose) && hittable(target.id);

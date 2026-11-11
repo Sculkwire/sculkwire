@@ -321,7 +321,7 @@ export interface UiRecovery {
 }
 
 /** The attached agent as a `UiRecovery`, or undefined when no agent is attached (then the log and the keys are used). */
-export function engineUi(sleep: (ms: number) => Promise<void>): UiRecovery | undefined {
+function engineUi(sleep: (ms: number) => Promise<void>): UiRecovery | undefined {
   if (!engine.attached) return undefined;
   const value = <T>(result: EngineResult<T>): T => {
     if (!result.ok) throw new Error(`${result.reason}: ${result.message}`);

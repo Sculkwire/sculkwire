@@ -251,6 +251,20 @@ export interface DeployedPack {
   built: boolean;
 }
 
+/** How the game reached the test world for this launch, for `entry()`. */
+export interface WorldEntry {
+  /**
+   * `launch`: sculkwire started the game into the world; `auto-enter`: sculkwire walked the menus into it (an install
+   * the user starts, or a world link that raced sign-in); `manual`: the user opened it; `already-open`: it was ready
+   * the first time the bridge looked, once the game process was found.
+   */
+  by: "launch" | "auto-enter" | "manual" | "already-open";
+  /** From `start` to the world being ready. */
+  seconds: number;
+  /** Inputs sculkwire sent walking the menus (`auto-enter` only). */
+  clicks?: number;
+}
+
 export interface BridgeStatus {
   running: boolean;
   mode?: LaunchMode;
@@ -374,6 +388,10 @@ export class ClientBridge {
   /** What the engine log said about the world join so far (incremental reads). */
   #joinState: JoinState = NO_JOIN_YET;
   #joinRecovery?: BridgeStatus["joinRecovery"];
+  /** When this launch's `start` began, the menu walks of its wait for the world, and how the world was reached. */
+  #startedAt = 0;
+  #walks = { walked: false, clicks: 0 };
+  #entry?: WorldEntry;
   /** The screen stack as the engine log tells it, read along with the join state. */
   #screens: ScreenState = NO_SCREENS;
   /** The game frame's size from the newest screenshot: clicks are fractions of it. */
@@ -446,6 +464,9 @@ export class ClientBridge {
     this.#screens = NO_SCREENS;
     this.#frame = undefined;
     this.#joinRecovery = undefined;
+    this.#startedAt = Date.now();
+    this.#walks = { walked: false, clicks: 0 };
+    this.#entry = undefined;
     this.#joinState = NO_JOIN_YET;
 
     let packRefs: PackRef[] = [];
@@ -534,13 +555,15 @@ export class ClientBridge {
       throw new WaitTimeout(errorMessage(e));
     }
     if (this.launchState) this.launchState.gamePid = gamePid;
-    await this.#waitForWorld(timeoutMs, since);
+    const atFirstLook = await this.#waitForWorld(timeoutMs, since);
     // Windows mutes the game's audio sessions, which exist once it plays sound: by now it surely opened its device.
     if (this.launchState?.muteRequested) {
       const note = await muteWindowsGame(this.launchState, gamePid);
       if (note) this.#manual.push(note);
     }
     this.#ready = true;
+    const by: WorldEntry["by"] = this.#walks.walked ? "auto-enter" : atFirstLook ? "already-open" : this.install?.launch ? "launch" : "manual";
+    this.#entry = { by, seconds: Math.round((Date.now() - this.#startedAt) / 100) / 10, ...(this.#walks.walked ? { clicks: this.#walks.clicks } : {}) };
     this.#manual = this.#manual.filter((m) => !m.startsWith(START_YOURSELF) && !m.startsWith(WORLD_NOT_LOADED) && !m.startsWith(OPEN_YOURSELF));
     await this.#attachConnect();
   }
@@ -554,13 +577,15 @@ export class ClientBridge {
    *
    * The bridge also walks in when the game just sits on the start or Play screen (`#autoEnter`): an install the user
    * starts opens no world by itself, so there the in-game agent is attached once the start screen is up.
+   *
+   * True when the world was already ready at the first look.
    */
-  async #waitForWorld(timeoutMs: number, since = this.#printSeq): Promise<void> {
+  async #waitForWorld(timeoutMs: number, since = this.#printSeq): Promise<boolean> {
     const printed = (mark: string) => this.#prints.some((p) => p.seq > since && p.message.includes(mark));
     let deadline = Date.now() + timeoutMs;
     const auto: AutoEnter = { since: Date.now(), attachTried: false, attempts: 0, lastAt: 0 };
-    for (;;) {
-      if (printed(READY_MARK) && printed(SPAWN_MARK)) return;
+    for (let first = true; ; first = false) {
+      if (printed(READY_MARK) && printed(SPAWN_MARK)) return first;
       await this.#readJoinLog();
       if (this.#joinState.failed) {
         if (!this.#canWalkMenus()) await this.#attachForEntry(auto);
@@ -582,7 +607,7 @@ export class ClientBridge {
           }
           throw new Error(this.#joinNoInputMessage());
         }
-        const result = await this.returnToWorld();
+        const result = await this.#walkIn();
         if (!result.recovered) throw new Error(this.#joinFailureMessage(result));
         // The world loads again from the start: give the rejoin its own window, then wait for ready and spawn.
         deadline = Date.now() + timeoutMs;
@@ -594,7 +619,7 @@ export class ClientBridge {
       }
       if (Date.now() > deadline) {
         // Scripts loaded but the spawn print never came: commands that do not target the player still work.
-        if (printed(READY_MARK)) return;
+        if (printed(READY_MARK)) return false;
         throw new WaitTimeout(`timed out after ${timeoutMs} ms waiting for the game`);
       }
       if (this.launchState && !(await readLaunchState())) throw new Error("the game stopped");
@@ -656,7 +681,7 @@ export class ClientBridge {
     auto.attempts++;
     let why: string;
     try {
-      const result = await this.returnToWorld(AUTO_ENTER_TIMEOUT_MS);
+      const result = await this.#walkIn(AUTO_ENTER_TIMEOUT_MS);
       if (result.recovered) return true;
       why = result.reason ?? "unknown";
     } catch (e) {
@@ -771,22 +796,17 @@ export class ClientBridge {
     return result;
   }
 
-  /**
-   * Walk into the test world from the menus (`returnToWorld`), then wait until its helper pack printed ready again:
-   * leaving a world ends its scripts and the script debugger session, and the game dials the debugger again when the
-   * world loads. `helperMs` is how long that took, `helperLost` why it did not happen.
-   */
-  async reenterWorld(timeoutMs = 90_000, helperWaitMs = 60_000): Promise<{ recovery: RecoveryResult; helperMs?: number; helperLost?: string }> {
-    const since = this.#printSeq;
-    const recovery = await this.returnToWorld(timeoutMs);
-    if (!recovery.recovered) return { recovery };
-    const started = Date.now();
-    const back = await this.waitForPrint((p) => p.message.includes(READY_MARK), helperWaitMs, since).then(
-      () => true,
-      () => false,
-    );
-    if (!back) return { recovery, helperLost: `the helper pack did not print ready within ${helperWaitMs / 1000} s of entering the world` };
-    return { recovery, helperMs: Date.now() - started };
+  /** `returnToWorld` while the bridge waits for the world, counted for `entry()`. */
+  async #walkIn(timeoutMs?: number): Promise<RecoveryResult> {
+    const result = await this.returnToWorld(timeoutMs);
+    this.#walks.clicks += result.presses;
+    if (result.recovered) this.#walks.walked = true;
+    return result;
+  }
+
+  /** How this launch reached the test world; undefined until the world is ready. */
+  entry(): WorldEntry | undefined {
+    return this.#entry ? { ...this.#entry } : undefined;
   }
 
   /** What to tell the agent when the menus did not lead back into the world. */

@@ -15,6 +15,7 @@ import { play, PLAY_DEFAULT_DURATION_MS, PLAY_DEFAULT_STEP_MS, PLAY_MAX_DURATION
 import { TACTICS } from "./skills/tactics.ts";
 import { STANCES } from "./skills/pack.ts";
 import type { FightStats } from "./skills/types.ts";
+import { liveTaskEnv } from "./tasks/live.ts";
 import { pauseOnTakeover, playJobs, runActions, stepText, type PlayJobInfo } from "./jobs.ts";
 import { DIFFICULTIES, type Difficulty } from "./world.ts";
 import { FOREGROUND_MESSAGE } from "./windows.ts";
@@ -163,13 +164,15 @@ function notifyProgress(extra: Extra, progress: number, total: number | undefine
     .catch(() => undefined);
 }
 
-/** Stop reason, combat numbers and the last few tactics of a `play` run. */
+/** Stop reason, the plan (one line per step), combat numbers and the last few tactics of a `play` run. */
 function playText(p: PlayResult): string {
   const s = p.stats;
   const killed = Object.entries(s.killed).map(([t, n]) => `${n} ${t}`).join(", ");
   const lines = [
     `play stopped by ${p.stoppedBy} after ${p.steps} tactic(s) in ${(p.durationMs / 1000).toFixed(1)} s: ${p.message}`,
     `goal (${p.goalCheck.kind}): ${p.goalCheck.progress}`,
+    ...p.plan.map((r, i) => `  ${i + 1}. ${r.kind} ${r.status}${r.retries ? `, ${r.retries} retries` : ""}: "${r.text}": ${r.message}`),
+    ...(p.orders.stance ? [`stance ${p.orders.stance}`] : []),
     `kills ${s.kills}${killed ? ` (${killed})` : ""}, hits ${s.hits} (${s.crits} critical) and ${s.misses} misses of ${s.swings} swings, took ${s.hitsTaken} hits for ${s.damageTaken} damage, blocked ${s.blocked}, deaths ${s.deaths}${s.health !== undefined ? `, health ${s.health}` : ""}`,
     `${s.decisions} decisions`,
   ];
@@ -183,6 +186,7 @@ function jobText(j: PlayJobInfo): string {
   const p = j.progress;
   const lines = [
     `${head}, ${p.steps} step(s) in ${(p.elapsedMs / 1000).toFixed(1)} s`,
+    ...(p.planStep ? [`  now: ${p.planStep}`] : []),
     ...p.lastActions.map((a) => `  ${a}`),
   ];
   if (j.error) lines.push(`error: ${j.error}`);
@@ -411,6 +415,7 @@ export function register(server: McpServer): void {
       inputSchema: {
         kind: z.enum(["player", "entities", "blocks", "block", "ping"]),
         type: z.string().optional().describe("Filter by entity/block type id"),
+        types: z.array(z.string()).optional().describe("blocks: keep any of these block type ids (one scan for several types)"),
         radius: z.number().min(0).max(256).optional(),
         limit: z.number().int().min(1).max(200).optional(),
         x: z.number().optional(),
@@ -599,14 +604,21 @@ export function register(server: McpServer): void {
     }),
     z.object({
       action: z.literal("play"),
-      goal: z.string().min(1).describe("What to achieve, e.g. \"kill the hostile mobs near you\", \"kill 3 zombies\", \"go to 10 64 -20\", \"hit every cow near you once with the held item\""),
+      goal: z
+        .string()
+        .min(1)
+        .describe(
+          "What to achieve, in plain words, one or more steps: e.g. \"kill 3 zombies\", \"go to 10 64 -20\", \"hit every cow near you once with the held item\", " +
+            "\"smelt the ore and craft an iron sword\", \"get the diamonds out of the chest\", \"trade for an emerald\", \"kill the zombie then go to the gold block\". " +
+            "\"with the shield up\" or \"keep your distance\" set the fights' stance",
+        ),
       durationMs: z.number().int().min(1000).max(PLAY_MAX_DURATION_MS).optional().describe(`Time limit (default ${PLAY_DEFAULT_DURATION_MS})`),
       stepMs: z.number().int().min(100).max(1000).optional().describe(`Time between tactic decisions (default ${PLAY_DEFAULT_STEP_MS})`),
       allow: z
         .array(z.enum(TACTICS))
         .optional()
         .describe(`Tactics play may use, from ${TACTICS.join(", ")}. Default all. idle is always allowed`),
-      stance: z.enum(STANCES).optional().describe("The fights' shield stance, as fight's stance (default auto)"),
+      stance: z.enum(STANCES).optional().describe("The fights' shield stance, as fight's stance (default the goal's standing order, else auto)"),
     }),
   ]);
 
@@ -643,15 +655,23 @@ export function register(server: McpServer): void {
         "On the engine route the provider's input lock keeps the user's own keyboard and mouse out of the game while " +
         "actions or a play job run. When the user presses F9 to take control, the running action " +
         "stops with \"the user took control (F9)\" and a play job pauses until F9 gives control back or player_job stop. " +
-        "The `play` action pursues a goal on its own: every 250 ms it reads a threat map (hostile mobs, their " +
-        "distance, speed and creeper fuses, plus health, food, armor, weapon and food in the hotbar), checks the goal " +
-        "and picks a tactic (fight, flee, eat, goto, use the held item on a mob, idle) with built-in scores; a fight " +
-        "is one continuing step that moves from mob to mob by itself. " +
-        "Kill goals (kill N of a type, kill every hostile near), reach goals and hit-every-X goals are checked against " +
-        "the game and end the run when met; any other goal cannot be verified, so it runs until the time limit " +
-        "(durationMs). `play` runs in the background and the call returns at once with a job id. " +
-        "Follow it with player_job (status, wait, stop), which returns the stop reason, kills, hits, misses, critical hits, " +
-        "hits taken, damage taken, hits blocked and a trace of every tactic once it ends. `play` must be the last action. Only one play job runs at a time, a new one " +
+        "The `play` action pursues a goal on its own. The goal is first compiled into a plan: steps run one after another " +
+        "(kill N of a type or every hostile near, go to coordinates, hit every X once, craft, smelt, trade with a villager, " +
+        "take an item out of the chests near (also out of a shulker box in one), hold or wear an item, go to a block or a " +
+        "mob, survive N seconds) and standing orders (the shield stance), read by a deterministic grammar. For a combat or movement step every 250 ms it " +
+        "reads a threat map (hostile mobs, their distance, speed and creeper fuses, plus health, food, armor, weapon and " +
+        "food in the hotbar), checks the step and picks a tactic (fight, flee, eat, goto, use the held item on a mob, " +
+        "idle) with built-in scores; a fight is one continuing step that moves from mob to mob by itself. A task step " +
+        "runs as one procedure while the loop watches: a hit or a hostile within 6 blocks aborts it, the player fights or " +
+        "flees until clear and tries it again (at most 2 retries). Every step is checked against the game; the run ends " +
+        "when the last one is done. A part of the goal the grammar did not understand does not idle to the time limit: once the placed " +
+        "steps are done and there has been nothing to do for 5 s (no hostile near), the run stops with goal_unknown, " +
+        "quoting that part and listing the forms play understands with an example each; a goal that names a duration " +
+        "(\"for 30 seconds\") or says to survive or defend runs to its time. `play` runs in the background and the call returns at once with a job id. " +
+        "Follow it with player_job (status, wait, stop), which returns the current plan step while it runs and, once it " +
+        "ends, the stop reason, the plan (per step: kind, done or not, message, task actions and inventory change), " +
+        "kills, hits, misses, critical hits, " +
+        "hits taken, damage taken, hits blocked and a trace of every tactic. `play` must be the last action. Only one play job runs at a time, a new one " +
         "stops the old one, and other actions are refused while one runs. The keyboard route needs game_launch with " +
         "display window or headless on Linux, or any display on Windows; with the in-game agent attached, the engine " +
         "route also drives a Linux desktop-mode game (input auto or engine; keyboard is refused there).",
@@ -740,11 +760,12 @@ export function register(server: McpServer): void {
               loadout: async () => (await bridge.query("loadout")) as Loadout,
               deaths: async (since: number) => (await bridge.query("deaths", { since })) as { tick: number; deaths: Death[] },
               paused: () => provider?.pausedReason() !== undefined,
+              tasks: () => liveTaskEnv({ controller }),
             };
-            job = await playJobs.start(spec.goal, async ({ signal, onStep }) => {
+            job = await playJobs.start(spec.goal, async ({ signal, onStep, onPlan }) => {
               const unholdJob = await locking?.hold();
               try {
-                return await play(spec, pauseOnTakeover(env, locking?.input.takeover ?? gate, signal), { signal, onStep });
+                return await play(spec, pauseOnTakeover(env, locking?.input.takeover ?? gate, signal), { signal, onStep, onPlan });
               } finally {
                 await unholdJob?.();
               }
@@ -774,6 +795,7 @@ export function register(server: McpServer): void {
       steps: z.number(),
       elapsedMs: z.number(),
       lastActions: z.array(z.string()),
+      planStep: z.string().optional().describe("The plan step being worked on, e.g. \"step 2 of 3: craft iron sword\""),
     }),
     stopReason: z.string().optional(),
     result: z.object({}).passthrough().optional(),
@@ -786,7 +808,7 @@ export function register(server: McpServer): void {
       title: "Follow a play job",
       description:
         "Follow the background `play` job that player_act started. `status` returns its progress (steps, elapsed time, " +
-        "last actions). `wait` blocks until the job ends or 25 s pass, whichever is first, so " +
+        "the plan step being worked on, last actions). `wait` blocks until the job ends or 25 s pass, whichever is first, so " +
         "it stays under the client's call timeout, and can be called again. `stop` ends it and lets go of every key. " +
         "Once the job has ended, each action returns the full result with the trace of every step, the stop reason and " +
         "the final player state. Without `id` it uses the running job, else the latest one. A job paused by the user's " +

@@ -28,7 +28,7 @@ function step(n: number): PlayStep {
  * timers, because the jobs race a running loop against stop, wait timeouts and replacement.
  */
 function fakeLoop(steps: number, everyMs: number, log: string[] = []): PlayRunner {
-  return async ({ signal, onStep }) => {
+  return async ({ signal, onStep, onPlan }) => {
     const trace: PlayStep[] = [];
     let stoppedBy: PlayResult["stoppedBy"] = "goal_done";
     let message = "done";
@@ -42,6 +42,7 @@ function fakeLoop(steps: number, everyMs: number, log: string[] = []): PlayRunne
       const s = step(i);
       trace.push(s);
       onStep(s);
+      onPlan(`step ${i} of ${steps}: kill 1 zombie`);
     }
     log.push("released");
     return {
@@ -51,6 +52,8 @@ function fakeLoop(steps: number, everyMs: number, log: string[] = []): PlayRunne
       message,
       durationMs: 0,
       goalCheck: { kind: "free", known: false, progress: "" },
+      plan: [{ text: "g", kind: "free", by: "builtin", status: "stopped", ok: false, message: "", ms: 0 }],
+      orders: {},
       stats: { decisions: trace.length, kills: 0, killed: {}, swings: 0, hits: 0, misses: 0, crits: 0, hitsTaken: 0, damageTaken: 0, blocked: 0, deaths: 0 },
       trace,
     };
@@ -68,6 +71,8 @@ describe("PlayJobs", () => {
     expect(mid.status).toBe("running");
     expect(mid.progress.steps).toBeGreaterThan(0);
     expect(mid.progress.lastActions[0]).toMatch(/^step 1: fight zombie_1 ok: hit$/);
+    // The plan step being worked on is in the progress.
+    expect(mid.progress.planStep).toMatch(/^step \d of 4: kill 1 zombie$/);
     const seen: number[] = [];
     const done = await jobs.wait(undefined, 5000, { onStep: (s) => seen.push(s.step) });
     expect(done.status).toBe("done");

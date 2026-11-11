@@ -15,6 +15,8 @@ export interface PlayProgress {
   elapsedMs: number;
   /** The last few steps as `step 4: attack zombie_1 ok: hit`. */
   lastActions: string[];
+  /** The plan step being worked on, e.g. `step 2 of 3: craft iron sword`; once the job ended, where it stopped. */
+  planStep?: string;
 }
 
 export interface PlayJobInfo {
@@ -25,7 +27,7 @@ export interface PlayJobInfo {
   progress: PlayProgress;
   /**
    * Why the job ended, present once it has: the outside reason when it was stopped (player_job stop, a new play job,
-   * game_stop, shutdown), else the play loop's own `stoppedBy` (`goal_done`, `timeout`, `died`, `error`), and `error`
+   * game_stop, shutdown), else the play loop's own `stoppedBy` (`goal_done`, `timeout`, `died`, `error`, `goal_unknown`), and `error`
    * when the run threw.
    */
   stopReason?: string;
@@ -36,7 +38,7 @@ export interface PlayJobInfo {
 }
 
 /** Runs one play loop. It must stop soon after `signal` aborts and release its input. */
-export type PlayRunner = (ctx: { signal: AbortSignal; onStep: (step: PlayStep) => void }) => Promise<PlayResult>;
+export type PlayRunner = (ctx: { signal: AbortSignal; onStep: (step: PlayStep) => void; onPlan: (text: string) => void }) => Promise<PlayResult>;
 
 const LAST_ACTIONS = 5;
 const KEEP_FINISHED = 5;
@@ -58,6 +60,7 @@ class Job {
   finishedAt?: number;
   stopReason?: string;
   result?: PlayResult;
+  planStep?: string;
   error?: string;
   finished!: Promise<void>;
 
@@ -76,6 +79,7 @@ class Job {
         steps: this.result?.steps ?? this.steps.length,
         elapsedMs: (this.finishedAt ?? Date.now()) - this.startedAt,
         lastActions: (this.result?.trace ?? this.steps).slice(-LAST_ACTIONS).map(stepText),
+        ...(this.planStep ? { planStep: this.planStep } : {}),
       },
       ...(this.stopReason ? { stopReason: this.stopReason } : {}),
       ...(this.result ? { result: this.result } : {}),
@@ -119,7 +123,13 @@ export class PlayJobs {
     };
     job.finished = (async () => {
       try {
-        job.result = await runner({ signal: job.controller.signal, onStep });
+        job.result = await runner({
+          signal: job.controller.signal,
+          onStep,
+          onPlan: (text) => {
+            job.planStep = text;
+          },
+        });
         job.status = job.controller.signal.aborted ? "stopped" : "done";
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);

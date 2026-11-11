@@ -38,6 +38,8 @@ export interface MobSpawn {
   /** `zombie` or `minecraft:zombie`. */
   type: string;
   at: Offset;
+  /** Item put in the mob's main hand right after the summon (`iron_spear`). */
+  held?: string;
 }
 
 /** What the runner hands a scenario's hooks. */
@@ -125,6 +127,11 @@ export interface Scenario {
   spawnAfterMs?: number;
   /** What the player does. `play` runs in the bench process. */
   action(ctx: BenchContext): PlayerAction | PlayAction;
+  /**
+   * Phrasings of the same `play` goal: run i plays phrasing i (wrapping around), replacing the action's `goal`. They
+   * measure what the goal grammar understands.
+   */
+  goals?: string[];
   /** Extra numbers for the table and the JSON, read after the run. */
   measure?(ctx: BenchContext, outcome: RunOutcome): Promise<Record<string, Metric>> | Record<string, Metric>;
   /** Whether the run counts as a success. Default: `ok` and no death. */
