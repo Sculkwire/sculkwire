@@ -26,6 +26,7 @@ function loadHelper(blockAt: (x: number, y: number, z: number) => FakeBlock | un
     if (!b) return undefined;
     return {
       typeId: b.typeId,
+      location: { x, y, z },
       isAir: b.typeId === "minecraft:air",
       permutation: { getAllStates: () => b.states ?? {} },
       below: () => block(x, y - 1, z),
@@ -34,7 +35,11 @@ function loadHelper(blockAt: (x: number, y: number, z: number) => FakeBlock | un
   const dim = {
     id: "overworld",
     heightRange: { min: -64, max: 320 },
-    getBlock: (v: Vec) => block(v.x, v.y, v.z),
+    // The game throws LocationOutOfWorldBoundariesError outside the height range (max exclusive).
+    getBlock: (v: Vec) => {
+      if (v.y < -64 || v.y >= 320) throw new Error(`LocationOutOfWorldBoundariesError at y ${v.y}`);
+      return block(v.x, v.y, v.z);
+    },
     containsBlock: (vol: { from: Vec; to: Vec }, filter: { excludeTypes: string[] }) => {
       for (let y = vol.from.y; y <= vol.to.y; y++)
         for (let z = vol.from.z; z <= vol.to.z; z++)
@@ -49,7 +54,7 @@ function loadHelper(blockAt: (x: number, y: number, z: number) => FakeBlock | un
   const fakeWorld = {
     getAllPlayers: () => [],
     getDimension: () => dim,
-    afterEvents: { projectileHitEntity: subscribe, projectileHitBlock: subscribe, entityDie: subscribe, entityHurt: subscribe, playerSpawn: subscribe, dataDrivenEntityTrigger: subscribe, entityRemove: subscribe },
+    afterEvents: { projectileHitEntity: subscribe, projectileHitBlock: subscribe, entityDie: subscribe, entityHurt: subscribe, playerSpawn: subscribe, playerLeave: subscribe, dataDrivenEntityTrigger: subscribe, entityRemove: subscribe },
   };
   const fakeSystem = {
     get currentTick() {
@@ -88,7 +93,7 @@ function loadHelper(blockAt: (x: number, y: number, z: number) => FakeBlock | un
   });
   let id = 0;
   return {
-    async query(params: Record<string, unknown>): Promise<{ boxes: string[]; ticks: number; maxTickMs: number }> {
+    async query<T = { boxes: string[]; ticks: number; maxTickMs: number }>(params: Record<string, unknown>): Promise<T> {
       const qid = ++id;
       onEvent?.({ id: "sculkwire:query", message: JSON.stringify({ ...params, id: qid }) });
       for (let n = 0; n < 1000; n++) {
@@ -155,5 +160,35 @@ describe("helper grid query", () => {
     const r = await helper.query({ kind: "grid", boxes: [[0, 0, 0, 16, 16, 16]] });
     expect(r.boxes).toEqual([".000fff"]);
     await expect(helper.query({ kind: "grid", boxes: [[0, 0, 0, 40, 1, 1]] })).rejects.toThrow(/1 to 36/);
+  });
+
+  it("reads a grid box that reaches below the world floor without throwing", async () => {
+    const helper = loadHelper((_x, y) => (y <= -61 ? { typeId: "minecraft:stone", expect: "#" } : { typeId: "minecraft:air", expect: "." }));
+    const r = await helper.query({ kind: "grid", boxes: [[0, -70, 0, 4, 12, 4]] });
+    const cells = decodeRegions(r.boxes[0] as string, 4, 12, 4);
+    // Rows -70 to -65 are outside the world (unknown), -64 to -61 stone, -60 and -59 air.
+    expect(String.fromCharCode(cells[0] as number)).toBe("u");
+    expect(String.fromCharCode(cells[6 * 16] as number)).toBe("#");
+    expect(String.fromCharCode(cells[10 * 16] as number)).toBe(".");
+  });
+});
+
+describe("helper block queries at the world's height limits", () => {
+  const floor = (_x: number, y: number): FakeBlock => (y <= -61 ? { typeId: "minecraft:stone", expect: "#" } : { typeId: "minecraft:air", expect: "." });
+
+  it("trims a blocks cube that crosses the world floor to the rows inside", async () => {
+    const helper = loadHelper(floor);
+    const list = await helper.query<{ location: Vec }[]>({ kind: "blocks", x: 0, y: -64, z: 0, radius: 2 });
+    // Rows -64 to -62 of the 5 x 5 columns are stone; -66 and -65 are outside the world.
+    expect(list).toHaveLength(75);
+    expect(Math.min(...list.map((b) => b.location.y))).toBe(-64);
+  });
+
+  it("answers an empty list for a cube wholly outside the world, and null for one block there", async () => {
+    const helper = loadHelper(floor);
+    expect(await helper.query({ kind: "blocks", x: 0, y: -100, z: 0, radius: 4 })).toEqual([]);
+    expect(await helper.query({ kind: "blocks", x: 0, y: 400, z: 0, radius: 4 })).toEqual([]);
+    expect(await helper.query({ kind: "block", x: 0, y: -65, z: 0 })).toBeNull();
+    await expect(helper.query({ kind: "container", x: 0, y: -65, z: 0 })).rejects.toThrow(/outside the world's height range \(-64 to 319\)/);
   });
 });

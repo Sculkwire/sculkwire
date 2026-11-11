@@ -10,8 +10,23 @@ function vec(v) {
   return { x: Math.round(v.x * 100) / 100, y: Math.round(v.y * 100) / 100, z: Math.round(v.z * 100) / 100 };
 }
 
+/**
+ * The player the helper reports on. A single-player world lists one, but after a rejoin or a sign-in race the list can
+ * hold a second handle: the helper prefers the handle the newest `playerSpawn` event delivered (the same object, else
+ * the one listed handle with its id), then the newest valid one in the list, never a handle the API marks invalid.
+ */
+function thePlayer() {
+  const all = world.getAllPlayers().filter((p) => p.isValid !== false);
+  if (all.length <= 1) return all[0];
+  if (spawned && spawned.isValid !== false && all.includes(spawned)) return spawned;
+  const same = spawned ? all.filter((p) => p.id === spawned.id) : [];
+  return same.length === 1 ? same[0] : all[all.length - 1];
+}
+/** The player handle of the newest `playerSpawn` event (first spawn, respawn and rejoin all fire it). */
+let spawned;
+
 function anchor(q) {
-  const player = world.getAllPlayers()[0];
+  const player = thePlayer();
   if (q.x !== undefined && q.y !== undefined && q.z !== undefined) {
     const dim = world.getDimension(q.dimension ?? player?.dimension.id ?? "overworld");
     return { dim, at: { x: q.x, y: q.y, z: q.z }, player };
@@ -56,17 +71,41 @@ function blockInfo(b) {
   return out;
 }
 
+/** Whether block row `y` is inside the dimension's height range (its `max` is exclusive: 320 in the overworld). */
+function inHeight(dim, y) {
+  const range = dim.heightRange;
+  return y >= range.min && y < range.max;
+}
+
+/** The block at a position, or undefined when the position is outside the height range or its chunk is not loaded. */
+function blockAt(dim, x, y, z) {
+  if (!inHeight(dim, y)) return undefined;
+  try {
+    return dim.getBlock({ x, y, z });
+  } catch {
+    // A chunk that unloaded between the check and the read.
+    return undefined;
+  }
+}
+
+/**
+ * Non-air blocks in the cube of `radius` around the anchor. Rows outside the dimension's height range (below the
+ * world floor, above the build limit) are left out, so a cube touching or past them answers what is inside, or [].
+ */
 function blocks(q) {
   const { dim, at } = anchor(q);
   const r = Math.min(Number(q.radius ?? 4), 16);
   const cx = Math.floor(at.x);
   const cy = Math.floor(at.y);
   const cz = Math.floor(at.z);
+  const range = dim.heightRange;
+  const ylo = Math.max(cy - r, range.min);
+  const yhi = Math.min(cy + r, range.max - 1);
   const out = [];
-  for (let y = cy - r; y <= cy + r && out.length < MAX_BLOCKS; y++) {
+  for (let y = ylo; y <= yhi && out.length < MAX_BLOCKS; y++) {
     for (let x = cx - r; x <= cx + r && out.length < MAX_BLOCKS; x++) {
       for (let z = cz - r; z <= cz + r && out.length < MAX_BLOCKS; z++) {
-        const b = dim.getBlock({ x, y, z });
+        const b = blockAt(dim, x, y, z);
         if (!b || b.isAir) continue;
         if (q.type && b.typeId !== q.type) continue;
         out.push(blockInfo(b));
@@ -76,9 +115,10 @@ function blocks(q) {
   return out;
 }
 
+/** The block at the anchor; null outside the height range or in an unloaded chunk. */
 function block(q) {
   const { dim, at } = anchor(q);
-  const b = dim.getBlock({ x: Math.floor(at.x), y: Math.floor(at.y), z: Math.floor(at.z) });
+  const b = blockAt(dim, Math.floor(at.x), Math.floor(at.y), Math.floor(at.z));
   return b ? blockInfo(b) : null;
 }
 
@@ -303,7 +343,7 @@ function pumpGrid() {
  * scan time any one of them had.
  */
 function grid(q) {
-  const player = world.getAllPlayers()[0];
+  const player = thePlayer();
   const dim = world.getDimension(q.dimension ?? player?.dimension.id ?? "overworld");
   const boxes = (Array.isArray(q.boxes) ? q.boxes : []).map((box) => box.map((n) => Math.floor(Number(n))));
   let total = 0;
@@ -362,6 +402,8 @@ function playerState(p) {
   if (health) out.health = health.currentValue;
   const hand = p.getComponent("minecraft:inventory")?.container?.getItem(p.selectedSlotIndex);
   if (hand) out.holding = { typeId: hand.typeId, amount: hand.amount };
+  const offhandDamage = offhandDamageOf(p);
+  if (offhandDamage !== undefined) out.offhandDamage = offhandDamage;
   const hit = p.getBlockFromViewDirection({ maxDistance: 6 });
   if (hit) out.lookingAtBlock = { typeId: hit.block.typeId, location: hit.block.location, face: hit.face };
   // Far enough to tell a shooter or a walking player what the crosshair is on. Melee checks the distance.
@@ -370,15 +412,29 @@ function playerState(p) {
   return out;
 }
 
+/**
+ * Durability damage of the off-hand item (a shield loses durability with each hit it blocks), or undefined when the
+ * slot is empty or the item has no durability. Runs every streamed tick, so it never throws.
+ */
+function offhandDamageOf(p) {
+  try {
+    const item = componentOf(p, "minecraft:equippable")?.getEquipment("Offhand");
+    const damage = item ? componentOf(item, "minecraft:durability")?.damage : undefined;
+    return typeof damage === "number" ? damage : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function state() {
-  const p = world.getAllPlayers()[0];
+  const p = thePlayer();
   if (!p) throw new Error("no player in the world");
   return playerState(p);
 }
 
 /** Hotbar slots 1-9 (null when empty) and the food level, which the streamed state leaves out to stay small. */
 function loadout() {
-  const p = world.getAllPlayers()[0];
+  const p = thePlayer();
   if (!p) throw new Error("no player in the world");
   const container = p.getComponent("minecraft:inventory")?.container;
   const hotbar = [];
@@ -471,7 +527,7 @@ function attributesOf(p, equippable) {
 
 /** The player's attributes and whole inventory. No cursor stack: the API does not expose one. */
 function inventory() {
-  const p = world.getAllPlayers()[0];
+  const p = thePlayer();
   if (!p) throw new Error("no player in the world");
   const container = componentOf(p, "minecraft:inventory")?.container;
   const equippable = componentOf(p, "minecraft:equippable");
@@ -501,7 +557,11 @@ function containerAt(q) {
   const x = Math.floor(at.x);
   const y = Math.floor(at.y);
   const z = Math.floor(at.z);
-  const block = dim.getBlock({ x, y, z });
+  if (!inHeight(dim, y)) {
+    const range = dim.heightRange;
+    throw queryError("no_block", `${x} ${y} ${z} is outside the world's height range (${range.min} to ${range.max - 1})`);
+  }
+  const block = blockAt(dim, x, y, z);
   if (!block) throw queryError("no_block", `no loaded block at ${x} ${y} ${z}`);
   const container = componentOf(block, "minecraft:inventory")?.container;
   if (!container) throw queryError("no_container", `${block.typeId} at ${x} ${y} ${z} has no container`);
@@ -573,7 +633,7 @@ function stream(q) {
   const radius = Math.max(0, Math.min(32, Number(q.radius ?? 16)));
   const limit = Math.max(1, Math.min(16, Number(q.limit ?? 8)));
   streamHandle = system.runInterval(() => {
-    const p = world.getAllPlayers()[0];
+    const p = thePlayer();
     if (!p) return;
     const s = playerState(p);
     if (radius > 0) s.entities = { radius, limit, list: nearby(p, radius, limit) };
@@ -716,5 +776,9 @@ system.afterEvents.scriptEventReceive.subscribe((ev) => {
 system.run(() => console.log("[sculkwire:ready]"));
 
 world.afterEvents.playerSpawn.subscribe((ev) => {
+  spawned = ev.player;
   if (ev.initialSpawn) console.log(`[sculkwire:spawned] ${ev.player.name}`);
+});
+world.afterEvents.playerLeave.subscribe((ev) => {
+  if (spawned?.id === ev.playerId) spawned = undefined;
 });

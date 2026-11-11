@@ -93,6 +93,7 @@ function loadHelper(options: { hotbar?: FakeItem[]; chest?: FakeItem[]; chestBlo
   };
   const dim = {
     id: "minecraft:overworld",
+    heightRange: { min: -64, max: 320 },
     getBlock: ({ x, y, z }: Vec) =>
       x === 1 && y === 64 && z === -2
         ? {

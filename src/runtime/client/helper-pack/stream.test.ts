@@ -14,8 +14,17 @@ interface FakeEntity {
   health?: number;
 }
 
-/** The helper script with a fake world: one player, the given entities, entity events fired by hand. */
-function loadHelper(entities: FakeEntity[]) {
+/** A player handle as the fake world lists it: where it says the player stands, and whether the API calls it valid. */
+interface FakePlayer {
+  id?: string;
+  location?: Vec;
+  isValid?: boolean;
+  /** The off-hand item: a durability damage, an item without durability (`null`), or an equipment read that throws. */
+  offhand?: { damage: number } | null | "throws";
+}
+
+/** The helper script with a fake world: the given players (one at the origin by default), the given entities, entity events fired by hand. */
+function loadHelper(entities: FakeEntity[], opts: { players?: FakePlayer[] } = {}) {
   let tick = 100;
   let interval: (() => void) | undefined;
   let onQuery: Handler | undefined;
@@ -42,10 +51,11 @@ function loadHelper(entities: FakeEntity[]) {
         .slice(0, q.closest)
         .map(asEntity),
   };
-  const player = {
-    id: "-1",
-    name: "p",
-    location: { x: 0, y: 0, z: 0 },
+  const makePlayer = (p: FakePlayer) => ({
+    id: p.id ?? "-1",
+    name: "Steve",
+    location: p.location ?? { x: 0, y: 0, z: 0 },
+    ...(p.isValid !== undefined ? { isValid: p.isValid } : {}),
     dimension: dim,
     isOnGround: true,
     isSneaking: false,
@@ -54,18 +64,29 @@ function loadHelper(entities: FakeEntity[]) {
     getVelocity: () => ({ x: 0, y: 0, z: 0 }),
     getRotation: () => ({ x: 0, y: 0 }),
     getGameMode: () => "survival",
-    getComponent: () => undefined,
+    getComponent: (c: string) => {
+      if (c !== "minecraft:equippable" || p.offhand === undefined) return undefined;
+      const off = p.offhand;
+      return {
+        getEquipment: (slot: string) => {
+          if (off === "throws") throw new Error("fake: equipment unavailable");
+          if (slot !== "Offhand") return undefined;
+          return { typeId: "minecraft:shield", getComponent: (id: string) => (id === "minecraft:durability" && off ? { damage: off.damage, maxDurability: 336 } : undefined) };
+        },
+      };
+    },
     getBlockFromViewDirection: () => undefined,
     getEntitiesFromViewDirection: () => [],
-  };
+  });
+  const players = (opts.players ?? [{}]).map(makePlayer);
   const world = {
-    getAllPlayers: () => [player],
+    getAllPlayers: () => players,
     getDimension: () => dim,
     getEntity: (id: string) => {
       const e = entities.find((m) => m.id === id);
       return e ? asEntity(e) : undefined;
     },
-    afterEvents: Object.fromEntries(["projectileHitEntity", "projectileHitBlock", "entityDie", "entityHurt", "playerSpawn", "dataDrivenEntityTrigger", "entityRemove"].map((n) => [n, on(n)])),
+    afterEvents: Object.fromEntries(["projectileHitEntity", "projectileHitBlock", "entityDie", "entityHurt", "playerSpawn", "playerLeave", "dataDrivenEntityTrigger", "entityRemove"].map((n) => [n, on(n)])),
   };
   const system = {
     get currentTick() {
@@ -89,6 +110,7 @@ function loadHelper(entities: FakeEntity[]) {
   let id = 0;
   return {
     lines,
+    players,
     advance(ticks: number) {
       for (let i = 0; i < ticks; i++) {
         tick++;
@@ -104,7 +126,7 @@ function loadHelper(entities: FakeEntity[]) {
       const line = lines.find((l) => l.includes(`"id":${qid},`)) ?? "";
       return (JSON.parse(line.slice("[sculkwire:reply] ".length)) as { result: unknown }).result;
     },
-    lastState(): { tick: number; entities?: { radius: number; limit: number; list: Record<string, unknown>[] } } {
+    lastState(): { tick: number; location: Vec; entities?: { radius: number; limit: number; list: Record<string, unknown>[] } } {
       const line = lines.findLast((l) => l.startsWith("[sculkwire:state] ")) ?? "";
       return JSON.parse(line.slice("[sculkwire:state] ".length));
     },
@@ -159,5 +181,47 @@ describe("helper state stream", () => {
     const after = h.lastState().entities?.list[0];
     expect(after).toMatchObject({ ignited: false });
     expect(after?.fuseTicks).toBeUndefined();
+  });
+});
+
+describe("helper player choice", () => {
+  const ghost = { location: { x: 0, y: -60, z: 0 } };
+  const real = { location: { x: 100.5, y: -60, z: 40.5 } };
+
+  it("reports the handle of the newest spawn when the world lists two", () => {
+    // The stale handle is listed last, where the fallback would take it: the spawn event decides.
+    const h = loadHelper([], { players: [real, ghost] });
+    h.fire("playerSpawn", { player: h.players[0], initialSpawn: true });
+    h.query({ kind: "stream", every: 1, radius: 0 });
+    h.advance(1);
+    expect(h.lastState().location).toEqual(real.location);
+    expect(h.query({ kind: "state" })).toMatchObject({ location: real.location });
+  });
+
+  it("never reports a handle the API marks invalid, and falls back to the newest listed", () => {
+    const h = loadHelper([], { players: [ghost, { ...real, isValid: false }, { location: { x: 5, y: -60, z: 5 } }] });
+    h.query({ kind: "stream", every: 1, radius: 0 });
+    h.advance(1);
+    expect(h.lastState().location).toEqual({ x: 5, y: -60, z: 5 });
+  });
+});
+
+describe("helper player state", () => {
+  it("streams the off-hand item's durability damage, and nothing when there is none or the read throws", () => {
+    const state = (offhand: FakePlayer["offhand"]) => {
+      const h = loadHelper([], { players: [{ offhand }] });
+      h.query({ kind: "stream", every: 1, radius: 0 });
+      h.advance(1);
+      return { streamed: h.lastState() as Record<string, unknown>, queried: h.query({ kind: "state" }) as Record<string, unknown> };
+    };
+    const shield = state({ damage: 7 });
+    expect(shield.streamed.offhandDamage).toBe(7);
+    expect(shield.queried.offhandDamage).toBe(7);
+    expect(state({ damage: 0 }).streamed.offhandDamage).toBe(0);
+    for (const none of [undefined, null, "throws"] as const) {
+      const s = state(none);
+      expect(s.streamed).not.toHaveProperty("offhandDamage");
+      expect(s.streamed.location).toEqual({ x: 0, y: 0, z: 0 });
+    }
   });
 });
