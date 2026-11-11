@@ -223,7 +223,7 @@ export function register(server: McpServer): void {
         "the game is ready.",
       inputSchema: {
         project: z.string().optional().describe("Add-on project or pack directory to activate in the world. A Regolith project whose profile runs filters is built with rgl and its built packs are deployed"),
-        deploy: z.boolean().optional().describe("Copy packs that are not in development_*_packs yet. Default true. Packs rgl already deployed are reused, but a fresh rgl build is deployed to its own folder named after the source pack and used instead"),
+        deploy: z.boolean().optional().describe("Copy the project's packs into development_*_packs, also over the project's sculkwire_* folder an earlier launch left. Default true. Packs rgl already exported are reused, but a fresh rgl build is always deployed. Off: only folders that already serve a pack's uuid are used"),
         display: z
           .enum(["window", "headless", "desktop"])
           .optional()

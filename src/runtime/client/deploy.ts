@@ -112,11 +112,13 @@ export function deployFolderName(projectRoot: string, sourceDir: string): string
  * export folder is not `owned`, so stopping the game leaves it in place. Without an export the build goes to the
  * project's `sculkwire_*` folder. Every other project-derived folder with the uuid is listed in `remove`.
  *
- * A pack without a build reuses an existing folder with its uuid (the rgl export first, then the project's
- * `sculkwire_*` folder, then any other) and removes the other project-derived copies. Folders listed in `own` are
- * copies sculkwire made earlier in this session: they are copied again from the project (a redeploy before
- * `/reload`), never reused as they are. With `deploy: false` a pack without a build is only deployed when an
- * existing folder already serves its uuid.
+ * A pack without a build goes to an existing folder with its uuid: the rgl export first, then the project's
+ * `sculkwire_*` folder, then any other; the other project-derived copies are removed. The project's `sculkwire_*`
+ * folder is always copied again from the project when `deploy` is on, even when an earlier launch or another
+ * sculkwire process left it behind, so a stale copy never stands in for the project. `refresh` (a redeploy before
+ * `/reload`) also copies the project into its rgl export and into its `sculkwire_*` folder with `deploy: false`:
+ * every project-derived folder gets the current packs. A foreign folder is never written. With `deploy: false` a
+ * pack without a build is only deployed when an existing folder already serves its uuid.
  */
 export function planPackDeploy(opts: {
   /** Project root; names the folders sculkwire deploys to. */
@@ -130,8 +132,8 @@ export function planPackDeploy(opts: {
   deployed: readonly DevPackFolder[];
   /** Folders this project's Regolith profiles export to (`regolithExportFolders`). */
   rglExports?: RegolithExportFolders;
-  /** Folder names sculkwire itself deployed in this session; they are refreshed rather than reused. */
-  own?: ReadonlySet<string>;
+  /** Copy the project again into every folder derived from it (a redeploy before `/reload`). */
+  refresh?: boolean;
 }): PackDeploy[] {
   return opts.packs.map((pack): PackDeploy => {
     const base = { kind: pack.kind, uuid: pack.uuid, version: pack.version, ...(pack.name ? { name: pack.name } : {}) };
@@ -159,9 +161,13 @@ export function planPackDeploy(opts: {
         ? plan(rglExport, { copyFrom: pack.built, built: true, owned: false }, foreign)
         : plan(sculkFolder, { copyFrom: pack.built, built: true, owned: true }, foreign);
     }
-    if (rglExport) return plan(rglExport, { built: false, owned: false }, foreign);
+    if (rglExport) {
+      return opts.refresh
+        ? plan(rglExport, { copyFrom: pack.dir, built: false, owned: false }, foreign)
+        : plan(rglExport, { built: false, owned: false }, foreign);
+    }
     if (sculkCopy) {
-      return opts.own?.has(sculkCopy)
+      return opts.deploy || opts.refresh
         ? plan(sculkCopy, { copyFrom: pack.dir, built: false, owned: true }, foreign)
         : plan(sculkCopy, { built: false, owned: false }, foreign);
     }

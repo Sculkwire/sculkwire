@@ -90,13 +90,12 @@ describe("pack deploy plan", () => {
     expect(resource).toEqual({ kind: "resource", uuid: "UUID-RP", version: "1.0.0", built: false, owned: false, remove: [], foreign: [] });
   });
 
-  it("copies a pack again on redeploy when the existing folder is sculkwire's own copy, but leaves other folders", () => {
+  it("copies the project's sculkwire folder again even when an earlier session left it there, but leaves other folders", () => {
     const plan = planPackDeploy({
       project,
       comMojang,
       deploy: true,
       deployed: [dev("behavior", "sculkwire_project_BP", "uuid-bp"), dev("resource", "MyProject_RP", "uuid-rp")],
-      own: new Set(["sculkwire_project_BP"]),
       packs: [
         { kind: "behavior", dir: bp, uuid: "UUID-BP", version: "1.0.0" },
         { kind: "resource", dir: rp, uuid: "UUID-RP", version: "1.0.0" },
@@ -115,6 +114,36 @@ describe("pack deploy plan", () => {
       remove: [],
       foreign: [],
     });
+  });
+
+  it("refreshes every project-derived folder on reload, even with deploy off, and never writes a foreign one", () => {
+    const plan = planPackDeploy({
+      project,
+      comMojang,
+      deploy: false,
+      refresh: true,
+      deployed: [dev("behavior", "sculkwire_project_BP", "uuid-bp"), dev("resource", "Echo Wand_rp", "uuid-rp"), dev("resource", "MyProject_RP", "uuid-rp")],
+      rglExports: { behavior: [], resource: ["Echo Wand_rp"] },
+      packs: [
+        { kind: "behavior", dir: bp, uuid: "UUID-BP", version: "1.0.0" },
+        { kind: "resource", dir: rp, uuid: "UUID-RP", version: "1.0.0" },
+      ],
+    });
+    const [behavior, resource] = plan;
+    expect(behavior).toMatchObject({ folder: "sculkwire_project_BP", copyFrom: bp, owned: true, remove: [], foreign: [] });
+    expect(resource).toMatchObject({ folder: "Echo Wand_rp", copyFrom: rp, owned: false, remove: [], foreign: [deployedPath("resource", "MyProject_RP")] });
+
+    // Without a project-derived folder, a refresh reuses the foreign folder as it is, like a launch does.
+    const [foreignOnly] = planPackDeploy({
+      project,
+      comMojang,
+      deploy: true,
+      refresh: true,
+      deployed: [dev("behavior", "MyProject_BP", "uuid-bp")],
+      packs: [{ kind: "behavior", dir: bp, uuid: "UUID-BP", version: "1.0.0" }],
+    });
+    expect(foreignOnly).toMatchObject({ folder: "MyProject_BP", owned: false });
+    expect(foreignOnly?.copyFrom).toBeUndefined();
   });
 
   it("deploys the Regolith build output under the source pack's folder and lists a foreign folder with the uuid", () => {
@@ -285,6 +314,42 @@ describe("one uuid, one folder after a deploy", () => {
       expect(await readFile(join(target, "marker.txt"), "utf8")).toBe("source");
       expect(await readFile(join(mojang, "development_behavior_packs", "Other Project_bp", "marker.txt"), "utf8")).toBe("foreign");
       expect(r.diagnostics.map((d) => d.code)).toEqual(["client.duplicate-pack-uuid"]);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("copies the project's current packs over a sculkwire folder an earlier session left behind on launch and reload", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "sculk-deploy-"));
+    try {
+      const root = join(tmp, "frost-wand");
+      const src = join(root, "packs", "BP");
+      const uuid = "dddddddd-0000-4000-8000-000000000004";
+      await pack(src, uuid, "edited source");
+      const mojang = join(tmp, "com.mojang");
+      const bps = join(mojang, "development_behavior_packs");
+      const target = join(bps, deployFolderName(root, src));
+      // An earlier launch (or a server that restarted) left the project's folder with old content.
+      await pack(target, uuid, "old copy");
+      await pack(join(bps, "Unrelated"), "eeeeeeee-0000-4000-8000-000000000005", "unrelated");
+
+      const deploy = async (opts: { deploy: boolean; refresh: boolean }) =>
+        applyPackDeploy(
+          planPackDeploy({ project: root, comMojang: mojang, ...opts, deployed: await listDevPacks(mojang), packs: [{ kind: "behavior", dir: src, uuid, version: "1.0.0" }] }),
+        );
+
+      const launch = await deploy({ deploy: true, refresh: false });
+      expect(launch.copied).toEqual([target]);
+      expect(launch.owned).toEqual([target]);
+      expect(await readFile(join(target, "marker.txt"), "utf8")).toBe("edited source");
+
+      // The project changes, then game_reload runs (with deploy off, too): the folder gets the new files.
+      await writeFile(join(src, "marker.txt"), "edited again");
+      const reload = await deploy({ deploy: false, refresh: true });
+      expect(reload.copied).toEqual([target]);
+      expect(await readFile(join(target, "marker.txt"), "utf8")).toBe("edited again");
+      expect((await readdir(bps)).sort()).toEqual([deployFolderName(root, src), "Unrelated"].sort());
+      expect(await readFile(join(bps, "Unrelated", "marker.txt"), "utf8")).toBe("unrelated");
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }

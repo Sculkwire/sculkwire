@@ -90,10 +90,10 @@ If sculkwire cannot start the game itself, `game_launch` returns at once with `m
 When two folders in `development_behavior_packs` or `development_resource_packs` share a header uuid, the game loads either of them, so a stale copy can win over your latest build. `game_launch` and `game_reload` therefore leave exactly one folder of your project per deployed uuid:
 
 1. If `rgl run` already exported the project there (for example `Echo Wand_bp`, named after `config.json`'s `name`, a literal `bpName`/`rpName`, or an `exact` export path), the fresh build is copied into that folder. It is the same project built the same way, so your export keeps working after `game_stop`, and sculkwire never deletes it.
-2. Otherwise the pack goes to `sculkwire_<project folder>_<pack folder>`, which `game_stop` removes.
+2. Otherwise the pack goes to `sculkwire_<project folder>_<pack folder>`, which `game_stop` removes. Every launch and reload copies the current packs into it, also when an earlier launch left it behind.
 3. Any other copy of the project with that uuid (an older `sculkwire_*` folder or a second rgl export) is deleted.
 
-A folder that shares the uuid but is not an rgl export or `sculkwire_*` copy of this project is never touched. `game_launch` and `game_status` report it in `deployDiagnostics`, and `game_reload` in its `diagnostics`, as a `client.duplicate-pack-uuid` warning naming the folder: remove it or give it another uuid, or the game may load it instead.
+A folder that shares the uuid but is not an rgl export or `sculkwire_*` copy of this project is never touched. `game_launch` and `game_status` report it in `deployDiagnostics`, and `game_reload` in its `diagnostics`, as a `client.duplicate-pack-uuid` warning naming the folder: remove it or give it another uuid, or the game may load it instead. `game_reload` copies the project into its own folder (the rgl export or the `sculkwire_*` folder) every time; when only a folder that is not the project's serves a uuid, that pack is used as it is and is not in `redeployed`.
 
 ## Sign-In Race at Launch
 

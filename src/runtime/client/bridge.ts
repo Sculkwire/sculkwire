@@ -12,7 +12,7 @@
  * (screens.ts), never relaunching the game.
  */
 import { rm } from "node:fs/promises";
-import { basename, resolve } from "node:path";
+import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Diagnostic } from "../../core/diagnostic.ts";
 import { compareDiagnostics } from "../../core/diagnostic.ts";
@@ -159,8 +159,9 @@ export interface BridgeStartOptions {
    */
   project?: string;
   /**
-   * Copy packs that are not deployed yet into development_*_packs (default true). rgl-deployed packs are reused, except
-   * that a fresh Regolith build is always deployed.
+   * Copy the project's packs into development_*_packs (default true), also over the project's `sculkwire_*` folder an
+   * earlier launch left. Off: a pack is only used when a folder already serves its uuid. An rgl export of an unbuilt
+   * pack is reused; a fresh Regolith build is always deployed.
    */
   deploy?: boolean;
   /**
@@ -378,7 +379,7 @@ export class ClientBridge {
       const project = resolve(opts.project);
       this.project = project;
       this.#deployOption = opts.deploy !== false;
-      const deployment = await this.#deployProject(install, project, this.#deployOption, new Set());
+      const deployment = await this.#deployProject(install, project, this.#deployOption, false);
       this.#packs = deployment.packs;
       this.#deployed.push(...deployment.owned);
       this.#deployDiagnostics = deployment.diagnostics;
@@ -918,8 +919,7 @@ export class ClientBridge {
     const redeployed: string[] = [];
     let deployDiagnostics: Diagnostic[] = [];
     if (this.project && this.install) {
-      const own = new Set(this.#deployed.map((dir) => basename(dir)));
-      const deployment = await this.#deployProject(this.install, this.project, this.#deployOption, own);
+      const deployment = await this.#deployProject(this.install, this.project, this.#deployOption, true);
       this.#packs = deployment.packs;
       for (const dir of deployment.owned) if (!this.#deployed.includes(dir)) this.#deployed.push(dir);
       redeployed.push(...deployment.copied);
@@ -939,14 +939,14 @@ export class ClientBridge {
   /**
    * Put the project's packs into `development_*_packs`: build with rgl when the Regolith profile runs filters (the
    * built packs are what the game loads), then copy per `planPackDeploy` and `applyPackDeploy`, which leave one
-   * folder of this project per uuid and warn about foreign folders sharing it. `own` holds folder names this
-   * session copied before, so a redeploy refreshes them. Throws with the rgl message when the build fails.
+   * folder of this project per uuid and warn about foreign folders sharing it. `refresh` (game_reload) copies the
+   * project again into every folder derived from it. Throws with the rgl message when the build fails.
    */
   async #deployProject(
     install: ClientInstall,
     project: string,
     deploy: boolean,
-    own: ReadonlySet<string>,
+    refresh: boolean,
   ): Promise<{ packs: DeployedPack[]; refs: PackRef[]; copied: string[]; owned: string[]; diagnostics: Diagnostic[] }> {
     const layout = await discoverProject(project);
     const comMojang = install.sharedComMojang;
@@ -997,7 +997,7 @@ export class ClientBridge {
           throw new Error(`rgl run ${regolithProfile} did not build ${unbuilt.join(", ")}, so nothing was deployed (deploying the source packs would leave out the filter output)`);
         }
       }
-      const plan = planPackDeploy({ project, packs, comMojang, deploy, deployed, own, ...(rglExports ? { rglExports } : {}) });
+      const plan = planPackDeploy({ project, packs, comMojang, deploy, deployed, refresh, ...(rglExports ? { rglExports } : {}) });
       const applied = await applyPackDeploy(plan);
       result.copied = applied.copied;
       result.owned = applied.owned;
