@@ -152,21 +152,23 @@ describe("screen.state answers", () => {
     expect(empty?.data).toEqual({ recipes: [], selected: -1, result: null });
   });
 
-  it("reads the enchanting options with their enchantments and net ids", () => {
+  it("reads the enchanting options with their enchantments, lapis and net ids", () => {
     const state = parseScreenState({
       screen: "enchanting_screen",
       kind: "enchanting_table",
       data: {
         options: [
-          { option: 0, cost: 1, hint: "efficiency", level: 1, enchants: [{ id: 15, level: 1 }], netId: 9 },
-          { option: 1, cost: 2, hint: "unbreaking", level: 2, enchants: [{ id: 17, level: 2 }, { id: 15, level: 1 }], netId: 10 },
+          { option: 0, cost: 1, hint: "efficiency", level: 1, lapis: 1, levelsTaken: 1, enchants: [{ id: 15, level: 1 }], netId: 9 },
+          { option: 1, cost: 17, hint: "unbreaking", level: 2, lapis: 2, levelsTaken: 2, enchants: [{ id: 17, level: 2 }, { id: 15, level: 1 }], netId: 10 },
           { option: 2, cost: null, hint: null, level: null, enchants: [], netId: null },
         ],
       },
     });
-    expect(state?.data?.options?.[0]).toEqual({ option: 0, cost: 1, hint: "efficiency", level: 1, enchants: [{ id: 15, level: 1 }], netId: 9 });
+    expect(state?.data?.options?.[0]).toEqual({ option: 0, cost: 1, hint: "efficiency", level: 1, lapis: 1, levelsTaken: 1, enchants: [{ id: 15, level: 1 }], netId: 9 });
+    expect(state?.data?.options?.[1]).toMatchObject({ cost: 17, lapis: 2, levelsTaken: 2 });
     expect(state?.data?.options?.[1]?.enchants).toHaveLength(2);
-    expect(state?.data?.options?.[2]).toEqual({ option: 2, cost: null, hint: null, level: null, enchants: [], netId: null });
+    // An agent that does not report the lapis: null, not a guess.
+    expect(state?.data?.options?.[2]).toEqual({ option: 2, cost: null, hint: null, level: null, lapis: null, levelsTaken: null, enchants: [], netId: null });
     expect(parseScreenState({ screen: "enchanting_screen", kind: "enchanting_table", data: { options: [] } })?.data).toEqual({ options: [] });
   });
 
@@ -480,9 +482,9 @@ describe("text for tool results", () => {
     const enchanting = parseScreenState({
       screen: "enchanting_screen",
       kind: "enchanting_table",
-      data: { options: [{ option: 0, cost: 1, hint: "efficiency", level: 1, enchants: [], netId: 9 }] },
+      data: { options: [{ option: 0, cost: 1, hint: "efficiency", level: 1, lapis: 1, levelsTaken: 1, enchants: [], netId: 9 }] },
     });
-    expect(enchanting && screenStateText(enchanting)).toBe("enchanting_screen (enchanting_table): options 1 efficiency");
+    expect(enchanting && screenStateText(enchanting)).toBe("enchanting_screen (enchanting_table): options 1 (1 lapis) efficiency");
     const beacon = parseScreenState({ screen: "beacon_screen", kind: "beacon", data: { primary: "speed", secondary: null } });
     expect(beacon && screenStateText(beacon)).toBe("beacon_screen (beacon): primary speed, secondary none");
     const unavailable = parseScreenState({ screen: "loom_screen", kind: "loom", data: { unavailable: "no loom controller", anchor: "screen.loom" } });

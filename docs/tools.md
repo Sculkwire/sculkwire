@@ -677,7 +677,7 @@ Reads and drives the screen the game has open, opened with `interact`.
 | Screen | `data` |
 |---|---|
 | Stonecutter | `recipes` (`[{ index, result, netId }]`, the game's list for the input), `selected` (`-1` for none), `result` |
-| Enchanting table | `options` (up to three: `{ option, cost, hint, level, enchants: [{ id, level }], netId }`, `option` being the index `act enchant` takes) |
+| Enchanting table | `options` (up to three: `{ option, cost, hint, level, lapis, levelsTaken, enchants: [{ id, level }], netId }`, `option` being the index `act enchant` takes; `cost` is the level the option needs, `lapis` and `levelsTaken` what it takes, option + 1 each) |
 | Villager trade | `offers` (`[{ index, buyA, buyB, sell, uses, maxUses, locked, netId }]`), `selected`, `trader` (the trader's unique id as text, as `interact` takes it) |
 | Furnace, blast furnace, smoker | `burn`, `cook`: fractions 0 to 1 |
 | Brewing stand | `brew` (done), `fuel` (left): fractions 0 to 1 |

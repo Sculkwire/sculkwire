@@ -3535,6 +3535,11 @@ const OPTION_NAME: usize = 0x58;
 const OPTION_NET_ID: usize = 0x78;
 
 /// The enchanting table's three options as the model holds them (`[]` with no item or lapis).
+///
+/// The option record holds the level the option needs (`cost`), not what it takes: option `n` takes
+/// `n + 1` lapis and `n + 1` levels. The game's own screen draws that lapis cost by button position (the
+/// enchanting screen's dust grid shows `dust_selectable_1` to `_3` on rows 0 to 2), and 1.26.63.1 took 2
+/// lapis and 2 levels for option 1 with 17 needed (live, survival).
 fn enchanting_data() -> Result<Value, RpcError> {
     let controller = screen_field_manager(ENCHANT_FIELD.load(Ordering::Acquire), "screen.enchanting")?;
     let count = enchant_options(controller)?;
@@ -3564,6 +3569,8 @@ fn enchanting_data() -> Result<Value, RpcError> {
             "cost": pe::read::<i32>(option + OPTION_COST).filter(|cost| (0..=1000).contains(cost)),
             "hint": hint,
             "level": level,
+            "lapis": index + 1,
+            "levelsTaken": index + 1,
             "enchants": enchants,
             "netId": pe::read::<u32>(option + OPTION_NET_ID),
         }));

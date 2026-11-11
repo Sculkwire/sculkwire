@@ -132,12 +132,16 @@ export interface OptionEnchant {
 export interface EnchantOption {
   /** 0-based, the index `screen act enchant` takes. */
   option: number;
-  /** The levels it costs. */
+  /** The level it needs (the number on the button). */
   cost: number | null;
   /** The enchantment name the table hints at. */
   hint: string | null;
   /** The level of its first enchantment. */
   level: number | null;
+  /** The lapis lazuli it takes: option + 1 (null from an agent that does not report it). */
+  lapis: number | null;
+  /** The levels it takes: option + 1, fewer than `cost` (null from an agent that does not report it). */
+  levelsTaken: number | null;
   /** Every enchantment it would apply. */
   enchants: OptionEnchant[];
   /** The option's net id, the one the enchant request echoes. */
@@ -400,11 +404,13 @@ function parseEnchantOption(raw: unknown, position: number): EnchantOption | und
   const cost = orNull(raw.cost, integer);
   const hint = orNull(raw.hint, rawText);
   const level = orNull(raw.level, integer);
+  const lapis = raw.lapis === undefined ? null : orNull(raw.lapis, integer);
+  const levelsTaken = raw.levelsTaken === undefined ? null : orNull(raw.levelsTaken, integer);
   const enchants = raw.enchants === undefined ? [] : arrayOf(raw.enchants, parseOptionEnchant);
   const netId = orNull(raw.netId, count);
   if (option === undefined || cost === undefined || hint === undefined || level === undefined) return undefined;
-  if (enchants === undefined || netId === undefined) return undefined;
-  return { ...raw, option, cost, hint, level, enchants, netId };
+  if (lapis === undefined || levelsTaken === undefined || enchants === undefined || netId === undefined) return undefined;
+  return { ...raw, option, cost, hint, level, lapis, levelsTaken, enchants, netId };
 }
 
 function parseTradeOffer(raw: unknown, position: number): TradeOffer | undefined {
@@ -751,7 +757,9 @@ export function screenDataText(data: ScreenData | null): string {
   if (data.selected !== undefined) parts.push(`selected ${data.selected === null || data.selected < 0 ? "none" : data.selected}`);
   if (data.trader !== undefined) parts.push(`trader ${known(data.trader)}`);
   if (data.options) {
-    const options = data.options.map((option) => `${known(option.cost)}${option.hint ? ` ${option.hint}` : ""}`);
+    const options = data.options.map(
+      (option) => `${known(option.cost)}${option.lapis === null ? "" : ` (${option.lapis} lapis)`}${option.hint ? ` ${option.hint}` : ""}`,
+    );
     parts.push(options.length ? `options ${options.join(", ")}` : "no options");
   }
   if (data.result !== undefined) parts.push(`result ${data.result ? `${data.result.item} x${data.result.count}` : "empty"}`);
@@ -864,6 +872,8 @@ function schemas() {
       cost: z.number().nullable(),
       hint: z.string().nullable(),
       level: z.number().nullable(),
+      lapis: z.number().nullable().describe("lapis lazuli the option takes (option + 1)"),
+      levelsTaken: z.number().nullable().describe("levels the option takes (option + 1); cost is the level it needs"),
       enchants: z.array(z.object({ id: z.number(), level: z.number() }).catchall(z.unknown())),
       netId: z.number().nullable(),
     })
