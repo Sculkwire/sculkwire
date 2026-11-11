@@ -1651,28 +1651,41 @@ pub(crate) fn h_screen_state(core: &'static Core, _params: &Value) -> Result<Val
     Ok(Value::Object(out))
 }
 
-/// `container.open` → `{screen, block, slots, playerSlots}`: the open screen's own containers (in map
-/// order) and the player's hotbar and inventory, from the client's container map.
+/// `container.open` → `{screen, block, position, slots, playerSlots}`: the open screen's own containers
+/// (in map order), the player's 36 carried slots once, and the block the screen belongs to.
+///
+/// The screen's own slots leave out the player's containers and the dynamic ones: a shulker box or a
+/// bundle carried in the inventory shows its contents as a container of its own. The player's slots are
+/// the combined hotbar-and-inventory view when the screen has one (hotbar first), else the hotbar and
+/// the inventory. The block is the one the crosshair picked to open the screen, read from the client's
+/// own region; a screen of an entity (a horse, a villager, a chest boat) or the inventory has none.
 pub(crate) fn h_container_open(core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
     expire(core);
     world()?;
     let screen = screen_now(core)?;
-    if kind_of(&screen.top) == "other" {
+    let kind = kind_of(&screen.top);
+    if kind == "other" {
         return Err(RpcError::invalid_params(format!("no container screen is open ({} is)", screen.top)));
     }
     let containers = open_containers()?;
-    let mut slots: Vec<Value> = Vec::new();
-    let mut player: Vec<Value> = Vec::new();
-    for open in &containers {
-        if is_player(open.name) {
-            if is_carried(open.name) {
-                player.extend(slots_of(open));
-            }
-        } else {
-            slots.extend(slots_of(open));
-        }
-    }
-    Ok(json!({ "screen": screen.top, "block": null, "slots": slots, "playerSlots": player }))
+    let slots: Vec<Value> = containers
+        .iter()
+        .filter(|open| !is_player(open.name) && open.dynamic.is_none())
+        .flat_map(slots_of)
+        .collect();
+    let named = |name: &str| containers.iter().find(|open| open.dynamic.is_none() && named_any(open.name, &[name]));
+    let player: Vec<Value> = match named("CombinedHotbarAndInventoryContainer") {
+        Some(combined) => slots_of(combined),
+        None => ["HotbarContainer", "InventoryContainer"].iter().filter_map(|name| named(name)).flat_map(slots_of).collect(),
+    };
+    let (block, position) = match kind {
+        "inventory" | "horse" | "trade" => (Value::Null, Value::Null),
+        _ => input::crosshair_block()
+            .and_then(|at| inventory::client_block(at).map(|(_, name)| (name, json!([at[0], at[1], at[2]]))))
+            .filter(|(name, _)| !name.is_null())
+            .unwrap_or((Value::Null, Value::Null)),
+    };
+    Ok(json!({ "screen": screen.top, "block": block, "position": position, "slots": slots, "playerSlots": player }))
 }
 
 /* ------------------------------------------------------------------------------------------------

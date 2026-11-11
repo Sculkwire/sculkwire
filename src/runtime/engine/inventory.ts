@@ -128,7 +128,9 @@ export interface ContainerView {
 /** The container screen the player has open, with its own slots and the player's inventory beside it. */
 export interface OpenContainer {
   screen: string;
+  /** The block the screen belongs to and where it stands; both null for an entity's screen or the inventory. */
   block: string | null;
+  position: { x: number; y: number; z: number } | null;
   slots: Slot[];
   playerSlots: Slot[];
 }
@@ -348,7 +350,9 @@ export function parseOpenContainer(raw: unknown): OpenContainer | undefined {
   const slots = parseSlots(raw.slots);
   const playerSlots = parseSlots(raw.playerSlots);
   if (!slots || !playerSlots) return undefined;
-  return { screen, block: itemName(raw.block) ?? null, slots, playerSlots };
+  const at = Array.isArray(raw.position) && raw.position.length === 3 && raw.position.every(Number.isInteger) ? (raw.position as number[]) : null;
+  const position = at ? { x: at[0] as number, y: at[1] as number, z: at[2] as number } : null;
+  return { screen, block: itemName(raw.block) ?? null, position, slots, playerSlots };
 }
 
 function parseRecipe(raw: unknown): CraftRecipe | undefined {
@@ -654,6 +658,7 @@ function schemas() {
     ...failureSchema,
     action: z.enum(["get", "open"]).optional(),
     block: z.string().nullable().optional(),
+    position: z.object({ x: z.number(), y: z.number(), z: z.number() }).nullable().optional(),
     size: z.number().optional(),
     slots: z.array(maybeSlot).optional(),
     screen: z.string().optional(),
@@ -727,7 +732,8 @@ export function registerInventoryTools(server: McpServer): void {
           const result = await containerOpen();
           if (!result.ok) return failureOf(result);
           const open = result.value;
-          return ok(`${open.screen}: ${containerText({ block: open.block, size: open.slots.length, slots: open.slots })}`, {
+          const where = open.position ? ` at ${open.position.x} ${open.position.y} ${open.position.z}` : "";
+          return ok(`${open.screen}${where}: ${containerText({ block: open.block, size: open.slots.length, slots: open.slots })}`, {
             ok: true,
             action,
             ...open,

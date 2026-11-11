@@ -18,6 +18,7 @@ import {
   parseCraftGrid,
   parseCraftMatch,
   parseInventory,
+  parseOpenContainer,
   parseSlot,
   readContainer,
   readPlayerInventory,
@@ -162,6 +163,14 @@ describe("parseContainer", () => {
       size: 2,
       slots: [null, { item: "minecraft:dirt", count: 1, enchantments: [] }],
     });
+  });
+});
+
+describe("parseOpenContainer", () => {
+  it("reads the block's position as x, y, z and keeps null for an entity's screen", () => {
+    const open = parseOpenContainer({ screen: "small_chest_screen", block: "minecraft:chest", position: [2, -60, 1], slots: [], playerSlots: [] });
+    expect(open).toEqual({ screen: "small_chest_screen", block: "minecraft:chest", position: { x: 2, y: -60, z: 1 }, slots: [], playerSlots: [] });
+    expect(parseOpenContainer({ screen: "horse_screen", block: null, position: null, slots: [], playerSlots: [] })?.position).toBeNull();
   });
 });
 

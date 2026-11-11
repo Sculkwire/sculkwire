@@ -1537,16 +1537,39 @@ fn dimension_source(source: usize, player_dimension: usize, dimension: usize) ->
 /// The block's identifier: `BlockSource::getBlock(pos)` → `Block + LEGACY` → the legacy's namespaced
 /// name, found by content as for items (a `ns:name` string whose `name` is another string of the legacy).
 fn block_name(region: usize, position: &[i32; 3]) -> Value {
-    let (Some(slot), Some(legacy_at)) = (link(L_GET_BLOCK), link(L_BLOCK_LEGACY)) else {
-        return Value::Null;
-    };
-    let Some(entry) = interface_slot(region, slot) else {
-        return Value::Null;
-    };
+    block_at(region, position).map(block_identifier).unwrap_or(Value::Null)
+}
+
+/// `BlockSource::getBlock(pos)`: the region's `Block` there, one object per block *state*.
+fn block_at(region: usize, position: &[i32; 3]) -> Option<usize> {
+    let entry = interface_slot(region, link(L_GET_BLOCK)?)?;
     // SAFETY: the region's own `Block const& getBlock(BlockPos const&)`.
     let block = unsafe { transmute::<usize, extern "C" fn(usize, *const [i32; 3]) -> usize>(entry)(region, position) };
+    has_game_table(block).then_some(block)
+}
+
+/// A `Block`'s identifier, through its legacy.
+fn block_identifier(block: usize) -> Value {
+    let Some(legacy_at) = link(L_BLOCK_LEGACY) else {
+        return Value::Null;
+    };
     let legacy = pe::read::<usize>(block + legacy_at).filter(|legacy| has_game_table(*legacy));
     legacy.and_then(legacy_identifier).map(Value::String).unwrap_or(Value::Null)
+}
+
+/// The block at `position` in the local player's own region (the client's, on the game's thread): the
+/// `Block` object, which is a different object for every block state (a lever's `open_bit`, a button's
+/// `button_pressed_bit`), and its identifier. `None` while the region cannot be read.
+pub(crate) fn client_block(position: [i32; 3]) -> Option<(usize, Value)> {
+    let accessor = crate::input::registry()?;
+    let entity = ecs::read(accessor)?.sample.entity;
+    let element = ecs::storage(accessor, anchors::component_hash("BlockSourceComponent"))
+        .and_then(|storage| ecs::element(storage, entity, BLOCK_SOURCE_STRIDE))?;
+    let control = pe::read::<usize>(element + 8).unwrap_or(0);
+    let alive = control != 0 && pe::read::<u32>(control + CONTROL_USES).is_some_and(|uses| uses > 0);
+    let region = pe::read::<usize>(element).filter(|region| alive && has_game_table(*region))?;
+    let block = block_at(region, &position)?;
+    Some((block, block_identifier(block)))
 }
 
 /// The namespaced name field of a `BlockLegacy`, by offset once found.

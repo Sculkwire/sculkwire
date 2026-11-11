@@ -1552,6 +1552,15 @@ fn wrap_degrees(value: f32) -> f32 {
     }
 }
 
+/// The block the crosshair is on now (the game's own pick against the block's real shape), or `None`
+/// when it is on an entity, on nothing, or the pick cannot be read.
+pub(crate) fn crosshair_block() -> Option<[i32; 3]> {
+    match Player::open()?.crosshair()? {
+        Crosshair::Block { block, .. } => Some(block),
+        Crosshair::Entity { .. } => None,
+    }
+}
+
 /// What the crosshair was on when a click ran.
 enum Crosshair {
     Block { block: [i32; 3], face: u8, position: Option<[f32; 3]> },

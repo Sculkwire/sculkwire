@@ -619,7 +619,7 @@ Reads a block's container, or the container screen the player has open.
 | `x`, `y`, `z` | `get`: the block position |
 | `dimension` | `get`: dimension id, e.g. `minecraft:nether` (default: the player's) |
 
-`get` answers `block`, `size` and `slots` for a block that has a container (chest, trapped chest, barrel, shulker box, hopper, dispenser, dropper, furnace family, brewing stand, crafter, ...) in the same slot shape as `player_inventory`; a block without one is `invalid_params` (`-32602`). `open` answers `screen`, `block` when the screen is a block's, `slots` for the container and `playerSlots` for the player's own inventory beside it, and needs an agent.
+`get` answers `block`, `size` and `slots` for a block that has a container (chest, trapped chest, barrel, shulker box, hopper, dispenser, dropper, furnace family, brewing stand, crafter, ...) in the same slot shape as `player_inventory`; a block without one is `invalid_params` (`-32602`). `open` answers `screen`, `block` and its `position` (`{x, y, z}`) when the screen is a block's (both `null` for an entity's screen or the inventory), `slots` for the screen's own container (not the contents of a shulker box or bundle the player carries) and `playerSlots` for the player's 36 carried slots (hotbar first, then the inventory), and needs an agent.
 
 Without an agent, `get` falls back to the helper pack's block inventory component (`source` is absent from the result; the slots are the Script API's). `open` has no fallback: the Script API does not expose the open screen.
 
