@@ -565,12 +565,17 @@ describe("engine screenshot", () => {
     const appData = join(dir, "Minecraft Bedrock");
     const install = { appData } as ClientInstall;
     const photos = join(appData, "screenshots", "sculkwire-world", "photos");
-    // An older picture from before the request must not be taken.
+    // Pictures from before the request must not be taken, even one written a moment ago (a previous shot).
     mkdirSync(join(photos, "old"), { recursive: true });
     const old = join(photos, "old", "old.png");
     writeFileSync(old, png("old"));
     const past = new Date(Date.now() - 60_000);
     utimesSync(old, past, past);
+    const previous = join(photos, "old", "previous.png");
+    writeFileSync(previous, png("previous"));
+    // Newer mtime than the fresh picture will get, so only the before-request listing can rule it out.
+    const ahead = new Date(Date.now() + 5_000);
+    utimesSync(previous, ahead, ahead);
     const agent = await makeAgent();
     const session = new EngineSession({ port: agent.port, install });
     sessions.push(session);

@@ -52,8 +52,6 @@ const STEP_TIMEOUT_MS = 60_000;
 const SCREENSHOT_TIMEOUT_MS = 60_000;
 /** How long to look for the PNG after the game accepted the request. The engine writes it asynchronously. */
 const SCREENSHOT_FILE_WAIT_MS = 20_000;
-/** How far before the request a gallery file's mtime may be and still be the picture the game named itself. */
-const SCREENSHOT_MTIME_SLACK_MS = 2_000;
 /** `input.*` answer before the next frame, so a slow answer means the drain is stuck rather than busy. */
 const INPUT_TIMEOUT_MS = 2_000;
 /** `ui.*` answer on the game's next UI frame, so a slow answer means the frame hook is not running. */
@@ -944,13 +942,14 @@ export class EngineSession {
     }
     const name = `sculkwire-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
     const requested = join(dirname(unix), `${name}.png`);
-    // A file the game finished before this moment cannot be this picture (the margin covers coarse mtimes).
-    const since = Date.now() - SCREENSHOT_MTIME_SLACK_MS;
+    const install = this.#install ?? (await findInstall().catch(() => undefined));
+    const searched = install ? galleries(install) : [];
+    // Every gallery picture that exists before the request is an older shot, however recent its mtime.
+    const before = await galleryPictures(searched);
     const result = await this.#call<{ named?: unknown } | undefined>("screenshot", { path: gamePath(requested) }, { timeoutMs: SCREENSHOT_TIMEOUT_MS });
     if (!result.ok) return result;
     const named = result.value?.named !== false;
-    const install = this.#install ?? (await findInstall().catch(() => undefined));
-    const written = await findScreenshot(requested, install ? galleries(install) : [], named ? undefined : since);
+    const written = await findScreenshot(requested, searched, named ? undefined : before);
     if (!written) {
       return {
         ok: false,
@@ -1374,15 +1373,25 @@ function galleries(install: ClientInstall): string[] {
   return out;
 }
 
+/** Every PNG or JPEG under the galleries, as absolute paths. */
+async function galleryPictures(galleries: string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (const gallery of galleries) {
+    const entries = await readdir(gallery, { recursive: true }).catch(() => [] as string[]);
+    for (const entry of entries) if (pictureFormat(entry)) out.add(join(gallery, entry));
+  }
+  return out;
+}
+
 /**
  * Polls for the screenshot: `direct` is the exact file, each gallery is searched recursively for the same file name.
- * With `since` (the game chose the name), the newest gallery PNG or JPEG modified at or after it is the picture
- * instead. Returns the first complete picture, or undefined when the wait runs out.
+ * With `before` (the game chose the name), the newest gallery PNG or JPEG not in that set is the picture instead.
+ * Returns the first complete picture, or undefined when the wait runs out.
  */
 async function findScreenshot(
   direct: string,
   galleries: string[],
-  since?: number,
+  before?: Set<string>,
 ): Promise<{ file: string; format: PictureFormat } | undefined> {
   const fileName = basename(direct);
   const deadline = Date.now() + SCREENSHOT_FILE_WAIT_MS;
@@ -1391,15 +1400,16 @@ async function findScreenshot(
     const fresh: { file: string; at: number }[] = [];
     for (const gallery of galleries) {
       const entries = await readdir(gallery, { recursive: true }).catch(() => [] as string[]);
-      if (since === undefined) {
+      if (before === undefined) {
         for (const entry of entries) if (basename(entry) === fileName) candidates.push(join(gallery, entry));
         continue;
       }
       for (const entry of entries) {
         if (!pictureFormat(entry)) continue;
         const file = join(gallery, entry);
+        if (before.has(file)) continue;
         const at = (await stat(file).catch(() => undefined))?.mtimeMs;
-        if (at !== undefined && at >= since) fresh.push({ file, at });
+        if (at !== undefined) fresh.push({ file, at });
       }
     }
     fresh.sort((a, b) => b.at - a.at);
