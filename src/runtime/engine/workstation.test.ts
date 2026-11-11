@@ -2,8 +2,10 @@
  * The workstation module: what an interact answer, an open screen, a move, an act and a close become before anything is
  * trusted, the parameters each call accepts, and how the typed calls reach the agent.
  */
-import { describe, expect, it } from "vitest";
-import { EngineSession, type EngineResult } from "./engine.ts";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+import { engine, EngineSession, type EngineResult } from "./engine.ts";
 import {
   interactBlock,
   interactBlockParams,
@@ -16,6 +18,7 @@ import {
   parseScreenMove,
   parseScreenState,
   parseSlotRef,
+  registerWorkstationTools,
   screenAct,
   screenActParams,
   screenActText,
@@ -351,10 +354,14 @@ describe("parameters", () => {
     expect(typeof screenActParams({ action: "craft", recipe: "planks", times: 0 })).toBe("string");
     expect(typeof screenActParams({ action: "craft", recipe: "planks", times: 1001 })).toBe("string");
 
-    expect(screenActParams({ action: "stonecut", recipe: "stonecutter.stone_slab" })).toEqual({
-      action: "stonecut",
-      recipe: "stonecutter.stone_slab",
-    });
+    // The stonecutter takes the index of a recipe in data.recipes; a CLI flag arrives as digits.
+    expect(screenActParams({ action: "stonecut", recipe: 2, times: 3 })).toEqual({ action: "stonecut", recipe: 2, times: 3 });
+    expect(screenActParams({ action: "stonecut", recipe: " 0 " })).toEqual({ action: "stonecut", recipe: 0 });
+    expect(typeof screenActParams({ action: "stonecut", recipe: "stonecutter.stone_slab" })).toBe("string");
+    expect(typeof screenActParams({ action: "stonecut", recipe: -1 })).toBe("string");
+    expect(typeof screenActParams({ action: "stonecut", recipe: 256 })).toBe("string");
+    expect(typeof screenActParams({ action: "stonecut" })).toBe("string");
+    expect(typeof screenActParams({ action: "craft", recipe: 2 })).toBe("string");
     expect(screenActParams({ action: "anvil", name: "Pick" })).toEqual({ action: "anvil", name: "Pick" });
     expect(screenActParams({ action: "anvil", name: "" })).toEqual({ action: "anvil", name: "" });
     expect(screenActParams({ action: "anvil" })).toEqual({ action: "anvil" });
@@ -448,6 +455,43 @@ describe("typed calls", () => {
     expect(!older.ok && older.reason).toBe("unknown_method");
     const wrong = await screenClose(recording({ "screen.close": "yes" }).session);
     expect(!wrong.ok && wrong.reason).toBe("protocol");
+  });
+});
+
+describe("the screen tool", () => {
+  type Handler = (args: Record<string, unknown>) => Promise<{ structuredContent?: Record<string, unknown>; isError?: boolean }>;
+  interface Tool {
+    config: { inputSchema: z.ZodRawShape; outputSchema: z.ZodRawShape };
+    handler: Handler;
+  }
+  const screenTool = (): Tool => {
+    const tools = new Map<string, Tool>();
+    const server = { registerTool: (name: string, config: Tool["config"], handler: Handler) => void tools.set(name, { config, handler }) };
+    registerWorkstationTools(server as unknown as McpServer);
+    const tool = tools.get("screen");
+    if (!tool) throw new Error("no screen tool");
+    return tool;
+  };
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("takes a stonecutter recipe index and a craft recipe id, and sends the index as a number", async () => {
+    const tool = screenTool();
+    const input = z.object(tool.config.inputSchema).strict();
+    expect(input.parse({ action: "act", act: "stonecut", recipe: 2 }).recipe).toBe(2);
+    expect(input.parse({ action: "act", act: "craft", recipe: "minecraft:planks" }).recipe).toBe("minecraft:planks");
+    expect(input.safeParse({ action: "act", act: "stonecut", recipe: -1 }).success).toBe(false);
+    expect(input.safeParse({ action: "act", act: "stonecut", recipe: 1.5 }).success).toBe(false);
+
+    const call = vi.spyOn(engine, "call").mockResolvedValue({
+      ok: true,
+      value: { done: true, result: slot("minecraft:stone_slab", 2), consumed: [slot("minecraft:stone")], reason: null },
+    } as EngineResult<never>);
+    const result = await tool.handler(input.parse({ action: "act", act: "stonecut", recipe: 2 }));
+    expect(result.isError).toBeFalsy();
+    expect(call).toHaveBeenCalledWith("screen.act", { action: "stonecut", recipe: 2 }, expect.anything());
+    const out = z.object(tool.config.outputSchema).strict().parse(result.structuredContent);
+    expect(out.result).toEqual({ item: "minecraft:stone_slab", count: 2, enchantments: [] });
   });
 });
 

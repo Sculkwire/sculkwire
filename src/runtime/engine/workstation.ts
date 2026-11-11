@@ -21,7 +21,7 @@
  * answers `{moved}`, the items that crossed.
  *
  * `screen.act {action, ...}` runs the screen's own action through the game's own request: `craft {recipe, times?}`,
- * `stonecut {recipe, times?}`, `anvil {name?}`, `grindstone`, `smithing`, `loom {pattern}`, `cartography`,
+ * `stonecut {recipe: index, times?}`, `anvil {name?}`, `grindstone`, `smithing`, `loom {pattern}`, `cartography`,
  * `enchant {option}`, `trade {offer, times?}`, `beacon {primary, secondary?}` and `take_result`. It answers
  * `{done, result, consumed, xpCost?, reason?}`.
  *
@@ -254,8 +254,8 @@ export interface ScreenCloseOutcome {
 /** A screen action to run, with the parameters that action takes. */
 export interface ScreenActRequest {
   action: ScreenActAction;
-  /** craft, stonecut: the recipe id the screen lists. */
-  recipe?: string;
+  /** craft: the recipe id the screen lists. stonecut: the 0-based index of a recipe in `data.recipes`. */
+  recipe?: string | number;
   /** craft, stonecut, trade: how many times to do it. */
   times?: number;
   /** anvil: the rename text; an empty string clears the name. */
@@ -626,10 +626,20 @@ export function screenActParams(request: ScreenActRequest): Record<string, unkno
   if (request.times !== undefined && (!Number.isInteger(request.times) || request.times < 1 || request.times > 1000)) {
     return "times must be an integer from 1 to 1000";
   }
-  if (request.action === "craft" || request.action === "stonecut") {
-    const recipe = text(request.recipe);
-    if (!recipe) return `${request.action} needs recipe: the id the screen lists`;
+  if (request.action === "craft") {
+    const recipe = typeof request.recipe === "string" ? text(request.recipe) : undefined;
+    if (!recipe) return "craft needs recipe: the id the screen lists";
     params.recipe = recipe;
+    if (request.times !== undefined) params.times = request.times;
+    return params;
+  }
+  if (request.action === "stonecut") {
+    // The agent indexes the stonecutter's list (`data.recipes[].index`, at most 256 entries); a CLI flag is text.
+    const raw = typeof request.recipe === "string" && /^\s*\d+\s*$/.test(request.recipe) ? Number(request.recipe) : request.recipe;
+    if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0 || raw > 255) {
+      return "stonecut needs recipe: the 0-based index of a recipe in the screen's data.recipes (0 to 255)";
+    }
+    params.recipe = raw;
     if (request.times !== undefined) params.times = request.times;
     return params;
   }
@@ -994,7 +1004,10 @@ export function registerWorkstationTools(server: McpServer): void {
         to: slotRefSchema.optional().describe("move: where they go, e.g. { container: \"furnace_ingredient_items\", slot: 0 }"),
         count: z.number().int().min(1).optional().describe("move: how many items (default: the whole stack)"),
         act: z.enum(SCREEN_ACTIONS).optional().describe("act: which action to run"),
-        recipe: z.string().optional().describe("act craft/stonecut: the recipe id the screen lists"),
+        recipe: z
+          .union([z.string(), z.number().int().min(0).max(255)])
+          .optional()
+          .describe("act craft: the recipe id craft match returned. act stonecut: the 0-based index of a recipe in data.recipes"),
         times: z.number().int().min(1).max(1000).optional().describe("act craft/stonecut/trade: how many times"),
         name: z.string().optional().describe("act anvil: the rename text; an empty string clears the name"),
         pattern: z.string().optional().describe("act loom: the pattern id the screen lists"),
@@ -1182,7 +1195,7 @@ const interactEntityCommand: CliCommand = {
 };
 
 const SCREEN_USAGE =
-  "usage: sculk screen state | sculk screen move <container:slot> <container:slot> [--count N] | sculk screen act <action> [--recipe id] [--times N] [--name text] [--pattern id] [--option 0|1|2] [--offer N] [--primary effect] [--secondary effect] | sculk screen close";
+  "usage: sculk screen state | sculk screen move <container:slot> <container:slot> [--count N] | sculk screen act <action> [--recipe id|index] [--times N] [--name text] [--pattern id] [--option 0|1|2] [--offer N] [--primary effect] [--secondary effect] | sculk screen close";
 
 const SCREEN_ACT_FLAGS = ["recipe", "times", "name", "pattern", "option", "offer", "primary", "secondary"] as const;
 
