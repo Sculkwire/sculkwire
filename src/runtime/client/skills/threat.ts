@@ -11,7 +11,7 @@ import { mobInfo, shortType, type MobInfo } from "./mobs.ts";
 export interface Threat {
   id: string;
   typeId: string;
-  /** Short key the decision model can name (`zombie_1`), numbered by distance per type. */
+  /** Short key for traces and logs (`zombie_1`), numbered by distance per type. */
   key: string;
   location: Vec3;
   /** From the player's feet, in 3D. */

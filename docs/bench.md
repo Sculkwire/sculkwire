@@ -63,7 +63,7 @@ A scenario is a small declarative object in its own file in `src/runtime/client/
 | `build(ctx)` | Extra commands with absolute coordinates from `ctx.at({ dx, dy, dz })` |
 | `player` | Game mode, time, hotbar, armor set, off hand, effects, start offset and yaw |
 | `mobs` | Mob types and spawn offsets |
-| `action(ctx)` | Any `player_act` action, or a `play` goal (run in the bench process with the built-in scores, no advisor) |
+| `action(ctx)` | Any `player_act` action, or a `play` goal (run in the bench process) |
 | `measure(ctx, outcome)` | Extra numbers for the table and the JSON |
 | `success(outcome, extra)` | Whether a run counts (default, the action succeeded and the player did not die) |
 

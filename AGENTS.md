@@ -22,14 +22,14 @@ Engine work (anything in `native/agent/` or a new agent method) starts with `doc
     - `provider.ts`: the built-in input provider for `player_act` and `sculk bench`, installed when the feature module loads; an extension's `registerInputProvider` replaces it.
   - `gamefiles/`: an installed PC (GDK) copy of the game: build detection from the game folder and `appxmanifest.xml`, the versioned vanilla packs and their `.brarchive` extraction (`game_builds`, `game_vanilla_packs`, `game_extract_pack`, `sculk gamefiles`). `wine.ts` is the one walk for Wine/Proton prefixes and their launchers' game folders; `runtime/client/install.ts` uses it too.
   - `extensions/`: the extension loader (`SCULKWIRE_EXTENSIONS` and `<config>/extensions`), `loadExtensions()` and the `ExtensionHost` handed to `activate(host)`. Extensions fail open: a broken one is skipped with one stderr line.
-  - `decision/`: optional decision model (System One API: Jev through OpenRouter/ZenMux, Kev locally), its config, `decision_status`, `sculk setup` and `sculk doctor`.
+  - `setup/`: `sculk setup` (machine checks and MCP client registration) and `sculk doctor`.
   - `update/`: managed install, `sculk update`, the background release check, client registration and `sculkwire_version`. Installers are `install.sh` and `install.ps1` at the root. A background update never writes to stdout (the MCP stream) and fails open.
 - `native/`: the in-game agent's Rust workspace, `#![no_std]`, no Windows SDK. `native/.cargo/config.toml` pins the linker and `agent-core` defines the CRT symbols the compiler emits, so the same command builds on Linux and Windows.
   - `agent-core/`: the build-agnostic core: the JSON-RPC socket server (`rpc.rs`), the hub (`hub.rs`: drain, tick stream, held input), the main-thread request queue and its drain recovery (`queue.rs`), the `Engine` seam one game build implements (`engine.rs`), the input lock and GameInput gate (`lock.rs`, `gameinput.rs`), hook, PE/x64 and image primitives, fault logging and the provable unload (`unload.rs`).
   - `agent/`: the `sculkwire_agent.dll` cdylib: anchors resolved against the loaded image (`anchors.rs`), hooks, ECS reads, and the engine methods by area (`command.rs`, `input.rs`, `options.rs`, `world.rs`, `ui.rs`, `inventory.rs`, `workstation.rs`; `methods.rs` routes them). The `debug-rpc` feature adds `debug.*` diagnosis methods and is never enabled for a published artifact.
   - `injector/`: `sculkwire-injector.exe <process.exe> <dll-path>`.
 - `test/fixtures/`: small packs (good + one broken variant per rule family) and recorded client logs. `src/testing/faketime.ts`: fake clock and seeded random for deterministic sims.
-- `docs/`: `tools.md` (every MCP tool), `install.md` (installers, managed install, updates, releasing), `client.md` (game client), `engine.md` (the in-game agent), `reverse-engineering.md` (researching the retail game for an agent feature, and the data routes that need none), `extensions.md` (extension loader and host), `decision.md`, `bench.md`.
+- `docs/`: `tools.md` (every MCP tool), `install.md` (installers, managed install, updates, releasing), `client.md` (game client), `engine.md` (the in-game agent), `reverse-engineering.md` (researching the retail game for an agent feature, and the data routes that need none), `extensions.md` (extension loader and host), `bench.md`.
 - `CONTRIBUTING.md` (setup, checks, where things go, live-game rules), `CHANGELOG.md` (each `## vX.Y.Z` section is that release's notes).
 
 ## Rules
@@ -41,7 +41,6 @@ Engine work (anything in `native/agent/` or a new agent method) starts with `doc
 - MCP tools return `structuredContent` (with `outputSchema`) plus a short text summary. Long-running work (BDS, client, `play`) must not block other tools: run it as a job and keep every call under the client's timeout.
 - Machine output on stdout, progress on stderr. Exit codes: 0 ok, 1 findings/failed tests, 2 usage or prerequisite error.
 - Never commit Mojang game content (bedrock-samples, BDS, game files, dumps from any game build): fetch it at runtime into `cacheDir()`.
-- Decision models are optional. Exactly two features may use one, each as an optional advisor through `loadDecisionModel()` from `src/decision/`: `player_act play`, and the `game_launch` join recovery (`src/runtime/client/screens.ts`, asked only when its screen-state machine is stuck). Both work without one. Every other tool must work with the provider `none` (the default). API keys are never asked for through MCP elicitation. Tests use a fake `DecisionModel` or a fake System One HTTP server, never a cloud key.
 - Nothing in this repository depends on or is derived from a non-public game build. Features for such builds belong in an extension, which reaches sculkwire only through `src/extensions/` and `src/runtime/client/inputprovider.ts`.
 - No personal data in the repo: test fixtures and logs use made-up names and ids (`Steve`, fake xuid).
 

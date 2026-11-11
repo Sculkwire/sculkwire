@@ -15,7 +15,6 @@ export interface PlayProgress {
   elapsedMs: number;
   /** The last few steps as `step 4: attack zombie_1 ok: hit`. */
   lastActions: string[];
-  latency: { medianMs: number; p90Ms: number; maxMs: number };
 }
 
 export interface PlayJobInfo {
@@ -42,15 +41,10 @@ export type PlayRunner = (ctx: { signal: AbortSignal; onStep: (step: PlayStep) =
 const LAST_ACTIONS = 5;
 const KEEP_FINISHED = 5;
 
-function percentile(sorted: readonly number[], p: number): number {
-  if (sorted.length === 0) return 0;
-  return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))]!;
-}
 
 export function stepText(t: PlayStep): string {
   const target = t.target ? ` ${t.target.key}` : "";
-  const fallback = t.fallback ? ` (fallback: ${t.fallback})` : "";
-  return `step ${t.step}: ${t.action}${target}${fallback} ${t.result.ok ? "ok" : "failed"}: ${t.result.message}`;
+  return `step ${t.step}: ${t.action}${target} ${t.result.ok ? "ok" : "failed"}: ${t.result.message}`;
 }
 
 class Job {
@@ -73,7 +67,6 @@ class Job {
   }
 
   info(): PlayJobInfo {
-    const latencies = this.steps.map((s) => s.decisionMs).sort((a, b) => a - b);
     return {
       id: this.id,
       goal: this.goal,
@@ -83,7 +76,6 @@ class Job {
         steps: this.result?.steps ?? this.steps.length,
         elapsedMs: (this.finishedAt ?? Date.now()) - this.startedAt,
         lastActions: (this.result?.trace ?? this.steps).slice(-LAST_ACTIONS).map(stepText),
-        latency: this.result?.latency ?? { medianMs: percentile(latencies, 0.5), p90Ms: percentile(latencies, 0.9), maxMs: latencies.at(-1) ?? 0 },
       },
       ...(this.stopReason ? { stopReason: this.stopReason } : {}),
       ...(this.result ? { result: this.result } : {}),

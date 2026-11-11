@@ -17,7 +17,6 @@ import { pauseOnTakeover, playJobs, runActions, stepText, type PlayJobInfo } fro
 import { DIFFICULTIES, type Difficulty } from "./world.ts";
 import { FOREGROUND_MESSAGE } from "./windows.ts";
 import type { InputRoute } from "./launcher.ts";
-import { loadDecisionModel } from "../../decision/config.ts";
 
 const position = z.object({ line: z.number(), column: z.number() });
 const diagnosticSchema = z.object({
@@ -162,7 +161,7 @@ function notifyProgress(extra: Extra, progress: number, total: number | undefine
     .catch(() => undefined);
 }
 
-/** Stop reason, combat numbers, latency and the last few tactics of a `play` run. */
+/** Stop reason, combat numbers and the last few tactics of a `play` run. */
 function playText(p: PlayResult): string {
   const s = p.stats;
   const killed = Object.entries(s.killed).map(([t, n]) => `${n} ${t}`).join(", ");
@@ -170,8 +169,7 @@ function playText(p: PlayResult): string {
     `play stopped by ${p.stoppedBy} after ${p.steps} tactic(s) in ${(p.durationMs / 1000).toFixed(1)} s: ${p.message}`,
     `goal (${p.goalCheck.kind}): ${p.goalCheck.progress}`,
     `kills ${s.kills}${killed ? ` (${killed})` : ""}, hits ${s.hits} (${s.crits} critical) of ${s.swings} swings, damage taken ${s.damageTaken}, deaths ${s.deaths}${s.health !== undefined ? `, health ${s.health}` : ""}`,
-    `advisor ${p.model}, ${s.decisions} decisions, advisor latency median ${p.latency.medianMs} ms, p90 ${p.latency.p90Ms} ms` +
-      (p.advice.answered ? `, answered ${p.advice.answered}, used ${p.advice.used}, differed from the built-in choice ${p.advice.differed}` : ""),
+    `${s.decisions} decisions`,
   ];
   for (const t of p.trace.slice(-5)) lines.push(`  ${stepText(t)}`);
   return lines.join("\n");
@@ -182,7 +180,7 @@ function jobText(j: PlayJobInfo): string {
   if (j.result) return `${head}\n${playText(j.result)}`;
   const p = j.progress;
   const lines = [
-    `${head}, ${p.steps} step(s) in ${(p.elapsedMs / 1000).toFixed(1)} s, decision latency median ${p.latency.medianMs} ms, p90 ${p.latency.p90Ms} ms`,
+    `${head}, ${p.steps} step(s) in ${(p.elapsedMs / 1000).toFixed(1)} s`,
     ...p.lastActions.map((a) => `  ${a}`),
   ];
   if (j.error) lines.push(`error: ${j.error}`);
@@ -586,8 +584,6 @@ export function register(server: McpServer): void {
         .array(z.enum(TACTICS))
         .optional()
         .describe(`Tactics play may use, from ${TACTICS.join(", ")}. Default all. idle is always allowed`),
-      advisor: z.boolean().optional().describe("Ask the configured decision model as an advisor (default true when one is set up). false: the built-in tactic scores alone"),
-      vision: z.boolean().optional().describe("Send a screenshot with every decision when the model accepts images (Jev). Off by default because it is slower"),
     }),
   ]);
 
@@ -621,11 +617,10 @@ export function register(server: McpServer): void {
         "stops with \"the user took control (F9)\" and a play job pauses until F9 gives control back or player_job stop. " +
         "The `play` action pursues a goal on its own: every 250 ms it reads a threat map (hostile mobs, their " +
         "distance, speed and creeper fuses, plus health, food, armor, weapon and food in the hotbar), checks the goal " +
-        "and picks a tactic (fight a mob, flee, eat, goto, use the held item on a mob, idle) with built-in scores, so " +
-        "it needs no decision model. When one is configured (Jev or Kev, `sculk setup`) it is asked as an advisor, " +
-        "and emergencies and the built-in goal checks override it. Kill goals (kill N of a type, kill every hostile " +
-        "near), reach goals and hit-every-X goals are checked against the game; other goals end on the model's " +
-        "goal_done or the time limit. `play` runs in the background and the call returns at once with a job id. " +
+        "and picks a tactic (fight a mob, flee, eat, goto, use the held item on a mob, idle) with built-in scores. " +
+        "Kill goals (kill N of a type, kill every hostile near), reach goals and hit-every-X goals are checked against " +
+        "the game and end the run when met; any other goal cannot be verified, so it runs until the time limit " +
+        "(durationMs). `play` runs in the background and the call returns at once with a job id. " +
         "Follow it with player_job (status, wait, stop), which returns the stop reason, kills, hits, critical hits, " +
         "damage taken and a trace of every tactic once it ends. `play` must be the last action. Only one play job runs at a time, a new one " +
         "stops the old one, and other actions are refused while one runs. The keyboard route needs game_launch with " +
@@ -690,16 +685,9 @@ export function register(server: McpServer): void {
           else if (spec && results.every((r) => r.ok || continueOnError)) {
             const env = {
               controller,
-              ...(spec.advisor !== false ? await loadDecisionModel().then((model) => (model ? { model } : {})) : {}),
               entities: async (radius: number) => (await bridge.query("entities", { radius, limit: 50 })) as EntityInfo[],
               loadout: async () => (await bridge.query("loadout")) as Loadout,
               deaths: async (since: number) => (await bridge.query("deaths", { since })) as { tick: number; deaths: Death[] },
-              screenshot: async () => {
-                const path = dataDir("client", "screenshots", "play.png");
-                await mkdir(dirname(path), { recursive: true });
-                const shot = await bridge.screenshot(path);
-                return `data:image/png;base64,${(await readFile(shot.path)).toString("base64")}`;
-              },
               paused: () => provider?.pausedReason() !== undefined,
             };
             job = await playJobs.start(spec.goal, async ({ signal, onStep }) => {
@@ -735,7 +723,6 @@ export function register(server: McpServer): void {
       steps: z.number(),
       elapsedMs: z.number(),
       lastActions: z.array(z.string()),
-      latency: z.object({ medianMs: z.number(), p90Ms: z.number(), maxMs: z.number() }),
     }),
     stopReason: z.string().optional(),
     result: z.object({}).passthrough().optional(),
@@ -748,7 +735,7 @@ export function register(server: McpServer): void {
       title: "Follow a play job",
       description:
         "Follow the background `play` job that player_act started. `status` returns its progress (steps, elapsed time, " +
-        "last actions, decision latency so far). `wait` blocks until the job ends or 25 s pass, whichever is first, so " +
+        "last actions). `wait` blocks until the job ends or 25 s pass, whichever is first, so " +
         "it stays under the client's call timeout, and can be called again. `stop` ends it and lets go of every key. " +
         "Once the job has ended, each action returns the full result with the trace of every step, the stop reason and " +
         "the final player state. Without `id` it uses the running job, else the latest one. A job paused by the user's " +

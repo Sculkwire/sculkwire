@@ -3,7 +3,6 @@ import { backgroundDownloadsAllowed, exitAfterGrace } from "./core/background.ts
 import type { CliCommand } from "./core/cli.ts";
 import { ExitCode } from "./core/diagnostic.ts";
 import { VERSION } from "./core/meta.ts";
-import { commands as decisionCommands } from "./decision/cli.ts";
 import { loadExtensions } from "./extensions/index.ts";
 import { commands as gamefilesCommands } from "./gamefiles/cli.ts";
 import { commands as knowledgeCommands } from "./knowledge/cli.ts";
@@ -11,6 +10,7 @@ import { serveStdio } from "./mcp/server.ts";
 import { commands as bdsCommands } from "./runtime/bds/cli.ts";
 import { commands as gameCommands } from "./runtime/client/cli.ts";
 import { commands as engineCommands } from "./runtime/engine/cli.ts";
+import { commands as setupCommands } from "./setup/cli.ts";
 import { commands as updateCommands } from "./update/cli.ts";
 import { commands as validateCommands } from "./validate/cli.ts";
 import { useKnowledgeProviders } from "./validate/providers.ts";
@@ -30,7 +30,7 @@ const BUILTIN: CliCommand[] = [
   ...gameCommands,
   ...engineCommands,
   ...gamefilesCommands,
-  ...decisionCommands,
+  ...setupCommands,
   ...updateCommands,
 ];
 

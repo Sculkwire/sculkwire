@@ -61,7 +61,7 @@ Common areas: `knowledge`, `validate`, `bds`, `client`, `engine` (the TypeScript
 ## Tests
 
 - Test behaviour, not wiring. A test states what a caller sees: the parsed answer, the diagnostic with its file and line, the route the build driver takes. A test that only checks that a function was called with some arguments is not wanted.
-- No game, network or cloud key in a unit test. Fake the edges: `src/testing/faketime.ts` for a fake clock and seeded random, a fake `DecisionModel` or a fake HTTP server for the decision model, recorded answers for the agent and the client logs.
+- No game, network or cloud key in a unit test. Fake the edges: `src/testing/faketime.ts` for a fake clock and seeded random, a fake HTTP server, recorded answers for the agent and the client logs.
 - Fixtures are small and made up. A pack in `test/fixtures/` has a good variant and one broken variant per rule family. Names and ids are invented (`Steve`, a fake xuid); never a real account, path or log from your machine.
 - Never commit Mojang game content: no bedrock-samples, BDS, game files, unpacked vanilla packs or dumps from any game build. sculkwire fetches what it needs at runtime into its cache.
 
@@ -94,8 +94,7 @@ These hold for anything that drives a real client, by hand or from a test:
 1. Put it in the feature it belongs to: `src/<feature>/mcp.ts` calls `server.registerTool` with a zod input schema and an `outputSchema`, and returns `structuredContent` plus a one-line text summary. A new feature exports `register(server)` and is listed in `src/mcp/server.ts`.
 2. Add the matching CLI command to the feature's `commands` in `src/<feature>/cli.ts` (listed in `src/cli.ts` for a new feature).
 3. Keep every call under the client's timeout. Long work (BDS, the client, `play`) runs as a job the tool starts and another tool reads.
-4. A tool must work without a decision model. Only `player_act play` and the `game_launch` join recovery may ask one, as an optional advisor.
-5. Update the docs as above, and add tests for the parsing and the decisions the tool makes.
+4. Update the docs as above, and add tests for the parsing and the choices the tool makes.
 
 ### A Knowledge Source
 

@@ -4,7 +4,6 @@ import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { setBackgroundDownloads } from "../core/background.ts";
 import { VERSION } from "../core/meta.ts";
 import { runShutdown } from "../core/shutdown.ts";
-import { register as decision } from "../decision/mcp.ts";
 import { loadExtensions, registerExtension } from "../extensions/index.ts";
 import { register as gamefiles } from "../gamefiles/mcp.ts";
 import { register as knowledge } from "../knowledge/mcp.ts";
@@ -21,7 +20,7 @@ import { register as validate } from "../validate/mcp.ts";
  */
 export type RegisterFeature = (server: McpServer) => void;
 
-const FEATURES: RegisterFeature[] = [knowledge, validate, bds, game, engine, gamefiles, decision, update];
+const FEATURES: RegisterFeature[] = [knowledge, validate, bds, game, engine, gamefiles, update];
 
 /** The server with every built-in feature, then the tools of every installed extension (`src/extensions/`). */
 export async function createServer(): Promise<McpServer> {

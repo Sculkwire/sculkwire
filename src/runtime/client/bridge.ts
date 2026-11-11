@@ -70,7 +70,6 @@ import { horizontalDistance, PlayerController, type EntityInfo, type Impact, typ
 import { inputProvider } from "./inputprovider.ts";
 import { createWorld, type CreatedWorld, type Difficulty, type PackRef } from "./world.ts";
 import { currentScreen, NO_SCREENS, pngSize, readShot, recoverJoin, screensInLog, type RecoveryIO, type RecoveryResult, type ScreenState } from "./screens.ts";
-import { loadDecisionModel } from "../../decision/config.ts";
 
 export const DEFAULT_DEBUGGER_PORT = 19151;
 const READY_MARK = "[sculkwire:ready]";
@@ -549,8 +548,7 @@ export class ClientBridge {
   /**
    * Walk the game from whatever screen it shows back into the test world (`recoverJoin` in screens.ts): Back to menu
    * on the error screen, Escape out of the Marketplace or any other screen, Play on the start screen, the test world's
-   * tile on the Play screen, waiting out loading screens, for up to `timeoutMs`. A configured decision model with
-   * image support is asked only when the fixed presses for a screen did not move the game on.
+   * tile on the Play screen, waiting out loading screens, for up to `timeoutMs`.
    */
   async returnToWorld(timeoutMs = 180_000): Promise<RecoveryResult> {
     const state = this.launchState;
@@ -558,7 +556,6 @@ export class ClientBridge {
     if (!state || !world) throw new Error("the game is not running");
     if (!hasInput(state)) throw new Error(this.#joinNoInputMessage());
     this.#joinRecovery = { attempts: 0, recovered: false, ...(this.#joinState.lines.length ? { log: this.#joinState.lines.join("\n") } : {}) };
-    const advisor = await loadDecisionModel().catch(() => undefined);
     const shots = dataDir("client", "screenshots");
     const io: RecoveryIO = {
       readLog: () => this.#readJoinLog(),
@@ -583,11 +580,9 @@ export class ClientBridge {
     };
     const result = await recoverJoin(io, {
       levelId: world.levelId,
-      worldName: world.name,
       timeoutMs,
       screens: this.#screens,
       join: this.#joinState,
-      ...(advisor?.images ? { advisor } : {}),
     });
     this.#screens = result.screens;
     this.#joinState = result.join;

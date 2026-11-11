@@ -8,7 +8,6 @@ REPO="${SCULKWIRE_REPO:-https://github.com/ve3dy/sculkwire.git}"
 REPO_GIVEN=0
 [ -n "${SCULKWIRE_REPO:-}" ] && REPO_GIVEN=1
 YES="${SCULKWIRE_YES:-0}"
-DECISION="${SCULKWIRE_DECISION:-}"
 REGISTER="${SCULKWIRE_REGISTER:-}"
 REGISTER_GIVEN=0
 [ -n "$REGISTER" ] && REGISTER_GIVEN=1
@@ -17,19 +16,16 @@ NO_PATH="${SCULKWIRE_NO_PATH:-0}"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: install.sh [--yes] [--decision none|openrouter|zenmux|local] [--register omp,claude] [--channel release|main|off]
-                  [--repo URL] [--no-path]
+Usage: install.sh [--yes] [--register omp,claude] [--channel release|main|off] [--repo URL] [--no-path]
 
-  --yes       ask nothing (decision model none unless one is saved, no client registration unless --register)
-  --decision  optional decision model provider (default none). API keys are never passed as flags: set
-              OPENROUTER_API_KEY or ZENMUX_API_KEY, or run `sculk setup` in a terminal later
+  --yes       ask nothing (no client registration unless --register)
   --register  MCP clients to register sculkwire with (omp, claude). The JSON for any other client is printed
   --channel   update channel: release (default), main, or off for no automatic updates
   --repo      git URL or local path to install from (default https://github.com/ve3dy/sculkwire.git)
   --no-path   do not put sculk on PATH (default: a symlink in $SCULKWIRE_BIN_DIR, else ~/.local/bin)
 
 Every option can also come from the environment, which works when the script is piped: SCULKWIRE_YES=1,
-SCULKWIRE_DECISION, SCULKWIRE_REGISTER, SCULKWIRE_CHANNEL, SCULKWIRE_REPO, SCULKWIRE_NO_PATH=1.
+SCULKWIRE_REGISTER, SCULKWIRE_CHANNEL, SCULKWIRE_REPO, SCULKWIRE_NO_PATH=1.
 EOF
 }
 
@@ -43,18 +39,16 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --yes | -y) YES=1 ;;
     --no-path) NO_PATH=1 ;;
-    --decision | --register | --channel | --repo)
+    --register | --channel | --repo)
       [ $# -ge 2 ] || die "$1 needs a value"
       opt="$1"
       shift
       case "$opt" in
-        --decision) DECISION="$1" ;;
         --register) REGISTER="$1" REGISTER_GIVEN=1 ;;
         --channel) CHANNEL="$1" ;;
         --repo) REPO="$1" REPO_GIVEN=1 ;;
       esac
       ;;
-    --decision=*) DECISION="${1#*=}" ;;
     --register=*) REGISTER="${1#*=}" REGISTER_GIVEN=1 ;;
     --channel=*) CHANNEL="${1#*=}" ;;
     --repo=*) REPO="${1#*=}" REPO_GIVEN=1 ;;
@@ -70,7 +64,6 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-case "$DECISION" in "" | none | openrouter | zenmux | local) ;; *) die "--decision must be none, openrouter, zenmux or local" ;; esac
 case "$CHANNEL" in "" | release | main | off) ;; *) die "--channel must be release, main or off" ;; esac
 
 command -v git >/dev/null 2>&1 || die "git is required: install it from https://git-scm.com"
@@ -120,24 +113,6 @@ fi
 TTY=0
 if [ "$YES" != 1 ] && (: </dev/tty) 2>/dev/null; then TTY=1; fi
 
-if [ -z "$DECISION" ] && [ "$TTY" = 1 ]; then
-  say ""
-  say "Decision model (optional, only player_act play and the game_launch sign-in recovery use one):"
-  say "  1) None (default)"
-  say "  2) Jev through OpenRouter"
-  say "  3) Jev through ZenMux"
-  say "  4) Kev on your own GPU"
-  printf 'Choice [1]: ' >&2
-  read -r answer </dev/tty || answer=""
-  case "$answer" in
-    2 | openrouter) DECISION=openrouter ;;
-    3 | zenmux) DECISION=zenmux ;;
-    4 | local | kev) DECISION=local ;;
-    1 | none) DECISION=none ;;
-    *) DECISION="" ;; # Enter keeps a saved choice, or none
-  esac
-fi
-
 if [ "$REGISTER_GIVEN" = 0 ] && [ "$TTY" = 1 ]; then
   detected=""
   [ -d "$HOME/.omp" ] && detected="omp"
@@ -148,7 +123,6 @@ if [ "$REGISTER_GIVEN" = 0 ] && [ "$TTY" = 1 ]; then
 fi
 
 set -- setup --yes
-[ -n "$DECISION" ] && set -- "$@" --decision "$DECISION"
 [ -n "$REGISTER" ] && set -- "$@" --register "$REGISTER"
 "$LAUNCHER" "$@" || die "sculk setup failed"
 

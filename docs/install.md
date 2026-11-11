@@ -11,14 +11,11 @@ Steps for an AI agent that was asked to install sculkwire. Work in the clone of 
 3. Run the installer without questions. Use `./install.sh --yes` on Linux or macOS and `.\install.ps1 -Yes` on Windows. Add `--register <client>` (`-Register <client>`) when your client is one of the accepted ones.
 4. If you could not register yourself, add the JSON the installer printed under "MCP registration for any other client" to your own MCP configuration. If you cannot edit that configuration, show the user the JSON and where it belongs.
 5. Run `sculk doctor` and show the user its output. Lines tagged `warning` or `info` are optional features.
-6. Ask the user one optional question. "Decision model (optional): None (default), Jev through OpenRouter, Jev through ZenMux, Kev on your own GPU". No answer means None, and nothing more is needed.
-   - Jev through OpenRouter or ZenMux. Run `sculk setup --yes --decision openrouter` (or `zenmux`). Never ask for an API key and never handle one. Tell the user to set `OPENROUTER_API_KEY` (or `ZENMUX_API_KEY`) in their environment, or to run `sculk setup` in a terminal themselves.
-   - Kev. Run `sculk setup --yes --decision local`, then offer to set up the local server as described in [Decision Model](decision.md). Ask before installing anything.
-7. Tell the user to restart the session so the sculkwire tools load.
+6. Tell the user to restart the session so the sculkwire tools load.
 
 ## Installers
 
-`install.sh` (Linux and macOS) and `install.ps1` (Windows PowerShell 5.1 or PowerShell 7) take the same options, ask the same questions and print the same lines.
+`install.sh` (Linux and macOS) and `install.ps1` (Windows PowerShell 5.1 or PowerShell 7) take the same options, ask the same question and print the same lines.
 
 1. Check for git, npm and a Node.js that runs TypeScript sources.
 2. Use the clone the script runs from, or clone the repository into a temporary folder when the script arrives through a pipe.
@@ -26,12 +23,11 @@ Steps for an AI agent that was asked to install sculkwire. Work in the clone of 
 4. Put `sculk` on PATH, after saying what it is about to change. `--no-path` (`-NoPath`) skips this step.
    - Linux and macOS: a symlink `sculk` in `SCULKWIRE_BIN_DIR`, default `~/.local/bin`. Your shell profile is never edited: when that folder is not on PATH, the installer prints the line to add.
    - Windows: the managed `bin` folder is added to the user PATH (new terminals pick it up) and to the PATH of the running session. With `SCULKWIRE_BIN_DIR` set, a `sculk.cmd` that calls the launcher is written there instead, and that folder is added. Windows cannot create a symlink without admin rights.
-5. Ask the two setup questions (decision model, MCP clients) unless `--yes` is given or there is no terminal to ask in (`install.sh` reads `/dev/tty`, `install.ps1` needs an interactive console with stdin not redirected), then run `sculk setup --yes` with the answers.
+5. Ask which MCP clients to register with unless `--yes` or `--register` is given or there is no terminal to ask in (`install.sh` reads `/dev/tty`, `install.ps1` needs an interactive console with stdin not redirected), then run `sculk setup --yes` with the answer.
 
 | `install.sh` | `install.ps1` | Environment | Meaning |
 |---|---|---|---|
-| `--yes` | `-Yes` | `SCULKWIRE_YES=1` | Ask nothing. A saved decision model is kept, otherwise none is saved. No client is registered unless `--register` is given |
-| `--decision <provider>` | `-Decision <provider>` | `SCULKWIRE_DECISION` | `none` (default), `openrouter`, `zenmux` or `local`. Only the provider is saved, never a key |
+| `--yes` | `-Yes` | `SCULKWIRE_YES=1` | Ask nothing. No client is registered unless `--register` is given |
 | `--register <clients>` | `-Register <clients>` | `SCULKWIRE_REGISTER` | Comma separated: `omp`, `claude` |
 | `--channel <channel>` | `-Channel <channel>` | `SCULKWIRE_CHANNEL` | `release` (default), `main` or `off` |
 | `--repo <url>` | `-Repo <url>` | `SCULKWIRE_REPO` | Repository to install from, a git URL or a local path. Default `https://github.com/ve3dy/sculkwire.git` |

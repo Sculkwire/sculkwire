@@ -211,7 +211,7 @@ async function runOnce(s: Scenario, index: number, run: number, controller: Play
   const limit = setTimeout(() => ctrl.abort(), s.timeoutMs + 5000);
   try {
     if (spec.action === "play") {
-      played = await play({ ...(spec as PlayAction), advisor: false, durationMs: (spec as PlayAction).durationMs ?? s.timeoutMs }, playEnv(controller), { signal: ctrl.signal });
+      played = await play({ ...(spec as PlayAction), durationMs: (spec as PlayAction).durationMs ?? s.timeoutMs }, playEnv(controller), { signal: ctrl.signal });
     } else {
       action = await controller.run(spec as PlayerAction, ctrl.signal);
     }

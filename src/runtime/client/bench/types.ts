@@ -115,7 +115,7 @@ export interface Scenario {
   build?(ctx: BenchContext): string[];
   player: PlayerSetup;
   mobs?: MobSpawn[];
-  /** What the player does. `play` runs in the bench process with the built-in scores (no advisor). */
+  /** What the player does. `play` runs in the bench process. */
   action(ctx: BenchContext): PlayerAction | PlayAction;
   /** Extra numbers for the table and the JSON, read after the run. */
   measure?(ctx: BenchContext, outcome: RunOutcome): Promise<Record<string, Metric>> | Record<string, Metric>;

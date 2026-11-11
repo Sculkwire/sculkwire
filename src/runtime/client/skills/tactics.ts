@@ -1,26 +1,13 @@
 /**
  * The tactic layer: every few hundred milliseconds `play` scores what the player could do now (fight a mob, flee,
  * eat, walk to the goal, use the held item on something, idle) from the threat map and the goal, and keeps doing
- * the best one. The scores are hand-tuned utilities in 0 to 1, so the layer works without any decision model; a
- * configured model is asked as an advisor on top (see `play.ts`).
+ * the best one. The scores are hand-tuned utilities in 0 to 1.
  */
 import type { Goal } from "./goal.ts";
 import type { Threat, ThreatMap } from "./threat.ts";
 
 export const TACTICS = ["fight", "flee", "eat", "goto", "use_on", "idle"] as const;
 export type TacticKind = (typeof TACTICS)[number];
-
-export const TACTIC_TEXT: Record<TacticKind, string> = {
-  fight: "fight the target in melee (approach, crits, strafe) until it dies",
-  flee: "run away from the threats (or the target) to a safe distance",
-  eat: "eat the best food in the hotbar",
-  goto: "walk to the goal's place",
-  use_on: "use the held item on the target once (throw or hit)",
-  idle: "do nothing for a moment",
-};
-
-/** Tactics that need a target entity. */
-export const TARGETED: Partial<Record<TacticKind, true>> = { fight: true, use_on: true };
 
 export interface Tactic {
   kind: TacticKind;
@@ -32,8 +19,8 @@ export interface Tactic {
   recover?: boolean;
 }
 
-/** A score at or above this is an emergency (a creeper about to blow, near death next to a mob): it overrides the model. */
-export const EMERGENCY = 0.9;
+/** A score at or above this is an emergency (a creeper about to blow, near death next to a mob): it preempts the running tactic at once. */
+const EMERGENCY = 0.9;
 /** A new tactic must beat the running one by this much, so the player does not flip between two close options. */
 export const HYSTERESIS = 0.08;
 /** A creeper's fuse that has burned this long, this close, means get away now. */

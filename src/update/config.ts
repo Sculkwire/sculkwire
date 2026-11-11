@@ -36,7 +36,7 @@ export async function readChannel(path = configPath()): Promise<Channel> {
   }
 }
 
-/** Save the channel, keeping every other key and, on POSIX, the file's mode (0600 when it holds an API key). */
+/** Save the channel, keeping every other key and, on POSIX, the file's mode. */
 export async function saveChannel(channel: Channel, path = configPath()): Promise<string> {
   const file = await readFileJson(path);
   const update = typeof file.update === "object" && file.update !== null ? (file.update as Record<string, unknown>) : {};

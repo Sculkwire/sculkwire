@@ -11,7 +11,6 @@ Works in Windows PowerShell 5.1 and PowerShell 7.
 #>
 param(
   [switch]$Yes,
-  [string]$Decision = "",
   [string[]]$Register = @(),
   [string]$Channel = "",
   [string]$Repo = "",
@@ -32,12 +31,9 @@ $sculkwireInstallExit = & {
   function Fail([string]$Message) { throw "sculkwire install: $Message" }
   function Usage {
     Say @"
-Usage: install.ps1 [-Yes] [-Decision none|openrouter|zenmux|local] [-Register omp,claude] [-Channel release|main|off]
-                   [-Repo URL] [-NoPath]
+Usage: install.ps1 [-Yes] [-Register omp,claude] [-Channel release|main|off] [-Repo URL] [-NoPath]
 
-  -Yes       ask nothing (decision model none unless one is saved, no client registration unless -Register)
-  -Decision  optional decision model provider (default none). API keys are never passed as parameters: set
-             OPENROUTER_API_KEY or ZENMUX_API_KEY, or run ``sculk setup`` in a terminal later
+  -Yes       ask nothing (no client registration unless -Register)
   -Register  MCP clients to register sculkwire with (omp, claude). The JSON for any other client is printed
   -Channel   update channel: release (default), main, or off for no automatic updates
   -Repo      git URL or local path to install from (default https://github.com/ve3dy/sculkwire.git)
@@ -45,7 +41,7 @@ Usage: install.ps1 [-Yes] [-Decision none|openrouter|zenmux|local] [-Register om
              bin folder, to the user PATH)
 
 Every option can also come from the environment, which works when the script is piped: SCULKWIRE_YES=1,
-SCULKWIRE_DECISION, SCULKWIRE_REGISTER, SCULKWIRE_CHANNEL, SCULKWIRE_REPO, SCULKWIRE_NO_PATH=1.
+SCULKWIRE_REGISTER, SCULKWIRE_CHANNEL, SCULKWIRE_REPO, SCULKWIRE_NO_PATH=1.
 "@
   }
 
@@ -55,7 +51,6 @@ SCULKWIRE_DECISION, SCULKWIRE_REGISTER, SCULKWIRE_CHANNEL, SCULKWIRE_REPO, SCULK
     # Parameters win over the environment variables a piped run uses instead.
     $yesOpt = $Yes.IsPresent -or ($env:SCULKWIRE_YES -eq "1")
     $noPathOpt = $NoPath.IsPresent -or ($env:SCULKWIRE_NO_PATH -eq "1")
-    $decisionOpt = if ($Decision) { $Decision } else { "$env:SCULKWIRE_DECISION" }
     $registerOpt = if ($Register.Count) { $Register -join "," } else { "$env:SCULKWIRE_REGISTER" }
     $registerGiven = $registerOpt -ne ""
     $channelOpt = if ($Channel) { $Channel } else { "$env:SCULKWIRE_CHANNEL" }
@@ -63,7 +58,6 @@ SCULKWIRE_DECISION, SCULKWIRE_REGISTER, SCULKWIRE_CHANNEL, SCULKWIRE_REPO, SCULK
     $repoGiven = $repoOpt -ne ""
     if (-not $repoGiven) { $repoOpt = "https://github.com/ve3dy/sculkwire.git" }
 
-    if ($decisionOpt -notin "", "none", "openrouter", "zenmux", "local") { Fail "-Decision must be none, openrouter, zenmux or local" }
     if ($channelOpt -notin "", "release", "main", "off") { Fail "-Channel must be release, main or off" }
 
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Fail "git is required: install it from https://git-scm.com" }
@@ -124,21 +118,6 @@ SCULKWIRE_DECISION, SCULKWIRE_REGISTER, SCULKWIRE_CHANNEL, SCULKWIRE_REPO, SCULK
     # Questions need a console; a redirected stdin (CI, another program) answers nothing.
     $interactive = -not $yesOpt -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
 
-    if (-not $decisionOpt -and $interactive) {
-      Say ""
-      Say "Decision model (optional, only player_act play and the game_launch sign-in recovery use one):"
-      Say "  1) None (default)"
-      Say "  2) Jev through OpenRouter"
-      Say "  3) Jev through ZenMux"
-      Say "  4) Kev on your own GPU"
-      $answer = "$(Read-Host 'Choice [1]')".Trim()
-      if ($answer -in "2", "openrouter") { $decisionOpt = "openrouter" }
-      elseif ($answer -in "3", "zenmux") { $decisionOpt = "zenmux" }
-      elseif ($answer -in "4", "local", "kev") { $decisionOpt = "local" }
-      elseif ($answer -in "1", "none") { $decisionOpt = "none" }
-      else { $decisionOpt = "" } # Enter keeps a saved choice, or none
-    }
-
     if (-not $registerGiven -and $interactive) {
       $detected = @()
       if (Test-Path (Join-Path $HOME ".omp")) { $detected += "omp" }
@@ -149,7 +128,6 @@ SCULKWIRE_DECISION, SCULKWIRE_REGISTER, SCULKWIRE_CHANNEL, SCULKWIRE_REPO, SCULK
     }
 
     $setupArgs = @("setup", "--yes")
-    if ($decisionOpt) { $setupArgs += @("--decision", $decisionOpt) }
     if ($registerOpt) { $setupArgs += @("--register", $registerOpt) }
     # The registration JSON goes to the console, not into this block's result.
     & $launcher @setupArgs | Out-Host
@@ -168,4 +146,4 @@ $sculkwireInstallExit = @($sculkwireInstallExit)[-1]
 if ($sculkwireInstallFile) { exit $sculkwireInstallExit }
 $global:LASTEXITCODE = $sculkwireInstallExit
 # A piped run defined the parameters in the caller's session too.
-Remove-Variable sculkwireInstallFile, sculkwireInstallExit, Yes, Decision, Register, Channel, Repo, NoPath, Help -ErrorAction SilentlyContinue
+Remove-Variable sculkwireInstallFile, sculkwireInstallExit, Yes, Register, Channel, Repo, NoPath, Help -ErrorAction SilentlyContinue

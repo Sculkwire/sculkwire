@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import type { Decision, DecisionModel, DecisionState, Question } from "../../decision/types.ts";
 import { crc32, deflateSync } from "node:zlib";
 import type { UiControl } from "../engine/ui.ts";
 import {
@@ -424,12 +423,12 @@ class FakeGame {
   }
 }
 
-async function recover(game: FakeGame, extra: { advisor?: DecisionModel; timeoutMs?: number } = {}) {
+async function recover(game: FakeGame, extra: { timeoutMs?: number } = {}) {
   const screens = screensInLog(game.history());
-  return recoverJoin(game.io(), { levelId: "sculkwire-bridge", worldName: "sculkwire-bridge", screens, ...extra });
+  return recoverJoin(game.io(), { levelId: "sculkwire-bridge", screens, ...extra });
 }
 
-describe("join recovery state machine (no decision model)", () => {
+describe("join recovery state machine", () => {
   it("presses Back to menu with Return and opens the test world from the Play screen", async () => {
     const game = new FakeGame({ start: "disconnect", afterBackToMenu: "play" });
     const result = await recover(game);
@@ -491,72 +490,18 @@ describe("join recovery state machine (no decision model)", () => {
     expect((await recover(game)).recovered).toBe(true);
     expect(game.inputs).toEqual(["Return"]);
   });
-});
 
-/** A fake decision model that answers the screen Choice and finds buttons with a Box at fixed places. */
-function fakeAdvisor(places: Record<string, { x: number; y: number }>, screen?: string) {
-  const calls: Record<string, Question>[] = [];
-  const model: DecisionModel = {
-    label: "fake",
-    images: true,
-    async decide(state: DecisionState, questions: Record<string, Question>): Promise<Decision> {
-      calls.push(questions);
-      expect(Array.isArray(state) && state.some((p) => typeof p !== "string")).toBe(true);
-      const answers: Decision["answers"] = {};
-      for (const [id, q] of Object.entries(questions)) {
-        if (q.type === "choice") answers[id] = { type: "choice", choice: screen ?? "start", probabilities: {} };
-        else if (q.type === "noul") answers[id] = { type: "noul", noul: Object.keys(places).some((k) => q.instructions.includes(k)) ? 0.9 : 0.1 };
-        else if (q.type === "box") {
-          const p = Object.entries(places).find(([k]) => q.instructions.includes(k))?.[1] ?? { x: 0.01, y: 0.01 };
-          answers[id] = { type: "box", box: { left: p.x - 0.05, right: p.x + 0.05, top: p.y - 0.02, bottom: p.y + 0.02 }, confidence: 0.9 };
-        }
-      }
-      return { answers, latencyMs: 1 };
-    },
-  };
-  return { model, calls };
-}
-
-describe("join recovery with a decision model as advisor", () => {
-  it("is not asked while the fixed presses work", async () => {
-    const { model, calls } = fakeAdvisor({ "Play button": LAYOUT.play });
-    const result = await recover(new FakeGame({ start: "store" }), { advisor: model });
-    expect(result.recovered).toBe(true);
-    expect(calls).toEqual([]);
-  });
-
-  it("finds a moved Play button with a Box after the fixed presses failed", async () => {
-    const moved = { x: 0.3, y: 0.6 };
-    const { model, calls } = fakeAdvisor({ "Play button": moved }, "start");
-    const game = new FakeGame({ start: "start", playButton: moved });
-    const result = await recover(game, { advisor: model });
-    expect(result.recovered).toBe(true);
-    expect(calls.some((q) => q.screen?.type === "choice")).toBe(true);
-    expect(calls.some((q) => q.target?.type === "box")).toBe(true);
-    expect(game.inputs).toContain("click 0.300,0.600");
-  });
-
-  it("without a model the same moved button is not found, and the recovery stops at its time limit", async () => {
+  it("does not find a moved Play button, and stops at its time limit", async () => {
     const game = new FakeGame({ start: "start", playButton: { x: 0.3, y: 0.6 } });
     const result = await recover(game, { timeoutMs: 60_000 });
     expect(result.recovered).toBe(false);
   });
 
-  it("never asks the advisor or clicks on a store screen, only presses Escape", async () => {
-    const { model, calls } = fakeAdvisor({ "Play button": LAYOUT.play }, "start");
+  it("never clicks on a store screen, only presses Escape", async () => {
     const game = new FakeGame({ start: "store", frozen: true });
-    const result = await recover(game, { advisor: model, timeoutMs: 30_000 });
+    const result = await recover(game, { timeoutMs: 30_000 });
     expect(result.recovered).toBe(false);
-    expect(calls).toEqual([]);
     expect(new Set(game.inputs)).toEqual(new Set(["Escape"]));
-  });
-
-  it("acts on the advisor's screen when it disagrees with the log", async () => {
-    // The log says start, the screenshot shows a store screen: Escape instead of Play.
-    const { model } = fakeAdvisor({}, "store");
-    const game = new FakeGame({ start: "start", playButton: { x: 0.9, y: 0.9 }, frozen: true });
-    const result = await recover(game, { advisor: model, timeoutMs: 40_000 });
-    expect(result.steps.some((s) => s.includes("the screen is store, not start"))).toBe(true);
   });
 });
 
@@ -608,7 +553,7 @@ describe("screens from the agent's UI", () => {
 describe("join recovery through the agent's UI", () => {
   /** A game whose log names no screens at all: only `ui.screen` can tell where it is. */
   const uiOnly = (opts: FakeGameOptions) => new FakeGame({ ui: true, quiet: true, ...opts });
-  const start = { levelId: "sculkwire-bridge", worldName: "sculkwire-bridge", timeoutMs: 60_000 };
+  const start = { levelId: "sculkwire-bridge", timeoutMs: 60_000 };
 
   it("reads the screen from ui.screen and presses the named control", async () => {
     const game = uiOnly({ start: "disconnect", afterBackToMenu: "rejoin" });

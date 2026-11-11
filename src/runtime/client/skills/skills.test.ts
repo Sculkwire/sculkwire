@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { Answer, Decision, DecisionModel, Question } from "../../../decision/types.ts";
 import type { PlayerInput } from "../launcher.ts";
 import { PlayerController, type EntityInfo, type Loadout, type PlayerState, type PlayerWorld } from "../player.ts";
 import { checkGoal, parseGoal } from "./goal.ts";
 import { armorPoints, bestFoodSlot, bestWeaponSlot } from "./items.ts";
 import { CRIT_GIVE_UP_MS, HIT_CONFIRM_MS, HIT_COOLDOWN_MS, HIT_DOUBT_MS, meleePlan, swingOutcome, type MeleeInput } from "./melee.ts";
-import { adviseTactic, play, type Death } from "./play.ts";
+import { play, type Death } from "./play.ts";
 import { chooseTactic, scoreTactics, tacticKey } from "./tactics.ts";
 import { ThreatTracker, type ThreatMap } from "./threat.ts";
 import { escapeYaw } from "./flee.ts";
@@ -102,7 +101,7 @@ describe("threat map", () => {
   });
 
   it("names the carried food at full hunger without offering to eat it", () => {
-    // Live retail: steak in slot 2 at food 20/20 made the advisor's state say `Food: none`.
+    // Live retail: steak in slot 2 at food 20/20 was reported as `Food: none`.
     const full = mapOf([], { health: 5 }, kit(20));
     expect(full.vitals).toMatchObject({ hunger: 20, armor: 15, weapon: { slot: 1 }, food: { slot: 2, typeId: "minecraft:cooked_beef" } });
     expect(scoreTactics(full, parseGoal("explore")).some((t) => t.kind === "eat")).toBe(false);
@@ -165,38 +164,12 @@ describe("tactic scores", () => {
   });
 });
 
-describe("advisor", () => {
-  const m = mapOf([mob("a", "zombie", 0, 3), mob("b", "skeleton", 0, 10)]);
-  const scored = scoreTactics(m, killHostiles);
-  const choice = (c: string, p: number): Answer => ({ type: "choice", choice: c, probabilities: { [c]: p } });
-
-  it("follows a confident model's tactic and target", () => {
-    const r = adviseTactic(scored, { tactic: choice("fight", 0.8), target: choice("skeleton_1", 0.7) });
-    expect([r.by, r.tactic.kind, r.tactic.target?.id]).toEqual(["model", "fight", "b"]);
-  });
-
-  it("keeps the built-in choice for a weak, impossible or targetless answer", () => {
-    expect(adviseTactic(scored, { tactic: choice("flee", 0.1) })).toMatchObject({ by: "builtin", tactic: { kind: "fight" }, fallback: expect.stringMatching(/under/) });
-    expect(adviseTactic(scored, { tactic: choice("eat", 0.9) })).toMatchObject({ by: "builtin", fallback: "eat is not possible now" });
-    const t = adviseTactic(scored, { tactic: choice("fight", 0.9), target: choice("none", 0.9) });
-    expect([t.by, t.tactic.target?.id]).toEqual(["model", "a"]);
-  });
-
-  it("lets an emergency override the model", () => {
+describe("emergency", () => {
+  it("preempts the running tactic at once", () => {
     const t = new ThreatTracker();
     t.update(0, me(), [mob("c", "creeper", 2, 0)]);
     const burning = scoreTactics(t.update(800, me(), [mob("c", "creeper", 2, 0)]), killHostiles);
-    const r = adviseTactic(burning, { tactic: choice("fight", 0.95), target: choice("creeper_1", 0.95) });
-    expect(r).toMatchObject({ by: "builtin", tactic: { kind: "flee" }, fallback: expect.stringMatching(/^emergency/) });
-  });
-
-  it("tells a model tactic that differs from the built-in choice from one that agrees", () => {
-    const same = adviseTactic(scored, { tactic: choice("fight", 0.9), target: choice("zombie_1", 0.9) });
-    expect([same.by, tacticKey(same.tactic) === tacticKey(same.builtin)]).toEqual(["model", true]);
-    const other = adviseTactic(scored, { tactic: choice("fight", 0.9), target: choice("skeleton_1", 0.9) });
-    expect([other.by, other.tactic.target?.id, other.builtin.target?.id]).toEqual(["model", "b", "a"]);
-    const off = adviseTactic(scored, undefined);
-    expect(off.tactic).toBe(off.builtin);
+    expect(chooseTactic(burning, "fight:c").kind).toBe("flee");
   });
 });
 
@@ -329,87 +302,34 @@ function fakeGame(entities: EntityInfo[], state: PlayerState = me(), damage = 20
   return { env, clicks, state, entities };
 }
 
-/** A model that answers from a script and records what it was asked. */
-function fakeModel(script: (n: number) => Record<string, Answer>): DecisionModel & { asked: Record<string, Question>[] } {
-  const asked: Record<string, Question>[] = [];
-  return {
-    label: "fake",
-    images: false,
-    asked,
-    async decide(_state, questions): Promise<Decision> {
-      asked.push(questions);
-      return { answers: script(asked.length), latencyMs: 5 };
-    },
-  };
-}
-
-const pick = (c: string, p: number): Answer => ({ type: "choice", choice: c, probabilities: { [c]: p } });
-
 describe("play loop", () => {
-  it("kills every hostile without a decision model and stops on the built-in goal check", async () => {
+  it("kills every hostile and stops on the built-in goal check", async () => {
     const game = fakeGame([mob("-11", "zombie", 0, 2.5), mob("-12", "zombie", 0, 3)]);
     const r = await play({ action: "play", goal: "kill the hostile mobs near you", durationMs: 15_000 }, game.env);
-    expect(r).toMatchObject({ stoppedBy: "goal_done", model: "none", goalCheck: { kind: "kill", known: true } });
+    expect(r).toMatchObject({ stoppedBy: "goal_done", goalCheck: { kind: "kill", known: true } });
     expect(r.stats).toMatchObject({ kills: 2, killed: { zombie: 2 }, hits: 2, deaths: 0 });
-    expect(r.trace.map((t) => [t.action, t.target?.id, t.by])).toEqual([
-      ["fight", "-11", "builtin"],
-      ["fight", "-12", "builtin"],
+    expect(r.trace.map((t) => [t.action, t.target?.id])).toEqual([
+      ["fight", "-11"],
+      ["fight", "-12"],
       // Idles while the goal check confirms nothing is left.
-      ["idle", undefined, "builtin"],
+      ["idle", undefined],
     ]);
     expect(game.entities).toEqual([]);
   });
 
-  it("asks the advisor without goal_done for checked goals, and follows its tactic", async () => {
-    const game = fakeGame([mob("c", "cow", 0, 3)]);
-    const model = fakeModel(() => ({ tactic: pick("idle", 0.9), target: pick("none", 1), goal_done: { type: "noul", noul: 1 } }));
-    const r = await play({ action: "play", goal: "kill 2 zombies", durationMs: 1200, stepMs: 100 }, { ...game.env, model });
-    expect(r.stoppedBy).toBe("timeout");
-    expect(Object.keys(model.asked[0] ?? {})).toEqual(["tactic", "target"]);
-    expect(r.trace[0]).toMatchObject({ action: "idle", by: "model", state: expect.stringMatching(/Progress: 0 of 2 zombie killed/) });
-    expect(r.model).toBe("fake");
-    // Every decision was answered and the model's idle ran each time.
-    expect(r.advice.answered).toBe(r.stats.decisions);
-    expect(r.advice.used).toBe(r.advice.answered);
+  it("runs a goal the built-in checks cannot verify until the time limit", async () => {
+    const r = await play({ action: "play", goal: "dance a little", durationMs: 1000, stepMs: 100 }, fakeGame([]).env);
+    expect([r.stoppedBy, r.goalCheck.known]).toEqual(["timeout", false]);
+    expect(r.message).toMatch(/time limit: the built-in checks cannot verify this goal/);
+    expect(r.trace[0]).toMatchObject({ action: "idle", score: expect.any(Number), reason: expect.any(String) });
   });
 
-  it("stops on the advisor's goal_done for goals without a check", async () => {
-    const game = fakeGame([]);
-    const model = fakeModel((n) => ({ tactic: pick("idle", 0.9), target: pick("none", 1), goal_done: { type: "noul", noul: n >= 3 ? 0.95 : 0 } }));
-    const r = await play({ action: "play", goal: "dance a little", stepMs: 100 }, { ...game.env, model });
-    expect(r.stoppedBy).toBe("goal_done");
-    expect(r.stats.decisions).toBe(3);
-    expect(model.asked[0]?.goal_done).toBeDefined();
-  });
-
-  it("runs on the built-in choice when the advisor fails or is turned off", async () => {
-    const game = fakeGame([mob("-11", "zombie", 0, 2.5)]);
-    const broken: DecisionModel = { label: "down", images: false, decide: async () => Promise.reject(new Error("model down")) };
-    const r = await play({ action: "play", goal: "kill the zombie", durationMs: 10_000 }, { ...game.env, model: broken });
-    expect(r).toMatchObject({ stoppedBy: "goal_done", stats: { kills: 1 } });
-    const off = fakeGame([]);
-    const model = fakeModel(() => ({ tactic: pick("idle", 1) }));
-    const r2 = await play({ action: "play", goal: "dance", durationMs: 1000, advisor: false }, { ...off.env, model });
-    expect([r2.model, model.asked.length]).toEqual(["none", 0]);
-  });
-
-  it("stops when the player dies, when the simulation is paused, and on a slow advisor at the time limit", async () => {
+  it("stops when the player dies and when the simulation is paused", async () => {
     const dead = fakeGame([], me({ health: 0 }));
     expect(await play({ action: "play", goal: "g" }, dead.env)).toMatchObject({ stoppedBy: "died", stats: { deaths: 1 } });
     const paused = fakeGame([]);
     const p = await play({ action: "play", goal: "g" }, { ...paused.env, paused: () => true });
     expect([p.stoppedBy, p.message]).toEqual(["error", expect.stringMatching(/paused/)]);
-    const slow: DecisionModel = {
-      label: "slow",
-      images: false,
-      decide: (_s, _q, options) => {
-        const { promise, reject } = Promise.withResolvers<Decision>();
-        options?.signal?.addEventListener("abort", () => reject(new Error("decision request was cancelled")));
-        return promise;
-      },
-    };
-    const t = await play({ action: "play", goal: "g", durationMs: 1000 }, { ...fakeGame([]).env, model: slow });
-    expect(t.stoppedBy).toBe("timeout");
   });
 
   it("rejects unknown tactics in allow", async () => {

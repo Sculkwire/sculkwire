@@ -15,7 +15,6 @@
  */
 import { readFile } from "node:fs/promises";
 import { inflateSync } from "node:zlib";
-import type { DecisionModel, Question } from "../../decision/types.ts";
 import { engine, type EngineResult } from "../engine/engine.ts";
 import { isStoreScreen, type UiControl, type UiScreen } from "../engine/ui.ts";
 import { CLIENT_JOINED, joinStateInLog, NO_JOIN_YET, type JoinState } from "./contentlog.ts";
@@ -336,12 +335,8 @@ export interface RecoveryIO {
 export interface RecoveryOptions {
   /** Level id (folder under minecraftWorlds) of the test world. */
   levelId: string;
-  /** The world's display name, for the advisor. */
-  worldName?: string;
   /** Give up after this long (default 3 minutes). */
   timeoutMs?: number;
-  /** Optional decision model with image support, asked only when the fixed steps did not move the game on. */
-  advisor?: DecisionModel;
   /** State of the reads before the recovery started. */
   screens?: ScreenState;
   join?: JoinState;
@@ -377,17 +372,6 @@ const SETTLE_MS: Record<ScreenKind, number> = {
 const PATIENCE_MS = 4000;
 /** A world tile press starts a world-loading screen within this time. */
 const OPEN_PATIENCE_MS = 8000;
-
-const ADVISOR_SCREENS: Record<string, string> = {
-  start: "the Minecraft title screen with Play, Settings and Marketplace buttons",
-  play: "the Play screen listing worlds (Worlds tab) with world tiles",
-  store: "the Marketplace or another store screen",
-  disconnect: "an error screen saying an error has occurred, with Back to menu",
-  loading: "a loading or saving progress screen",
-  world: "the game world itself (blocks, HUD) with no menu over it",
-  pause: "the pause menu over the world (Resume, Settings, Save & Quit)",
-  other: "any other screen or dialog",
-};
 
 type Press = { label: string; run: () => Promise<void>; patienceMs?: number };
 
@@ -464,8 +448,7 @@ function touchRoute(io: RecoveryIO, route: () => UiRecovery | undefined, frame: 
  * played, so the first tile), any other screen Escape until the start screen comes back; loading screens are waited
  * out. With the in-game agent attached the screen comes from `ui.screen` and every press goes through the agent, so
  * this works in the background; otherwise the engine log tells which screen is up and the keys are pressed on the
- * host. Either way the log says whether each press moved the game on, and when the fixed presses for a screen did not,
- * the optional advisor is shown a screenshot and asked which screen it is and where the button is.
+ * host. Either way the log says whether each press moved the game on.
  */
 export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promise<RecoveryResult> {
   const deadline = io.now() + (opts.timeoutMs ?? 180_000);
@@ -561,7 +544,7 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
     }
     const n = tries[known] ?? 0;
     tries[known] = n + 1;
-    const press = (await advisedPress(touches, io, opts, known, n, wrongWorld, steps)) ?? fixedPress(touches, known, n, tile, wrongWorld, localTiles);
+    const press = fixedPress(touches, known, n, tile, wrongWorld, localTiles);
     steps.push(`${known}: ${press.label}`);
     try {
       await press.run();
@@ -606,70 +589,6 @@ function fixedPress(t: Touch, kind: ScreenKind, n: number, tile: number, wrongWo
       return t.key("Escape");
     default:
       return t.key("Escape");
-  }
-}
-
-/** What the advisor is asked to find on each screen. */
-function advisorTarget(kind: ScreenKind, worldName: string | undefined, wrongWorld: boolean): string | undefined {
-  switch (kind) {
-    case "disconnect":
-      return "the Back to menu button in `screen`";
-    case "start":
-      return "the Play button in `screen`";
-    case "play":
-      return worldName ? `the world tile named "${worldName}" in \`screen\`` : "the first world tile in `screen`";
-    case "pause":
-      return wrongWorld ? "the Save & Quit button in `screen`" : undefined;
-    default:
-      return undefined;
-  }
-}
-
-/**
- * Ask the advisor, only after the fixed presses for this screen went round once without moving the game on, and only
- * when it is configured and takes images. Its screen answer overrides the log's when they disagree; its box is
- * clicked when it also says the button is there. Any failure falls back to the fixed presses.
- */
-async function advisedPress(
-  t: Touch,
-  io: RecoveryIO,
-  opts: RecoveryOptions,
-  kind: ScreenKind,
-  n: number,
-  wrongWorld: boolean,
-  steps: string[],
-): Promise<Press | undefined> {
-  const model = opts.advisor;
-  // Store screens (Marketplace, Minecoins, Dressing Room) are only ever left with Escape, never clicked.
-  if (!model?.images || !t.canClick() || kind === "store" || n < 2 || n % 2 !== 0) return undefined;
-  const shot = await io.screenshot(`advisor-${kind}`).catch(() => undefined);
-  if (!shot) return undefined;
-  const image = { type: "image_url" as const, image_url: { url: `data:image/png;base64,${shot.png.toString("base64")}` } };
-  try {
-    const screenDecision = await model.decide(["`screen` is this Minecraft screenshot:", image], {
-      screen: { type: "choice", instructions: "Which Minecraft screen is `screen`?", criteria: ADVISOR_SCREENS },
-    });
-    const screenAnswer = screenDecision.answers.screen;
-    const seen = screenAnswer?.type === "choice" && screenAnswer.choice in ADVISOR_SCREENS ? (screenAnswer.choice as ScreenKind) : kind;
-    if (seen !== kind) steps.push(`advisor (${model.label}): the screen is ${seen}, not ${kind}`);
-    const target = advisorTarget(seen, opts.worldName, wrongWorld);
-    if (!target) return seen === "loading" || seen === "world" ? { label: "wait (advisor)", run: async () => undefined } : t.key("Escape");
-    const questions: Record<string, Question> = {
-      visible: { type: "noul", instructions: `Is ${target} visible?` },
-      target: { type: "box", instructions: target },
-    };
-    const decision = await model.decide(["`screen` is this Minecraft screenshot:", image], questions);
-    const visible = decision.answers.visible;
-    const box = decision.answers.target;
-    if (visible?.type !== "noul" || visible.noul < 0.5 || box?.type !== "box") {
-      steps.push(`advisor (${model.label}): ${target} not found`);
-      return undefined;
-    }
-    const at = { x: (box.box.left + box.box.right) / 2, y: (box.box.top + box.box.bottom) / 2 };
-    return t.click(`${target.replace(/ in `screen`$/, "")} (advisor ${model.label})`, at, seen === "play" ? 2 : 1, seen === "play" ? OPEN_PATIENCE_MS : PATIENCE_MS);
-  } catch (e) {
-    steps.push(`advisor (${model.label}) failed: ${e instanceof Error ? e.message : String(e)}`);
-    return undefined;
   }
 }
 

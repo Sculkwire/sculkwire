@@ -112,8 +112,6 @@ The world link can beat Microsoft sign-in, and the join then fails in one of two
 
 Each press waits for the screen to change before the next way of pressing is tried. The recovery stops when the client is in the test world or after 3 minutes. Its presses, the screenshot of the screen it started from, and the outcome are in `game_status` as `joinRecovery`.
 
-When a decision model with image support is configured (`sculk setup`, Jev), it is an optional advisor. It is asked only when the fixed presses for a screen went round once without moving the game on, never on a store screen. It gets a screenshot, a Choice for which screen it shows and a Box for the button to press. The recovery works without a model.
-
 The recovery presses keys and clicks on Linux in window and off-screen mode and on Windows (where it brings the game window to the front first). In `desktop` mode on Linux there is no background input, so `game_launch` fails with a message that asks you to press "Back to menu" yourself, then Play and the test world. When you started the game yourself (no launch command), the same step is listed in `manualSteps` and sculkwire waits until you are in the world.
 
 With the in-game agent attached, the screen comes from the agent's `ui.screen` instead, and every press goes through the game's own UI: a named control where the screen lists one (`Back to menu`, `Play`), the key otherwise, and the world tile through `ui.click`. That works in the background and on Windows without the foreground. The engine log still says which world opened and whether each press moved the game on. When `ui.screen` fails twice in a row, the recovery falls back to the log and the host's keys for the rest of that run.

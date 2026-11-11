@@ -17,11 +17,9 @@ function step(n: number): PlayStep {
     atMs: n * 10,
     action: "fight",
     target: { key: "zombie_1", id: "-1", typeId: "minecraft:zombie" },
-    by: "builtin",
     score: 0.7,
     reason: "goal target",
     result: { ok: true, message: "hit", durationMs: 5 },
-    decisionMs: 20 + n,
   };
 }
 
@@ -48,13 +46,10 @@ function fakeLoop(steps: number, everyMs: number, log: string[] = []): PlayRunne
     log.push("released");
     return {
       goal: "g",
-      model: "fake",
       steps: trace.length,
       stoppedBy,
       message,
       durationMs: 0,
-      latency: { medianMs: 0, p90Ms: 0, maxMs: 0 },
-      advice: { answered: 0, used: 0, differed: 0 },
       goalCheck: { kind: "free", known: false, progress: "" },
       stats: { decisions: trace.length, kills: 0, killed: {}, swings: 0, hits: 0, crits: 0, damageTaken: 0, deaths: 0 },
       trace,
@@ -73,7 +68,6 @@ describe("PlayJobs", () => {
     expect(mid.status).toBe("running");
     expect(mid.progress.steps).toBeGreaterThan(0);
     expect(mid.progress.lastActions[0]).toMatch(/^step 1: fight zombie_1 ok: hit$/);
-    expect(mid.progress.latency.maxMs).toBeGreaterThan(0);
     const seen: number[] = [];
     const done = await jobs.wait(undefined, 5000, { onStep: (s) => seen.push(s.step) });
     expect(done.status).toBe("done");

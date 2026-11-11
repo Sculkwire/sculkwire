@@ -41,7 +41,7 @@ Sculkwire gives your AI agent the Bedrock docs, a validator, a test server and t
 | Containers and Crafting | `container`, `craft`, `interact`, `screen` |
 | Engine | `engine_attach`, `engine_status`, `engine_command`, `engine_player`, `engine_tick`, `engine_screenshot` |
 | Game Files | `game_builds`, `game_vanilla_packs`, `game_extract_pack` |
-| Setup | `decision_status`, `sculkwire_version` |
+| Setup | `sculkwire_version` |
 
 The [tool reference](docs/tools.md) explains each tool and its inputs.
 
@@ -57,7 +57,7 @@ Paste this into your AI agent harness:
 Install the sculkwire MCP server: clone https://github.com/ve3dy/sculkwire.git and follow the "Agent Install" steps in its docs/install.md.
 ```
 
-The agent installs sculkwire, registers it and runs `sculk doctor`. It asks one optional question about a decision model. The default is none.
+The agent installs sculkwire, registers it and runs `sculk doctor`.
 
 ### Install With a Script
 
@@ -77,12 +77,9 @@ cd sculkwire
 .\install.ps1
 ```
 
-The installer asks two questions:
+The installer asks which MCP clients to register with.
 
-1. Which decision model to use. Press Enter for none.
-2. Which MCP clients to register with.
-
-`--yes` (`-Yes` in PowerShell) skips the questions. Other options are in [Install and Update](docs/install.md#installers).
+`--yes` (`-Yes` in PowerShell) skips the question. Other options are in [Install and Update](docs/install.md#installers).
 
 Or install in one line:
 
@@ -131,30 +128,6 @@ sculk update --channel off      # No automatic updates (release and main are the
 
 Details are in [Install and Update](docs/install.md#updates).
 
-## Optional Decision Model
-
-A decision model is a small AI model that answers multiple-choice questions about the game. You do not need one. Everything works without it, and the default is none.
-
-It is used in two places, only as an advisor:
-
-- **`player_act` `play`:** suggests which tactic to use next, such as fight, flee or eat.
-- **`game_launch`:** looks at a screenshot to find the right button when sign-in recovery gets stuck.
-
-| | Without a model | With a model |
-|---|---|---|
-| `play` tactics | Built-in scores pick the tactic | The model suggests a tactic; built-in scores take over when it is slow or unsure |
-| Sign-in recovery | Built-in menu steps | Also asks the model when those steps get stuck (needs Jev) |
-| Cost | None | Jev: billed per input token. Kev: free, needs a GPU with about 4.3 GB VRAM |
-
-**Does it help?** A test on 2026-11-11 with local Kev showed no measurable difference in win rate, time or damage taken. See [Measured Effect](docs/decision.md#measured-effect).
-
-**When to set one up:**
-
-- You want help with stuck sign-ins. Use Jev through OpenRouter or ZenMux. It reads images.
-- You want to try the advisor for free on your own GPU. Use Kev. It reads text only, so it cannot help with sign-in.
-
-Setup is in [Decision Model](docs/decision.md).
-
 ## Requirements
 
 | Feature | Requirement |
@@ -164,7 +137,6 @@ Setup is in [Decision Model](docs/decision.md).
 | Game client | Minecraft Bedrock for PC (GDK). Linux also needs gamescope and xdotool. See [Game Client Setup](docs/client.md) |
 | In-game agent (optional) | The game running. sculkwire downloads the helper, or builds it if you have Rust. See [In-Game Agent](docs/engine.md) |
 | Game files | An installed PC (GDK) copy of the game. See [Game Client Setup](docs/client.md) |
-| Decision model (optional) | An OpenRouter or ZenMux key, or a local Kev server |
 
 ## CLI
 

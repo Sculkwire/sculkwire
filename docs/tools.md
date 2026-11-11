@@ -10,7 +10,6 @@ Every tool returns structured JSON plus a short text summary. Problems found in 
 - [Containers and Crafting](#containers-and-crafting)
 - [Engine](#engine)
 - [Game Files](#game-files)
-- [Decision Model](#decision-model)
 - [sculkwire](#sculkwire)
 
 Most knowledge tools take `channel` (`stable` by default, or `preview`) and `offline` (default false, answer from the local cache only and never fetch). Every answer names the game version and bedrock-samples tag it describes.
@@ -531,7 +530,7 @@ Against a group, `fight` reads the hostile mobs within 8 blocks every 50 ms, fro
 
 #### play
 
-`play` pursues a goal without the agent and without a decision model. A configured model (Jev through OpenRouter or ZenMux, or Kev served locally, see [Decision Model](decision.md)) is asked as an advisor when there is one.
+`play` pursues a goal without the agent. The built-in tactic scores choose every step.
 
 Every `stepMs` (250 ms by default) the loop reads a threat map. It holds the living entities within 24 blocks with their distance, how fast they close in, how dangerous they are, and for creepers how long the fuse has been burning, plus the player's health, food level, armor points, best weapon and best food in the hotbar. It checks the goal, scores what the player could do now and keeps the best tactic running as a skill.
 
@@ -554,17 +553,9 @@ A new tactic must beat the running one by 0.08, so the player does not flip betw
 | "go to 10 64 -20", "walk to 10, -5" | The player is within 2 blocks of x/z |
 | "hit every cow near you once with the held item" | Every cow within 24 blocks has been hit by `use_on` |
 
-Kills come from the helper pack's death log (deaths the player caused), so a creeper that blew itself up is not a kill. Other goals end when the advisor's `goal_done` reaches 0.8, or at the time limit when there is no advisor.
+Kills come from the helper pack's death log (deaths the player caused), so a creeper that blew itself up is not a kill. Any other goal cannot be verified by these checks, so it runs until `durationMs` runs out, and the result message says so.
 
-With an advisor, every decision sends it a short text state (the goal, its progress, the time left, the vitals, every hostile and other entity with a key such as `zombie_1`, the running tactic and the last result) and asks it up to three questions in one request.
-
-| Question | Type | Answers |
-|---|---|---|
-| `tactic` | Choice | The tactics possible now |
-| `target` | Choice | An entity key, or `none` |
-| `goal_done` | Noul | Probability that the goal is achieved. Only asked for goals without a built-in check |
-
-The model's tactic runs when its probability is at least 0.3 and the tactic is possible. A targeted tactic whose target answer does not fit takes its best-scored target. An emergency (a score of 0.9 or more, such as a burning creeper) overrides the model, and so does the built-in choice when the model answers late (after 1.5 s) or fails. The loop stops when the goal is done, when the player dies, when `durationMs` runs out, or on an error such as the simulation being paused.
+An emergency (a score of 0.9 or more, such as a burning creeper) preempts the running tactic at once. The loop stops when the goal is done, when the player dies, when `durationMs` runs out, or on an error such as the simulation being paused.
 
 | Field | Default | What it does |
 |---|---|---|
@@ -572,12 +563,10 @@ The model's tactic runs when its probability is at least 0.3 and the tactic is p
 | `durationMs` | 30000 | Time limit, 1000 to 300000 |
 | `stepMs` | 250 | Time between tactic decisions, 100 to 1000 |
 | `allow` | all | Tactics `play` may use, from `fight`, `flee`, `eat`, `goto`, `use_on`, `idle`. `idle` is always allowed |
-| `advisor` | true | Asks the configured decision model as an advisor. `false` runs on the built-in scores alone |
-| `vision` | false | Sends a screenshot with every decision when the model accepts images (Jev). Off by default because it is slower |
 
 `play` runs as a background job, because a run lasts longer than most MCP clients let one call run. It must be the last action in the list. The call returns at once with the job id in `job` and `status: "running"`, and [player_job](#player_job) follows it. Only one play job runs at a time. Starting another stops the first, and every other `player_act` call is refused until the job ends or `player_job` stops it. Play jobs also stop on `game_stop`, on `game_launch` and when the MCP server shuts down.
 
-The finished job carries the stop reason, the goal check and its progress, combat numbers (decisions, kills by type, swings, hits, critical hits, damage taken, deaths, final health), the advisor's median and 90th percentile latency, `advice` (decisions the model `answered`, the ones where its tactic was `used`, and the ones where that tactic `differed` from what the built-in scores would have run), and a trace with one entry per tactic run. Each entry has the tactic and target, whether the built-in scores or the model chose it and why, its score, the state text and answers when a model was asked, and how it ended (finished, or preempted by the next tactic). The text summary lists the stop reason, the combat numbers and the last five tactics.
+The finished job carries the stop reason, the goal check and its progress, combat numbers (decisions, kills by type, swings, hits, critical hits, damage taken, deaths, final health), and a trace with one entry per tactic run. Each entry has the tactic and target, its score and the reason it was chosen, and how it ended (finished, or preempted by the next tactic). The text summary lists the stop reason, the combat numbers and the last five tactics.
 
 ### player_job
 
@@ -591,7 +580,7 @@ Follows the `play` job that `player_act` started. Without `id` it uses the runni
 
 | `action` | What it does |
 |---|---|
-| `status` | Returns the job's progress at once. That is the steps so far, the elapsed time, the last five actions and the decision latency so far (median, 90th percentile, most) |
+| `status` | Returns the job's progress at once. That is the steps so far, the elapsed time and the last five actions |
 | `wait` | Blocks until the job ends or `timeoutMs` passes, then returns the same as `status`. 25 s stays under the 30 s many clients allow one call, so call it again until the job ends. With a progress token, each step sends a progress notification |
 | `stop` | Ends the job, lets go of every key and returns its result |
 
@@ -796,19 +785,6 @@ Unpacks one pack of a build into a normal folder: its `__brarchive/*.brarchive` 
 | `build` | As above |
 | `out` | Target folder, empty or a previous extraction (default under the sculkwire cache) |
 | `force` | Extract again even when a previous extraction of the same build exists |
-
-## Decision Model
-
-Two features use a decision model, both only as an optional advisor. They are the `play` action of `player_act` and the sign-in join recovery of `game_launch`. See [Decision Model](decision.md) for providers and setup.
-
-### decision_status
-
-Reports the configured `provider` (`none`, `openrouter`, `zenmux` or `local`), the `model` and `baseUrl`, where the setting came from (`source`, `env`, `file` or `default`), the `configPath`, whether one is `configured`, whether it answers one tiny probe (`reachable`, `latencyMs`), whether the model accepts `images`, and any `error`. When no model is configured and the MCP client supports elicitation, it asks the user for a provider, and for the server URL when the choice is local Kev, and saves the answer. It never asks for an API key. A Jev key comes from `OPENROUTER_API_KEY` or `ZENMUX_API_KEY`, or from `sculk setup` in a terminal. Clients without elicitation get a message to run `sculk setup`.
-
-| Input | Description |
-|---|---|
-| `probe` | Send the probe question (default true) |
-| `setup` | Ask the user for a model when none is configured (default true) |
 
 ## sculkwire
 

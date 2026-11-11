@@ -129,13 +129,15 @@ describe("tags and channels", () => {
     await expect(latestTarget(join(base, "missing.git"), "release")).rejects.toThrow(/git ls-remote failed/);
   });
 
-  it("saves the channel next to other config keys", async () => {
+  it("ignores a leftover decision section and keeps it when saving the channel", async () => {
     const path = join(root, "config", "config.json");
     expect(await readChannel(path)).toBe("release");
     await mkdir(join(root, "config"), { recursive: true });
-    await writeFile(path, JSON.stringify({ decision: { provider: "none" } }));
+    const legacy = { decision: { provider: "openrouter", apiKey: "sk-made-up" } };
+    await writeFile(path, JSON.stringify(legacy));
+    expect(await readChannel(path)).toBe("release");
     await saveChannel("off", path);
-    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({ decision: { provider: "none" }, update: { channel: "off" } });
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({ ...legacy, update: { channel: "off" } });
     expect(await readChannel(path)).toBe("off");
   });
 });

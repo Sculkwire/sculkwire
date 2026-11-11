@@ -1,7 +1,7 @@
 /**
  * Deterministic goals. Common goals are read from the goal text (kill N of a type, kill every hostile near, reach a
- * place, hit every X near once), and checked against the game every decision, so `play` stops when they are met
- * whatever a decision model says. Other goals fall back to the model's `goal_done`, or run until time is up.
+ * place, hit every X near once), and checked against the game every decision, so `play` stops when they are met.
+ * Other goals run until the time limit.
  */
 import { MOBS, shortType } from "./mobs.ts";
 import type { ThreatMap } from "./threat.ts";
