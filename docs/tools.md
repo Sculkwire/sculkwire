@@ -652,7 +652,7 @@ Uses a block or an entity the way a right click does, through the game's own int
 | `face` | `block`: which face to use, `down`, `up`, `north`, `south`, `west` or `east` (default: the side the player looks at) |
 | `id` | `entity`: the entity's unique id, a whole number in text, as `game_query` reports it (text because it is a 64-bit integer) |
 
-The result has `target`, `screen` (the screen it opened, or `null` when it opened none) and `changed`: a screen opened, or, for a block, the block's state changed (a lever flipped, a button pressed, a door opened). Read and drive that screen with `screen`.
+The result has `target`, `screen` (the screen it opened, or `null` when it opened none) and `changed`: a screen opened, or, for a block, the block's state changed (a lever flipped, a button pressed, a door opened). A block is used only once the crosshair is on it: the view is aimed at the block's nearest point, then deeper into its cell, so a thin block such as a floor button or a carpet is reached too; when no view reaches it (something is in the way) the answer is `invalid_params` naming what the crosshair lands on. Read and drive that screen with `screen`.
 
 ### screen
 

@@ -278,6 +278,34 @@ fn block_target(block: [i32; 3], face: Option<usize>, eye: [f32; 3]) -> Result<[
     }
 }
 
+/// How far inside the cell the later aim points sit from a face: inside a floor button (2/16 tall),
+/// a carpet (1/16) or a wall button, but still inside the cell's own bounds.
+const AIM_INSET: f32 = 0.06;
+
+/// Every point a use on `block` may aim at, first [`block_target`]'s, then points deeper in the cell
+/// for a block whose shape does not fill it: along the requested face's normal into the cell, or the
+/// cell's centre and the centres of its six faces just inside it, nearest the eye first. Only points
+/// within reach are kept; the game's own pick decides which one is on the block.
+fn block_aims(block: [i32; 3], face: Option<usize>, eye: [f32; 3]) -> Result<Vec<[f32; 3]>, RpcError> {
+    let first = block_target(block, face, eye)?;
+    let centre = [block[0] as f32 + 0.5, block[1] as f32 + 0.5, block[2] as f32 + 0.5];
+    let along = |normal: [f32; 3], out: f32| [centre[0] + normal[0] * out, centre[1] + normal[1] * out, centre[2] + normal[2] * out];
+    let mut more: Vec<[f32; 3]> = match face {
+        Some(index) => [0.25, 0.0, -0.25, -(0.5 - AIM_INSET)].iter().map(|out| along(NORMALS[index], *out)).collect(),
+        None => {
+            let mut sides: Vec<[f32; 3]> = NORMALS.iter().map(|normal| along(*normal, 0.5 - AIM_INSET)).collect();
+            sides.sort_by(|a, b| distance(eye, *a).partial_cmp(&distance(eye, *b)).unwrap_or(core::cmp::Ordering::Equal));
+            let mut points = alloc::vec![centre];
+            points.extend(sides);
+            points
+        }
+    };
+    more.retain(|point| distance(eye, *point) <= BLOCK_REACH && distance(eye, *point) >= 0.1);
+    let mut aims = alloc::vec![first];
+    aims.extend(more);
+    Ok(aims)
+}
+
 /// The straight-line distance between two points.
 fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     let dx = a[0] - b[0];
@@ -403,8 +431,9 @@ fn block_use(params: &Value) -> Result<([i32; 3], Option<usize>), RpcError> {
 
 /// `interact.block {x, y, z, face?}` → `{screen, changed}`.
 ///
-/// The view is written into the rotation component; [`AIM_MS`] later the client's own use handler
-/// runs on the level's hit result, and the answer settles on the timer (see the module
+/// The view is written into the rotation component; [`AIM_MS`] later the game's own pick is read, and
+/// when it is not on the block the next aim of [`block_aims`] is tried. Once the crosshair is on the
+/// block the client's own use handler runs, and the answer settles on the timer (see the module
 /// documentation): `screen` is the screen that opened, `null` when none did, and `changed` whether a
 /// screen opened or the block's state changed (a lever, a button, a door).
 pub(crate) fn h_interact_block(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
@@ -413,17 +442,20 @@ pub(crate) fn h_interact_block(core: &'static Core, params: &Value) -> Result<Va
     let (block, face) = block_use(params)?;
     let before = playing(core)?;
     let eye = eye()?;
-    let target = block_target(block, face, eye)?;
-    let distance = distance(eye, target);
+    let aims = block_aims(block, face, eye)?;
+    let distance = distance(eye, aims[0]);
     if distance > BLOCK_REACH {
         return Err(RpcError::invalid_params(format!(
             "the block is {distance:.1} blocks from the player's eye, beyond the {BLOCK_REACH}-block reach: move the player closer"
         )));
     }
-    let [pitch, yaw] = look_at(eye, target)
+    let looks: Vec<[f32; 2]> = aims.iter().filter_map(|point| look_at(eye, *point)).collect();
+    let [pitch, yaw] = *looks
+        .first()
         .ok_or_else(|| RpcError::invalid_params("the block is at the player's eye: there is no view to aim"))?;
     write_look(pitch, yaw)?;
-    park_settle(core, before, Phase::Aim, None, None, Some(AimPlan { block, state: None }))
+    let plan = AimPlan { block, looks, next: 0, missed: None, state: None };
+    park_settle(core, before, Phase::Aim, None, None, Some(plan))
 }
 
 /// `interact.entity {id}` → `{screen, changed}`.
@@ -577,9 +609,18 @@ struct Settle {
     aim: Option<AimPlan>,
 }
 
-/// The block an `interact.block` uses and its state right before the use.
+/// The views an `interact.block` tries, in order, until the game's own pick lands on the block.
+///
+/// The pick runs against the block's real shape, so a thin block (a floor button, a carpet, a
+/// pressure plate) that the first view passes over is reached by a later one aimed lower in the cell;
+/// the use goes out only once the crosshair is on the block.
 struct AimPlan {
     block: [i32; 3],
+    /// `[pitch, yaw]` per aim point; `next` is the one being tried.
+    looks: Vec<[f32; 2]>,
+    next: usize,
+    /// What the crosshair was on at the last aim that missed, for the refusal.
+    missed: Option<[i32; 3]>,
     /// The client's `Block` at the target right before the use (one object per block state).
     state: Option<usize>,
 }
@@ -785,6 +826,32 @@ unsafe extern "system" fn settle_tick(_window: win::Hwnd, _message: u32, _id: us
                 return;
             }
             if let Some(aim) = state.aim.as_mut() {
+                let picked = input::crosshair_block();
+                if picked != Some(aim.block) {
+                    // This view misses the block's shape: try the next one, or say what is in the way.
+                    aim.missed = picked.or(aim.missed);
+                    aim.next += 1;
+                    let Some(&[pitch, yaw]) = aim.looks.get(aim.next) else {
+                        let [x, y, z] = aim.block;
+                        let seen = match aim.missed {
+                            Some([a, b, c]) => format!("the crosshair lands on the block at {a} {b} {c} instead"),
+                            None => String::from("the crosshair lands on no block"),
+                        };
+                        state.deferred.fail(RpcError::invalid_params(format!(
+                            "no view from the player's eye reaches the block at {x} {y} {z}: {seen}; move the player so nothing is in the way"
+                        )));
+                        stop_timer();
+                        return;
+                    };
+                    if let Err(error) = write_look(pitch, yaw) {
+                        state.deferred.fail(error);
+                        stop_timer();
+                        return;
+                    }
+                    state.started = now;
+                    *SETTLE.lock() = Some(state);
+                    return;
+                }
                 aim.state = inventory::client_block(aim.block).map(|(block, _)| block);
             }
             if let Err(error) = input::with_item_scope(input::use_click).and_then(|result| result) {
