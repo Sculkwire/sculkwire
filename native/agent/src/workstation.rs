@@ -568,6 +568,8 @@ fn entity_position(id: u64) -> Result<[f32; 3], RpcError> {
 
 /// How long an interaction waits for the screen to open before it answers "nothing opened".
 const SETTLE_MS: u64 = 1_200;
+/// How long an opened container screen is given to be usable before the interaction answers anyway.
+const READY_MS: u64 = 2_000;
 /// How long the aim is left for the game to pick with (two client ticks and a frame) before the use.
 const AIM_MS: u64 = 120;
 /// How long a request waits for the server's answer.
@@ -584,6 +586,9 @@ enum Phase {
     Aim,
     /// The use went out; waiting for a screen to open.
     Open,
+    /// A container screen opened (`Settle::opened`); waiting until its container manager controller and
+    /// containers are there and it ran a frame with them (`seen`: they were there on the previous tick).
+    Ready { seen: bool },
     /// An item stack request went out; waiting for the server's answer to its id. `cursor`: the result
     /// lands on the cursor (a screen's result handler), which the answer names.
     Request { id: i32, moved: u32, take: bool, cursor: bool },
@@ -607,6 +612,8 @@ struct Settle {
     craft: Option<CraftRun>,
     /// An `interact.block`'s aims and the block's state before the use.
     aim: Option<AimPlan>,
+    /// The screen an interaction opened, while its phase is [`Phase::Ready`].
+    opened: Option<String>,
 }
 
 /// The views an `interact.block` tries, in order, until the game's own pick lands on the block.
@@ -655,11 +662,21 @@ fn park_settle(
     let Some(deferred) = core.defer() else {
         return Err(RpcError::wrong_thread());
     };
-    let previous = SETTLE.lock().replace(Settle { deferred, before, started: win::tick_ms(), phase, item, craft, aim });
+    let previous = SETTLE.lock().replace(Settle { deferred, before, started: win::tick_ms(), phase, item, craft, aim, opened: None });
     if let Some(previous) = previous {
         previous.deferred.fail(RpcError::timeout());
     }
     Err(RpcError::deferred())
+}
+
+/// True when the screen `name` can take a move: a container screen's manager controller (the one
+/// `screen.move` runs through) and the containers it shows are there. A screen of no container family is
+/// ready as it opens.
+fn screen_ready(name: &str) -> bool {
+    if kind_of(name) == "other" {
+        return true;
+    }
+    screen_manager(MOVE_SLOT.load(Ordering::Acquire), "screen.move").is_ok() && open_containers().is_ok_and(|open| !open.is_empty())
 }
 
 /// The wire's interaction answer: the screen that opened (`null` when none did) and whether the use
@@ -730,6 +747,7 @@ fn expire(core: &'static Core) {
         slot.as_ref().is_some_and(|state| {
             let limit = match state.phase {
                 Phase::Aim | Phase::Open | Phase::Close => SETTLE_MS,
+                Phase::Ready { .. } => READY_MS + u64::from(SETTLE_TICK_MS),
                 Phase::Request { .. } | Phase::Craft => RESPONSE_MS,
             };
             state.deferred.cancelled() || win::tick_ms().saturating_sub(state.started) >= limit
@@ -750,6 +768,9 @@ fn expire(core: &'static Core) {
         }
         Phase::Open => {
             state.deferred.resolve(outcome(screen_name(core).as_deref(), &state.before, state.aim.as_ref()));
+        }
+        Phase::Ready { .. } => {
+            state.deferred.resolve(json!({ "screen": state.opened, "changed": true }));
         }
         Phase::Request { id, moved, take, cursor } => {
             state.deferred.resolve(request_outcome(response(id), moved, take, cursor, state.item));
@@ -867,8 +888,13 @@ unsafe extern "system" fn settle_tick(_window: win::Hwnd, _message: u32, _id: us
             let now_screen = screen_name(core);
             let opened = now_screen.as_deref().filter(|name| *name != state.before && !on_hud(name)).map(String::from);
             if let Some(name) = opened {
-                state.deferred.resolve(json!({ "screen": name, "changed": true }));
-                stop_timer();
+                // Answered once the screen can be used: a move right after the answer finds the screen's
+                // controller and the containers it shows, and whatever the screen does as it opens (a
+                // trade screen fills the selected offer's cost from the inventory) has happened.
+                state.phase = Phase::Ready { seen: false };
+                state.started = now;
+                state.opened = Some(name);
+                *SETTLE.lock() = Some(state);
             } else if state.aim.as_ref().is_some_and(block_changed) {
                 // A lever, a button, a door: the use changed the block and opens nothing. Answered at
                 // once, before a button springs back.
@@ -878,6 +904,20 @@ unsafe extern "system" fn settle_tick(_window: win::Hwnd, _message: u32, _id: us
                 state.deferred.resolve(json!({ "screen": null, "changed": false }));
                 stop_timer();
             } else {
+                *SETTLE.lock() = Some(state);
+            }
+        }
+        Phase::Ready { seen } => {
+            let name = state.opened.clone().unwrap_or_default();
+            let still_open = screen_name(core).as_deref() == Some(name.as_str());
+            let ready = still_open && screen_ready(&name);
+            if !still_open || (ready && seen) || elapsed >= READY_MS {
+                #[cfg(feature = "debug-rpc")]
+                agent_core::log::fmt(format_args!("interact: {name} open {still_open} ready {ready} after {elapsed} ms"));
+                state.deferred.resolve(json!({ "screen": name, "changed": true }));
+                stop_timer();
+            } else {
+                state.phase = Phase::Ready { seen: ready };
                 *SETTLE.lock() = Some(state);
             }
         }
@@ -1863,7 +1903,26 @@ pub(crate) fn h_screen_move(core: &'static Core, params: &Value) -> Result<Value
     }
     let available = count_of(source_item);
     if available == 0 {
-        return Err(RpcError::invalid_params("the from slot is empty"));
+        // A screen can fill its own slots from the inventory as it opens (a trade screen places the
+        // selected offer's cost): name what the screen's own slots hold, where such a stack went.
+        let held: Vec<Value> = open
+            .iter()
+            .filter(|open| !is_player(open.name) && open.dynamic.is_none())
+            .flat_map(|open| {
+                (0..open.size).filter_map(move |slot| {
+                    open.item(slot).and_then(inventory::slot).filter(|item| !item.is_null()).map(|item| json!({ "container": open.key(), "slot": slot, "item": item }))
+                })
+            })
+            .collect();
+        if held.is_empty() {
+            return Err(RpcError::invalid_params("the from slot is empty"));
+        }
+        let names: Vec<String> = held
+            .iter()
+            .map(|entry| format!("{} {} {} x{}", entry["container"].as_str().unwrap_or("?"), entry["slot"], entry["item"]["item"].as_str().unwrap_or("?"), entry["item"]["count"]))
+            .collect();
+        let message = format!("the from slot is empty; the screen's own slots hold {}", names.join(", "));
+        return Err(RpcError::invalid_params(message.clone()).with_data(json!({ "message": message, "screenSlots": held })));
     }
     let occupied = count_of(target_item) != 0;
     let (kind, amount) = if occupied && !same_item(source_item, target_item) {
@@ -2805,6 +2864,11 @@ fn screen_manager(entry: usize, anchor: &'static str) -> Result<usize, RpcError>
         }
         return Ok(candidate);
     }
+    #[cfg(feature = "debug-rpc")]
+    agent_core::log::fmt(format_args!(
+        "screen_manager: no controller with slot 0x{entry:x} in screen 0x{screen:x} (table {:x?}) for {anchor}",
+        pe::read::<usize>(screen)
+    ));
     Err(RpcError::anchor(anchor).with_data(json!({
         "message": "the open screen keeps no controller of this screen's class",
     })))

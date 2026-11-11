@@ -1497,13 +1497,19 @@ pub(crate) fn screen_controller() -> Option<usize> {
         return None;
     }
     let scene = top_scene()?;
-    let guard = pe::read::<usize>(scene + SCENE_CONTROLLER_GUARD).unwrap_or(0);
-    if guard >= 0x1_0000 && pe::read::<u8>(guard) == Some(0) {
-        if let Some(controller) = pe::read::<usize>(scene + SCENE_CONTROLLER).filter(|controller| *controller >= 0x1_0000) {
-            return Some(controller);
-        }
+    // A scene whose name slot forwards to an inner object keeps its controller there; its own `+0x48`
+    // and `+0x58` are other fields, which can happen to pass the guard test (live: a trade screen whose
+    // `+0x58` was no object at all).
+    if let Some(controller) = forwarded_controller(scene) {
+        return Some(controller);
     }
-    forwarded_controller(scene)
+    let guard = pe::read::<usize>(scene + SCENE_CONTROLLER_GUARD).unwrap_or(0);
+    if guard < 0x1_0000 || pe::read::<u8>(guard) != Some(0) {
+        return None;
+    }
+    let controller = pe::read::<usize>(scene + SCENE_CONTROLLER).filter(|controller| *controller >= 0x1_0000)?;
+    pe::read::<usize>(controller).filter(|table| pe::in_image_data(*table))?;
+    Some(controller)
 }
 
 /// The controller of a scene whose name slot forwards to an inner object (see [`screen_controller`]):
