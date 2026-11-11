@@ -29,7 +29,7 @@ use crate::{anchors, live, pe, text};
 ///
 /// `fromData` is the only builder of a player origin, and this build's player lookup (`Level` vtable
 /// slot `0x710`) matches the registry against the `reference` and `filter` the caller hands it — a
-/// made-up pair faults inside the ECS walk (`exe+0x55E2C4C`). So the agent never invents them: the
+/// made-up pair faults inside the ECS walk. So the agent never invents them: the
 /// `command.origin` hook records the arguments of a real call (the game's own chat command makes one),
 /// and this module replays exactly those.
 ///
@@ -71,9 +71,9 @@ pub(crate) fn capture_call(data: usize, src: usize, reference: usize, filter: u8
         return;
     }
     // Only the player command path builds its origin against the level the server steps: `fromData` has
-    // a second caller in this build whose level reference names another object (live: `0x4eb8dd69600`
-    // beside the server level `0x4eb3c2d5000`), and replaying that one faulted inside `fromData`
-    // (`exe+0x358b35`). So a call is kept only when its `src+0x10` is the server's own level.
+    // a second caller in this build whose level reference names another object than the server level,
+    // and replaying that one faulted inside `fromData`. So a call is kept only when its `src+0x10` is
+    // the server's own level.
     let named = usize::from_le_bytes(src_bytes[0x10..0x18].try_into().unwrap_or([0; 8]));
     if live::server_level() != Some(named) {
         return;

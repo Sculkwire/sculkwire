@@ -85,8 +85,8 @@ fn remember(hook: Hook) {
 /// is stored in `slot` **before** the jump is
 /// written, so a thread entering the detour at once already finds the original to forward to. A hot
 /// function (`ClientInstance::getLevel`, called many times a frame) entered in that window used to get
-/// the detour's "no trampoline" answer, `0`, and the game dereferenced it (live: `exe+0x4e085a2`, read
-/// of 0 on the main thread, the same millisecond the hook went in). `slot` is reset to 0 when the
+/// the detour's "no trampoline" answer, `0`, and the game dereferenced it (live: a read of 0 on the
+/// main thread, the same millisecond the hook went in). `slot` is reset to 0 when the
 /// install fails.
 pub fn install_published(target: usize, replacement: usize, slot: &AtomicUsize) -> Option<Hook> {
     if target == 0 || replacement == 0 {

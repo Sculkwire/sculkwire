@@ -926,7 +926,7 @@ fn compound_slot(compound: usize, depth: usize) -> Option<Value> {
     Some(Value::Object(entry))
 }
 
-/// `Item + ITEM_IDENTIFIER` is the item's raw name id (`stone`): the string `0x141a5ef00` builds the
+/// `Item + ITEM_IDENTIFIER` is the item's raw name id (`stone`): the string the game builds the
 /// description id from (`tile.` + it). The namespaced identifier is the `std::string` field of the same
 /// `Item` that reads `<namespace>:<raw name>`; its offset is found once by that content and kept.
 static FULL_NAME_AT: AtomicUsize = AtomicUsize::new(0);

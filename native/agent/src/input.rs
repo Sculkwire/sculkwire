@@ -54,7 +54,7 @@
 //! every [`TICK_MS`] and dropped [`HOLD_MS`] after the last renewal.
 //!
 //! The use path builds item stacks, and an item stack looks its item up through a thread-local
-//! item-registry pointer the drain's thread does not hold (the game asserts at `exe+0x18daf02`). Every
+//! item-registry pointer the drain's thread does not hold (the game asserts when it is empty). Every
 //! click therefore runs inside the client's own item-registry scope, opened exactly as the client's
 //! methods open it ([`with_item_scope`]); `input.use` refuses (`-32001 input.item_scope`) without it.
 //!
@@ -1072,7 +1072,7 @@ pub(crate) fn use_click() -> Result<(), RpcError> {
  *
  * Building an `ItemStack` (what the use path does for the item in hand, and what a screen's preview
  * does) looks the item up through a thread-local `weak_ptr` to the item registry, and asserts —
- * `mov [0], 0xdeadc0de` at `exe+0x18daf02` — when that pointer is empty. The game's own client code
+ * a `mov [0], 0xdeadc0de` — when that pointer is empty. The game's own client code
  * sets it around such work with a scope object: it asks the client instance for its registry
  * reference (a `ClientInstance` virtual), constructs the scope with it (which installs it in the
  * thread-local slot and remembers the previous one) and destroys the scope afterwards (which puts

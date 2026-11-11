@@ -542,8 +542,8 @@ pub fn commands_ready() -> Option<usize> {
 /// command with on the server thread (recorded by the `command.run` and `command.execute` hooks).
 ///
 /// A manager read out of a level field is not used: with `[server Level + 0x78]` (which passes every
-/// shape check below) the replay faulted inside the dispatcher's registry lookup (`exe+0x358b35`,
-/// reading a map head of 5 000 000 000), so only a pointer the game handed its own command path is
+/// shape check below) the replay faulted inside the dispatcher's registry lookup (reading a map head
+/// of 5 000 000 000), so only a pointer the game handed its own command path is
 /// trusted. A player's chat line, which `engine_command` needs anyway for its origin, records it.
 pub fn commands(_minecraft: usize) -> Option<usize> {
     crate::anchors::command_commands()
@@ -583,7 +583,7 @@ fn plausible_commands(candidate: usize) -> bool {
         }
     }
     // The registry is a polymorphic object (its vtable is in `.rdata`). The output sender is a static
-    // singleton whose first word is *code* in this build (`0x14f0c83b0` → `0x1410a8160`, both in the
+    // singleton whose first word is *code* in this build (a pointer into `.text`, inside the
     // image), so it is only required to be a readable pointer inside the image — requiring a data
     // vtable there rejected the real manager and left every role "unknown" on the 1.26.63.1 session.
     let Some(registry_vtable) = pe::read::<usize>(registry) else {

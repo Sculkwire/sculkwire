@@ -334,7 +334,7 @@ extern "C" fn origin_from_data(out: usize, data: usize, src: usize, reference: u
 /// The server's `CommandRequestPacket` handler runs a player's chat line through here with its own
 /// manager, on the server thread — the one object `engine_command` must hand the dispatcher. With a
 /// pointer read out of a level field instead (`[Level+0x78]`) the replay faulted inside the registry
-/// lookup (`exe+0x358b35`, a map head of 5 000 000 000), so the manager is only taken from this call.
+/// lookup (reading a map head of 5 000 000 000), so the manager is only taken from this call.
 /// All four arguments are forwarded unchanged.
 extern "C" fn command_run(commands: usize, result: usize, request: usize, from: usize) -> usize {
     fired(SITE_RUN);

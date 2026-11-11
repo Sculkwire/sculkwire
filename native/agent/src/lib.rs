@@ -48,7 +48,7 @@ use methods as m;
 /// How long the frame thread waits for a quiet command to run on the server thread. The server steps
 /// every 50 ms and the request is only queued while it is stepping, so this bounds a stall, not a wait.
 /// (Quiet commands replay a real player command's origin, as `command` does: on 1.26.63.1 an origin
-/// this crate built itself faulted inside the game's own lookup, `exe+0x55E2C4C`.)
+/// this crate built itself faulted inside the game's own lookup.)
 const QUIET_TIMEOUT_MS: u32 = 1_000;
 
 /// The RPC methods, in the order the TypeScript client expects them.

@@ -3392,7 +3392,7 @@ fn write_string(at: usize, text: &str) -> Result<(), RpcError> {
 /// Takes the screen's result through its own result handler, as a click on the result slot does. The
 /// handler adds the craft action and puts the made item into the created-output slot it names in the scope it
 /// hands back (`scope[0]`, a [`SlotData`]); the click then moves it out with the controller's own transfer
-/// (`Take`, all of it, as the stonecutter's own click path 0x14cc67ca0 does) while the scope is alive, and
+/// (`Take`, all of it, as the stonecutter's own click path does) while the scope is alive, and
 /// only then ends the scope. Without that move the server destroys the made item at the end of the request
 /// (live: a stone consumed, no slab anywhere). Here the move goes to `to` (an empty hotbar or inventory
 /// slot). Answers the request id and how many actions it built.
@@ -3672,7 +3672,7 @@ fn empty_carried_slot() -> Result<(Vec<u8>, String, usize), RpcError> {
     Ok((name, target.key(), slot))
 }
 
-/// The crafting screen's own result take, as its click path runs it (0x143a46c70): the take (`ctrl, out
+/// The crafting screen's own result take, as its click path runs it: the take (`ctrl, out
 /// scope, collection, amount, vector<ItemInstance>& extra results`) adds the craft and puts the result in
 /// the created-output slot the scope names; then, with the scope alive, the controller's transfer moves it
 /// (all of it) to `to` and the extras placer puts the extra results away; then the scope ends. Without the
