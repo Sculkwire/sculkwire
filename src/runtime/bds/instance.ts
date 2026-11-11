@@ -225,8 +225,12 @@ export async function contentLogFiles(instance: Pick<BdsInstance, "dir">): Promi
   return out;
 }
 
+/**
+ * Removes the instance folder. Windows keeps a process's executable locked for a moment after the process has
+ * exited, so removing the folder of a server that just stopped can fail with EBUSY: the removal is retried.
+ */
 export async function disposeInstance(instance: Pick<BdsInstance, "dir">): Promise<void> {
-  await rm(instance.dir, { recursive: true, force: true });
+  await rm(instance.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
 export async function exists(path: string): Promise<boolean> {
