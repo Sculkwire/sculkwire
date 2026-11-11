@@ -1020,7 +1020,7 @@ fn inventory(player: usize, accessor: usize, entity: u32) -> Result<Value, RpcEr
     let (hotbar, main) = match sized {
         Some((container, size)) if size >= HOTBAR_SLOTS => {
             let rest = size.min(HOTBAR_SLOTS + MAIN_SLOTS) - HOTBAR_SLOTS;
-            (Value::Array(slots(container, 0, HOTBAR_SLOTS)), Value::Array(slots(container, HOTBAR_SLOTS, rest)))
+            (Value::Array(carried(container, 0, HOTBAR_SLOTS)), Value::Array(carried(container, HOTBAR_SLOTS, rest)))
         }
         _ => {
             note_once(&SLOTS_LOGGED, "inventory: the player's item container is not readable as a Container");
@@ -1058,6 +1058,27 @@ fn inventory(player: usize, accessor: usize, entity: u32) -> Result<Value, RpcEr
         "offhand": offhand,
         "cursor": Value::Null,
     }))
+}
+
+/// [`slots`] of the player's own container, with a bundle's `contents` added the way the screen tools add
+/// them (from its dynamic container, while an open screen has it), so a slot has one shape everywhere.
+fn carried(container: usize, first: usize, count: usize) -> Vec<Value> {
+    let mut out = slots(container, first, count);
+    let Some(entry) = interface_slot(container, CONTAINER_GET_ITEM) else {
+        return out;
+    };
+    for (index, value) in out.iter_mut().enumerate() {
+        let Value::Object(fields) = value else {
+            continue;
+        };
+        if fields.contains_key("contents") {
+            continue;
+        }
+        if let Some(contents) = item_at(entry, container, first + index).and_then(crate::workstation::bundle_contents) {
+            fields.insert(String::from("contents"), contents);
+        }
+    }
+    out
 }
 
 /// The hotbar's width: slots `0..8` of the player's container.
