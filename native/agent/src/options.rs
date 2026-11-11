@@ -712,11 +712,39 @@ fn scan_records(image: &Image, needles: &[usize], deadline: u64) -> Vec<Found> {
     // asynchronous writer, so a change can be persisted by the game itself.
     if CONTAINER.load(Ordering::Acquire) == 0 {
         let record_regions = regions_of(&regions, &found);
-        if let Some(object) = container_near(&record_regions, base, end) {
+        if let Some(object) = container_near(&record_regions, base, end).or_else(|| container_of_records(&regions, &found)) {
             adopt(object);
         }
     }
     found
+}
+
+/// The registry object, found through its own array: the scan also finds records of the game's other
+/// option-like registries (feature toggles, developer flags: `OreUISearchScreen`, `enable_packet_profile`)
+/// whose ids overlap the options' own, so a record is only an option when the registry holds it. Every
+/// address that holds a found record is a candidate slot `registry + OPTIONS_ARRAY + id * 8`; the candidate must
+/// carry a registry vtable and prove itself, so another registry's array or a listener's pointer to a
+/// record is refused.
+fn container_of_records(regions: &[(usize, usize)], found: &[Found]) -> Option<usize> {
+    let needles: Vec<usize> = found.iter().take(64).map(|entry| entry.record).collect();
+    let (lo, hi) = (*needles.iter().min()?, needles.iter().max()? + 1);
+    let (scanned, hits) = scan_regions(regions, &needles, lo, hi, agent_core::win::tick_ms() + NEAR_MS);
+    for hit in &hits {
+        let Some(record) = pe::read::<usize>(*hit) else {
+            continue;
+        };
+        for entry in found.iter().filter(|entry| entry.record == record) {
+            let Some(candidate) = hit.checked_sub(OPTIONS_ARRAY + entry.id as usize * 8) else {
+                continue;
+            };
+            if owns_vtable(candidate) && validate(candidate) {
+                agent_core::log::fmt(format_args!("options: registry 0x{candidate:x} from its array ({scanned} bytes read)"));
+                return Some(candidate);
+            }
+        }
+    }
+    agent_core::log::fmt(format_args!("options: no registry array holds the found records ({scanned} bytes, {} slots)", hits.len()));
+    None
 }
 
 /// The regions that hold at least one found record.
