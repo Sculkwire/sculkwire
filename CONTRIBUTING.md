@@ -42,7 +42,7 @@ Run all of these from the repository root. CI runs the types, the tests, the def
 | Tests | `npx vitest run` | The `native.test.ts` test "lists no game processes" fails while any Minecraft runs on the machine. Close the game, or accept that one failure |
 | Agent, default | `cd native && cargo build --release --locked --target x86_64-pc-windows-msvc` | Only when `native/` changed |
 | Agent, `debug-rpc` | Same, plus `--features sculkwire-agent/debug-rpc` | Only when `native/` changed. Both builds must pass |
-| Agent, host tests | `cd native && rustc --edition 2021 --test agent/src/look.rs -o target/look-test.exe && ./target/look-test.exe` | Only when `native/agent/src/look.rs` changed. The agent's pure view math, which builds on its own as a host test crate (the agent itself builds only for the game's target) |
+| Agent, host tests | `cd native && for m in look screens; do rustc --edition 2021 --test agent/src/$m.rs -o target/$m-test.exe && ./target/$m-test.exe \|\| exit 1; done` | Only when `native/agent/src/look.rs` or `screens.rs` changed. The agent's pure modules (the view math, the screen rules), which build on their own as host test crates (the agent itself builds only for the game's target) |
 
 Code style follows the existing code: imports with `.ts` extensions, only erasable TypeScript (no enums, namespaces or parameter properties), machine output on stdout and progress on stderr, exit codes 0 ok, 1 findings, 2 usage or prerequisite error, and every problem reported as the one `Diagnostic` shape from `src/core/diagnostic.ts`.
 

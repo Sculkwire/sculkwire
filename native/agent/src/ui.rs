@@ -87,6 +87,7 @@ use agent_core::{gameinput, win, Anchor, Core, RpcError};
 use serde_json::{json, Value};
 
 use crate::pe;
+use crate::screens::{is_store_screen, oreui_route_allowed};
 
 /* ------------------------------------------------------------------------------------------------
  * Win32 the message path needs beyond agent-core's surface
@@ -268,27 +269,6 @@ const NAME_HEAD: &[u8] = &[0x48, 0x8B, 0x41, 0x20, 0x48, 0x39, 0x41, 0x18];
 const NAME_TOP: &[u8] = &[0x48, 0x8B, 0x48, 0xE8];
 /// `mov rax,[rax+0x1b8]`: the slot the name getter sits in.
 const NAME_SLOT: &[u8] = &[0x48, 0x8B, 0x80, 0xB8, 0x01, 0x00, 0x00];
-
-/// Screens whose controls the agent never touches. The game names a screen `<package>.<scene>`, so the
-/// package decides it: `store_layout.…`, `store_inventory.…`, `csb.…`, `marketplace.…` and the store's
-/// auxiliaries all match here, including scenes this build does not know about yet.
-const STORE_PACKAGES: &[&str] = &[
-    "store",
-    "csb",
-    "marketplace",
-    "minecoins",
-    "dressing",
-    "portfolio",
-    "token_faq",
-    "ugc_viewer",
-    "persona_emote",
-    "day_one_experience",
-    "win10_trial_conversion",
-    "tabbed_upsell",
-    "bundle_purchase_warning",
-    "skin_selector",
-    "character_creator",
-];
 
 /// The live stack, once found (0 while it is not).
 static STACK: AtomicUsize = AtomicUsize::new(0);
@@ -1001,7 +981,7 @@ enum Input {
 /// Every OreUI page names itself by the same document URL (`ui://./hbui/index.html`), so the scene name
 /// cannot tell the Play screen from the Marketplace or the Dressing Room. On an OreUI page the guard
 /// therefore reads the page's current route ([`crate::route::current_route`]) and applies the store rule
-/// to it; a click, `Return` or `Space` is only sent on a route of [`OREUI_ROUTES`], and refused
+/// to it; a click, `Return` or `Space` is only sent on a route of [`crate::screens::OREUI_ROUTES`], and refused
 /// (`-32001 ui.oreui_route`) while the route cannot be read. Fail closed: an unknown page may be a store.
 fn guard(input: Input) -> Result<Option<String>, RpcError> {
     // Every `ui.*` input passes here before it is sent: from this moment the screens the game owns may
@@ -1024,7 +1004,7 @@ fn guard(input: Input) -> Result<Option<String>, RpcError> {
             }
             Some(route) if input == Input::Activate && !oreui_route_allowed(&route) => {
                 return Err(RpcError::standard(codes::INVALID_PARAMS).with_data(json!({
-                    "message": "this OreUI page is not one the agent clicks on (Play, world, settings pages only); Escape leaves it",
+                    "message": "this OreUI page is not one the agent clicks on (Play, world, settings pages and the idle overlay only); Escape leaves it",
                     "screen": screen.top,
                     "route": route,
                 })));
@@ -1146,72 +1126,6 @@ fn stack_name(stack: &Stack) -> Option<String> {
         return None;
     }
     call_string(function, stack.addr).filter(|name| is_screen_name(name))
-}
-
-/// True for a store, Marketplace, Minecoins, Dressing Room or profile/persona editor screen or OreUI route.
-fn is_store_screen(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    let package = lower.split('.').next().unwrap_or(lower.as_str());
-    for prefix in STORE_PACKAGES {
-        // `store` itself and every package in its family (`store_layout`, `store_inventory`, …), so a
-        // store scene this build does not know about yet is refused without a code change.
-        if let Some(rest) = package.strip_prefix(prefix) {
-            if rest.is_empty() || rest.starts_with('_') {
-                return true;
-            }
-        }
-    }
-    // Anywhere in a scene name or a route (`/marketplace/store`, `dressingRoomCoinScreen`,
-    // `/oreui-marketplace/…`, a purchase dialog): a false match only refuses input on a harmless screen.
-    STORE_WORDS.iter().any(|word| lower.contains(word))
-}
-
-/// Words that make any scene name or OreUI route a store screen, matched case-insensitively anywhere.
-const STORE_WORDS: &[&str] = &[
-    "marketplace",
-    "minecoins",
-    "coin",
-    "store",
-    "purchase",
-    "dressing",
-    "persona",
-    "profile_editor",
-    "profileeditor",
-    "skin_selector",
-    "character_creator",
-    "upsell",
-];
-
-/// OreUI routes where a click, `Return` or `Space` is allowed: the Play screen (world list, create and edit
-/// a world) and the settings pages. A route matches as a whole path segment, so `/play` allows
-/// `/play/worlds` but not `/player-permissions`.
-///
-/// In a world, Settings (from the pause menu) is `/oreui-settings/<page>` (read live on 1.26.63.1). Only
-/// the option pages are listed; Multiplayer (world broadcast), Party, Account and Global Resources are
-/// not, so a click there is refused like any page off the list.
-const OREUI_ROUTES: &[&str] = &[
-    "/play",
-    "/settings",
-    "/create-new-world",
-    "/edit-world",
-    "/oreui-settings/accessibility",
-    "/oreui-settings/game",
-    "/oreui-settings/keyboard-and-mouse",
-    "/oreui-settings/controller",
-    "/oreui-settings/touch",
-    "/oreui-settings/general",
-    "/oreui-settings/video",
-    "/oreui-settings/audio",
-    "/oreui-settings/creator",
-];
-
-fn oreui_route_allowed(route: &str) -> bool {
-    let lower = route.to_ascii_lowercase();
-    OREUI_ROUTES.iter().any(|allowed| {
-        lower
-            .strip_prefix(allowed)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/') || rest.starts_with('?') || rest.starts_with('#'))
-    })
 }
 
 /// The live stack: the cached one while it still checks out, else a fresh discovery.

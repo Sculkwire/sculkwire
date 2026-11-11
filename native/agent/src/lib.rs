@@ -31,6 +31,7 @@ mod options;
 mod pe;
 mod recover;
 mod route;
+mod screens;
 mod server;
 mod text;
 mod ui;
