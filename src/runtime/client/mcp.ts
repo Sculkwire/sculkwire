@@ -311,7 +311,10 @@ export function register(server: McpServer): void {
         "`/reload all`, which the game documents as rejoining the world to reload every pack (new .mcfunction files, new " +
         "or changed blocks, items, entities and other JSON). The retail client 1.26.63 answers " +
         "`/reload all` from /connect like `/reload` and stays in the world; relaunch with game_launch when new JSON " +
-        "content does not show up. Returns the redeployed folders and the content-log and script errors logged by the reload.",
+        "content does not show up. When the helper pack does not print ready again (retail `/reload all` over the script " +
+        "debugger), it re-establishes the debugger; if that fails the result has a client.helper-lost error and game_status " +
+        "shows ready false with the step to take. Returns the redeployed folders and the content-log and script errors " +
+        "logged by the reload.",
       inputSchema: { all: z.boolean().optional().describe("Run /reload all instead of /reload") },
       outputSchema: {
         command: z.object(commandSchema),

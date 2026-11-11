@@ -222,6 +222,16 @@ export interface BridgeStatus {
   joinRecovery?: { attempts: number; recovered: boolean; via?: string; log?: string; screenshot?: string };
 }
 
+/** How long `reload` waits at each step (ms); tests shorten them. */
+export interface ReloadTiming {
+  /** For the helper's ready print after the reload command. */
+  readyMs: number;
+  /** For the game to dial the debugger again after each recovery step. */
+  redialMs: number;
+  /** For the helper to answer on a newly dialled session. */
+  helperMs: number;
+}
+
 export interface CommandOutput {
   command: string;
   via: "connect" | "debugger";
@@ -287,6 +297,13 @@ export class ClientBridge {
   #streamEvery?: number;
   #controller?: PlayerController;
   #ready = false;
+  /**
+   * The helper pack answers on the attached debugger session: set by its ready print (or a pong), cleared when the
+   * session closes and while a `/reload` restarts its scripts. `ready` in game_status needs it.
+   */
+  #helperUp = false;
+  /** What to do by hand while the helper is gone after a reload the bridge could not recover from. */
+  #helperStep?: string;
   #logCursor?: LogPosition;
   #manual: string[] = [];
   /**
@@ -331,10 +348,10 @@ export class ClientBridge {
       packs: this.#packs.map((p) => ({ ...p })),
       debugger: { attached: !!this.#session && !this.#session.closed },
       connect: connect.status,
-      ready: this.#ready && !exited,
+      ready: this.#ready && this.#helperUp && !!this.#session && !this.#session.closed && !exited,
       manualSteps: exited
         ? [`the game process (pid ${this.launchState?.gamePid}) exited: call game_stop to clean up, then game_launch`]
-        : [...this.#manual, ...connect.steps],
+        : [...this.#manual, ...(this.#helperStep ? [this.#helperStep] : []), ...connect.steps],
       ...(this.#deployDiagnostics.length ? { deployDiagnostics: [...this.#deployDiagnostics] } : {}),
     };
     if (exited) s.gameExited = true;
@@ -370,6 +387,8 @@ export class ClientBridge {
     this.#packs = [];
     this.#deployDiagnostics = [];
     this.#ready = false;
+    this.#helperUp = false;
+    this.#helperStep = undefined;
     this.#connectMethod = undefined;
     this.#connectStep = undefined;
     this.#screens = NO_SCREENS;
@@ -390,12 +409,10 @@ export class ClientBridge {
       this.#indexed = await indexProjectPacks(project, install.sharedComMojang);
     }
 
-    const debuggerPort = opts.debuggerPort ?? DEFAULT_DEBUGGER_PORT;
-    this.#listener = await listen(debuggerPort);
-    this.#acceptLoop(this.#listener);
+    const debuggerPort = await this.listenDebugger(opts.debuggerPort ?? DEFAULT_DEBUGGER_PORT);
     this.#connect = new ConnectServer({ port: opts.connectPort ?? DEFAULT_CONNECT_PORT });
     await this.#connect.start();
-    await setOptions(optionsFiles(install), bridgeOptions(this.#listener.port));
+    await setOptions(optionsFiles(install), bridgeOptions(debuggerPort));
 
     this.world = await createWorld(install, {
       name: opts.world ?? "bridge",
@@ -637,6 +654,14 @@ export class ClientBridge {
     }
   }
 
+  /** Open the debugger listener the game dials (game_launch does this) and take each session it accepts. Returns the port. */
+  async listenDebugger(port = DEFAULT_DEBUGGER_PORT): Promise<number> {
+    const listener = await listen(port);
+    this.#listener = listener;
+    this.#acceptLoop(listener);
+    return listener.port;
+  }
+
   #acceptLoop(listener: DebuggerListener): void {
     void (async () => {
       while (this.#listener === listener) {
@@ -652,6 +677,10 @@ export class ClientBridge {
         }
         this.#session?.close();
         this.#session = session;
+        // A dropped session takes the helper's replies with it until a session prints ready again.
+        session.on("close", () => {
+          if (this.#session === session) this.#helperUp = false;
+        });
         session.on("print", (p: PrintEvent) => {
           // Streamed player state arrives up to 20 times a second: keep only the latest, out of the print log.
           if (p.message.startsWith(STATE_MARK)) {
@@ -673,6 +702,10 @@ export class ClientBridge {
             this.#streamEvery = undefined;
             this.#latestState = undefined;
             this.#latestEntities = undefined;
+            if (this.#session === session) {
+              this.#helperUp = true;
+              this.#helperStep = undefined;
+            }
           }
           this.#prints.push({ ...p, seq: ++this.#printSeq });
           this.#printSignal?.resolve();
@@ -869,14 +902,14 @@ export class ClientBridge {
   /**
    * Ask the helper pack (`/scriptevent sculkwire:query`) and wait for its reply print.
    */
-  async query(kind: string, params: Record<string, unknown> = {}): Promise<unknown> {
+  async query(kind: string, params: Record<string, unknown> = {}, timeoutMs = 10_000): Promise<unknown> {
     this.#requireRunning();
     const session = this.#session;
     if (!session || session.closed) throw new Error("queries need the script debugger (helper replies are prints)");
     const id = (this.#queryId = (this.#queryId + 1) % 1_000_000_000);
     const since = this.#printSeq;
     session.command(`scriptevent sculkwire:query ${JSON.stringify({ ...params, kind, id })}`);
-    const print = await this.waitForPrint((p) => p.message.startsWith(REPLY_MARK) && p.message.includes(`"id":${id},`), 10_000, since);
+    const print = await this.waitForPrint((p) => p.message.startsWith(REPLY_MARK) && p.message.includes(`"id":${id},`), timeoutMs, since);
     const reply: unknown = JSON.parse(print.message.slice(REPLY_MARK.length));
     if (!reply || typeof reply !== "object" || !("ok" in reply)) throw new Error(`malformed helper reply: ${print.message}`);
     if (reply.ok !== true) {
@@ -926,9 +959,16 @@ export class ClientBridge {
    * deployed), then `/reload` (scripts + functions) or `/reload all` (documented as a rejoin with all packs; the retail
    * client answers it like `/reload` from /connect and stays in the world). Returns the copied folders
    * and the problems the reload logged.
+   *
+   * The helper pack restarts with the reload and prints ready again. Retail 1.26.63 run `/reload all` through the
+   * script debugger (no /connect) and kept the debugger socket open but never printed again: command echoes came,
+   * command output and helper replies did not. When ready does not come back, `#recoverHelper` re-establishes the
+   * debugger; when that fails too the result carries a `client.helper-lost` error and game_status shows ready false
+   * with the step to take.
    */
-  async reload(all = false): Promise<{ command: CommandOutput; diagnostics: Diagnostic[]; redeployed: string[] }> {
+  async reload(all = false, timing: Partial<ReloadTiming> = {}): Promise<{ command: CommandOutput; diagnostics: Diagnostic[]; redeployed: string[] }> {
     this.#requireRunning();
+    const t: ReloadTiming = { readyMs: all ? 60_000 : 30_000, redialMs: 10_000, helperMs: 15_000, ...timing };
     const redeployed: string[] = [];
     let deployDiagnostics: Diagnostic[] = [];
     if (this.project && this.install) {
@@ -941,12 +981,92 @@ export class ClientBridge {
       this.#indexed = await indexProjectPacks(this.project, this.install.sharedComMojang);
     }
     const before = { printSeq: this.#printSeq, ...(this.#logCursor ? { log: this.#logCursor } : {}) };
-    const command = await this.command(all ? "reload all" : "reload");
-    // Scripts restart (and the debugger re-attaches after `reload all`) before the helper prints ready again.
-    await this.waitForPrint((p) => p.message.includes(READY_MARK), all ? 120_000 : 30_000, before.printSeq).catch(() => undefined);
+    const name = all ? "reload all" : "reload";
+    // The helper's scripts restart: its replies are unknown until it prints ready again.
+    this.#helperUp = false;
+    let command: CommandOutput;
+    try {
+      command = await this.command(name);
+    } catch (e) {
+      // The channel the command went out on may have died with the reload: put the helper back before reporting.
+      const lost = await this.#recoverHelper(before.printSeq, name, t);
+      throw new Error(lost ? `${errorMessage(e)}; ${lost}` : errorMessage(e));
+    }
+    const back = await this.waitForPrint((p) => p.message.includes(READY_MARK), t.readyMs, before.printSeq).then(
+      () => true,
+      () => false,
+    );
+    const lost = back ? undefined : await this.#recoverHelper(before.printSeq, name, t);
     await sleep(1000);
     const { diagnostics } = await this.logs(before);
+    if (lost) {
+      diagnostics.push({
+        severity: "error",
+        code: "client.helper-lost",
+        message: lost,
+        source: "client",
+        hint: this.#helperStep ?? "call game_stop, then game_launch",
+      });
+    }
     return { command, diagnostics: [...deployDiagnostics, ...diagnostics], redeployed };
+  }
+
+  /**
+   * The helper did not print ready after `/reload`: bring its channel back. In order, until the helper answers (a
+   * ready print, or a `ping` query): ask it directly (only its ready print was missed); have the game dial the debugger
+   * again with `/script debugger connect` sent over the channels still open (the old debugger session runs commands
+   * after a `reload all`, /connect when attached); close the old session, which the game may follow by dialling in;
+   * type the command into the game chat where input reaches the game. Returns undefined once the helper answers,
+   * else what went wrong (and sets the manual step game_status shows).
+   */
+  async #recoverHelper(since: number, name: string, t: ReloadTiming): Promise<string | undefined> {
+    const answers = async (ms: number): Promise<boolean> => {
+      if (await this.waitForPrint((p) => p.message.includes(READY_MARK), ms, since).then(() => true, () => false)) return true;
+      const session = this.#session;
+      if (!session || session.closed) return false;
+      // A reply needs a round trip through the game: give it at least a second even when `ms` is 0.
+      const pong = await this.query("ping", {}, Math.max(1_000, Math.min(ms, 3_000))).then((r) => r === "pong", () => false);
+      if (pong && this.#session === session && !session.closed) {
+        this.#helperUp = true;
+        this.#helperStep = undefined;
+      }
+      return pong;
+    };
+    if (await answers(0)) return undefined;
+    const port = this.#listener?.port;
+    const old = this.#session;
+    const redial = `script debugger connect localhost ${port}`;
+    if (port !== undefined) {
+      if (old && !old.closed) old.command(redial);
+      const connect = this.#connect;
+      if (connect && connect.clients().length > 0) await connect.command(redial).catch(() => undefined);
+      if ((await this.#newSession(old, t.redialMs)) && (await answers(t.helperMs))) return undefined;
+    }
+    // Drop the dead socket: game_status stops showing it attached, and the game may dial in again by itself.
+    if (this.#session === old && old && !old.closed) {
+      old.close();
+      if ((await this.#newSession(old, t.redialMs)) && (await answers(t.helperMs))) return undefined;
+    }
+    const state = this.launchState;
+    if (port !== undefined && state && hasInput(state) && this.#session === old) {
+      const typed = await typeChatCommand(state, redial).then(() => true, () => false);
+      if (typed && (await this.#newSession(old, t.redialMs)) && (await answers(t.helperMs))) return undefined;
+    }
+    this.#helperUp = false;
+    const how = port !== undefined ? `type "/${redial}" in the game chat, or call` : "call";
+    this.#helperStep = `the helper pack stopped answering after /${name} (queries and debugger command output are gone): ${how} game_stop, then game_launch`;
+    return `the helper pack did not come back after /${name}: the script debugger channel is gone`;
+  }
+
+  /** Wait until the game dialled a debugger session other than `old`. */
+  async #newSession(old: DebuggerSession | undefined, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const s = this.#session;
+      if (s && s !== old && !s.closed) return true;
+      if (Date.now() >= deadline || !this.#listener) return false;
+      await sleep(100);
+    }
   }
 
   /**
@@ -1043,6 +1163,16 @@ export class ClientBridge {
     return sendInput(this.launchState as LaunchState, action);
   }
 
+  /** Close the debugger listener and the attached session (game_stop does this). */
+  closeDebugger(): void {
+    const listener = this.#listener;
+    this.#listener = undefined;
+    listener?.close();
+    this.#session?.close();
+    this.#session = undefined;
+    this.#helperUp = false;
+  }
+
   /**
    * Stop the game, close listeners, put back the options.txt keys and the game settings sculkwire changed. Safe to call
    * twice. Game settings are restored first, while the game still runs, so the agent can apply them live.
@@ -1057,16 +1187,14 @@ export class ClientBridge {
     const restoredSettings = await restoreGameSettings({ install }).catch(() => ({}));
     const result = await stopGame(install);
     await inputProvider()?.stopped();
-    const listener = this.#listener;
-    this.#listener = undefined;
-    listener?.close();
-    this.#session?.close();
-    this.#session = undefined;
+    this.closeDebugger();
     await this.#connect?.stop();
     this.#connect = undefined;
     const restoredOptions = await restoreOptions();
     this.launchState = undefined;
     this.#ready = false;
+    this.#helperUp = false;
+    this.#helperStep = undefined;
     this.#packs = [];
     this.#indexed = [];
     this.#streamEvery = undefined;
