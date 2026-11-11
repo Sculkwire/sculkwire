@@ -135,7 +135,11 @@ fn send_all(socket: usize, bytes: &[u8]) {
     }
 }
 
-/// Writes one whole line to a connection.
+/// Writes one whole line, which ends in its `\n`, to a connection in one `send`.
+///
+/// One `send` per line matters: a line sent as two writes (the text, then `\n`) leaves the second
+/// write waiting under Nagle's algorithm for the client's delayed ACK of the first, about 40 ms on
+/// every answer that follows another within the ACK delay.
 fn conn_send(conn: &Conn, line: &[u8]) {
     let _guard = conn.send.lock();
     let socket = conn.socket.load(Ordering::Acquire);
@@ -143,7 +147,6 @@ fn conn_send(conn: &Conn, line: &[u8]) {
         return;
     }
     send_all(socket, line);
-    send_all(socket, b"\n");
 }
 
 fn broadcast(line: &[u8]) {
@@ -306,6 +309,17 @@ pub extern "system" fn serve(_arg: usize) -> u32 {
             continue;
         }
         let conn = &CONNS[slot];
+        // Every line leaves at once: with Nagle's algorithm a line written while the previous one is
+        // still unacknowledged (an answer right after a tick line, say) waits for the client's delayed ACK.
+        let nodelay: i32 = 1;
+        // SAFETY: a connected socket this call owns; the option value is a 4-byte BOOL and its length agrees.
+        let changed = unsafe {
+            win::setsockopt(socket, win::IPPROTO_TCP, win::TCP_NODELAY, &nodelay as *const i32 as *const u8, 4)
+        };
+        if changed != 0 {
+            // SAFETY: reading the socket error, no invariants.
+            log::fmt(format_args!("warning: TCP_NODELAY not set (setsockopt wsa={})", unsafe { win::WSAGetLastError() }));
+        }
         conn.socket.store(socket, Ordering::Release);
         conn.subscribed.store(false, Ordering::Release);
         conn.every.store(1, Ordering::Release);
@@ -383,7 +397,7 @@ pub extern "system" fn connection_thread(slot: usize) -> u32 {
 /// The stream thread: `lock` notifications on every state change and `tick` lines from the ring.
 pub extern "system" fn stream_thread(_arg: usize) -> u32 {
     let mut last_lock = lock::sequence();
-    let mut buffer = [0u8; stream::LINE];
+    let mut buffer = [0u8; stream::LINE + 1];
     loop {
         win::sleep_ms(1);
         if crate::hub::started().is_some_and(|core| core.stopping()) {
@@ -398,7 +412,8 @@ pub extern "system" fn stream_thread(_arg: usize) -> u32 {
                 "method": "lock",
                 "params": crate::hub::instance().lock_state(),
             });
-            if let Ok(text) = serde_json::to_string(&notification) {
+            if let Ok(mut text) = serde_json::to_string(&notification) {
+                text.push('\n');
                 broadcast(text.as_bytes());
             }
         }
@@ -629,9 +644,13 @@ pub fn error_response(id: &Value, error: RpcError) -> Vec<u8> {
     to_line(&response)
 }
 
+/// The value as one wire line, ending in `\n`, so it leaves in a single `send`.
 fn to_line(value: &Value) -> Vec<u8> {
-    match serde_json::to_string(value) {
-        Ok(text) => text.into_bytes(),
-        Err(_) => Vec::from(&b"{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32603,\"message\":\"internal error\"}}"[..]),
+    match serde_json::to_vec(value) {
+        Ok(mut bytes) => {
+            bytes.push(b'\n');
+            bytes
+        }
+        Err(_) => Vec::from(&b"{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32603,\"message\":\"internal error\"}}\n"[..]),
     }
 }

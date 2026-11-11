@@ -228,7 +228,7 @@ Nothing here has a fallback: the Script API cannot use a block or read a craftin
 
 ## Protocol
 
-Newline-delimited JSON-RPC 2.0 over TCP on `127.0.0.1:<port>`: one object per line, responses matched by id, so replies may arrive in any order. A line with a `method` and no id is a notification.
+Newline-delimited JSON-RPC 2.0 over TCP on `127.0.0.1:<port>`: one object per line, responses matched by id, so replies may arrive in any order. A line with a `method` and no id is a notification. Both ends turn Nagle's algorithm off (`TCP_NODELAY`) and write each line in one `send`, so an answer never waits for the other side's delayed ACK and calls sent back to back cost the handler's own time, not a fixed 40 ms each.
 
 | Method | Thread | Result |
 |---|---|---|

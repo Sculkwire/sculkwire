@@ -71,9 +71,10 @@ pub fn head() -> u32 {
     RING_DATA.lock().head
 }
 
-/// Copies line `index` into `out`, returning its tick and length. `None` when the line has already
-/// been overwritten or never existed.
-pub fn read(index: u32, out: &mut [u8; LINE]) -> Option<(u32, usize)> {
+/// Copies line `index` into `out` followed by its `\n`, returning its tick and length with the newline,
+/// so the stream thread sends the whole line in one write. `None` when the line has already been
+/// overwritten or never existed.
+pub fn read(index: u32, out: &mut [u8; LINE + 1]) -> Option<(u32, usize)> {
     let ring = RING_DATA.lock();
     if index >= ring.head || ring.head - index > RING {
         return None;
@@ -83,5 +84,6 @@ pub fn read(index: u32, out: &mut [u8; LINE]) -> Option<(u32, usize)> {
         return None;
     }
     out[..slot.len].copy_from_slice(&slot.text[..slot.len]);
-    Some((slot.tick, slot.len))
+    out[slot.len] = b'\n';
+    Some((slot.tick, slot.len + 1))
 }

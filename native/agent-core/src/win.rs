@@ -447,10 +447,15 @@ extern "system" {
     /// `FIONBIO`: makes `accept` return at once with `WSAEWOULDBLOCK`, so the server loop can notice a
     /// stop instead of sitting in a call another thread cannot reliably interrupt.
     pub fn ioctlsocket(socket: usize, command: i32, value: *mut u32) -> i32;
+    pub fn setsockopt(socket: usize, level: i32, name: i32, value: *const u8, len: i32) -> i32;
 }
 
 /// `FIONBIO`, the "non-blocking" `ioctlsocket` command.
 pub const FIONBIO: i32 = 0x8004_667Eu32 as i32;
+/// `IPPROTO_TCP`, the `setsockopt` level of TCP options.
+pub const IPPROTO_TCP: i32 = 6;
+/// `TCP_NODELAY`: turns Nagle's algorithm off, so a small write leaves without waiting for an ACK.
+pub const TCP_NODELAY: i32 = 1;
 
 /// The module handle of the code at `address` (this DLL, usually).
 ///

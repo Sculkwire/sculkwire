@@ -1,4 +1,5 @@
 import { createServer, type Server, type Socket } from "node:net";
+import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentClient, AgentClientError, AgentRpcError } from "./client.ts";
 
@@ -161,6 +162,51 @@ describe("AgentClient framing", () => {
     expect(error).toBeInstanceOf(AgentRpcError);
     expect((error as AgentRpcError).code).toBe(-32601);
     expect((error as AgentRpcError).message).toBe("method not found");
+  });
+});
+
+describe("AgentClient latency", () => {
+  // Pins `setNoDelay` and one write per request: a request written in two pieces with Nagle on waits for the
+  // agent's delayed ACK of the first piece, about 40 ms on every call that follows another within the ACK delay.
+  // The 25 ms gaps are real on purpose: the kernel's delayed-ACK timer runs on the wall clock, fake timers cannot
+  // reach it, and a quiet gap is what lets the ACK be delayed at all.
+  it("answers calls sent 25 ms apart in a few ms each from an agent that replies at once", async () => {
+    const server = createServer((socket) => {
+      socket.on("error", () => undefined);
+      let buffer = "";
+      socket.on("data", (chunk: Buffer) => {
+        buffer += chunk.toString("utf8");
+        for (let nl = buffer.indexOf("\n"); nl >= 0; nl = buffer.indexOf("\n")) {
+          const { id } = JSON.parse(buffer.slice(0, nl)) as { id: number };
+          buffer = buffer.slice(nl + 1);
+          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id, result: "pong" })}\n`);
+        }
+      });
+    });
+    const listening = Promise.withResolvers<void>();
+    server.listen(0, "127.0.0.1", () => listening.resolve());
+    await listening.promise;
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("fake agent has no TCP address");
+    const client = new AgentClient({ port: address.port });
+    try {
+      await client.ping();
+      const times: number[] = [];
+      for (let i = 0; i < 20; i++) {
+        await sleep(25);
+        const start = performance.now();
+        await client.ping();
+        times.push(performance.now() - start);
+      }
+      times.sort((a, b) => a - b);
+      expect(times[10]).toBeLessThan(10);
+      expect(times[17]).toBeLessThan(20);
+    } finally {
+      client.close();
+      const closed = Promise.withResolvers<void>();
+      server.close(() => closed.resolve());
+      await closed.promise;
+    }
   });
 });
 
