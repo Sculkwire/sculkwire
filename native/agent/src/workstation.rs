@@ -190,28 +190,13 @@ const NORMALS: [[f32; 3]; 6] = [
     [1.0, 0.0, 0.0],
 ];
 
-/// The player's eye, as the last client tick published it: a player's state-vector position is
-/// already at eye height (`/tp … -60 …` on a flat world reads `y = -58.38`, the feet plus 1.62).
+/// The player's eye: a player's state-vector position is already at eye height (`/tp … -60 …` on a
+/// flat world reads `y = -58.38`, the feet plus 1.62), so it is read from there, not from the
+/// published `position`, which is the feet.
 fn eye() -> Result<[f32; 3], RpcError> {
-    let state = live::player_state().ok_or_else(RpcError::not_in_world)?;
-    vector(state.get("position")).ok_or_else(|| RpcError::anchor("player.state"))
-}
-
-/// Three finite numbers from a JSON array.
-fn vector(value: Option<&Value>) -> Option<[f32; 3]> {
-    let items = value?.as_array()?;
-    if items.len() < 3 {
-        return None;
-    }
-    let mut out = [0.0f32; 3];
-    for (slot, item) in out.iter_mut().zip(items.iter()) {
-        let value = item.as_f64()? as f32;
-        if !value.is_finite() {
-            return None;
-        }
-        *slot = value;
-    }
-    Some(out)
+    live::player_state().ok_or_else(RpcError::not_in_world)?;
+    let accessor = input::registry().ok_or_else(|| RpcError::anchor("component.getter"))?;
+    ecs::read(accessor).map(|reading| reading.sample.position).ok_or_else(|| RpcError::anchor("player.state"))
 }
 
 /// Writes the view the way `input.look` does — the camera's direct-look pair first, then the local
