@@ -383,9 +383,8 @@ export function register(server: McpServer): void {
     {
       title: "Screenshot through the agent",
       description:
-        "Ask the game's own screenshot code for a picture of the current frame. The game saves it in its screenshot " +
-        "gallery (the retail client saves JPEGs, so a `.png` path becomes `.jpg`); sculkwire copies it to `path`. " +
-        "Returns the host path and the image.",
+        "Write the next frame the game presents (world, HUD and any open screen) to `path` as a PNG, copied by the " +
+        "in-game agent: no in-game screenshot animation, toast or gallery entry. Returns the host path and the image.",
       inputSchema: {
         path: z.string().optional().describe("Where to save the picture (host path, default under sculkwire's cache)"),
       },

@@ -127,17 +127,16 @@ pub fn tick_scale(core: &'static Core, params: &Value) -> Result<Value, RpcError
  * Screenshot
  * ---------------------------------------------------------------------------------------------- */
 
-/// `screenshot {path}` → `{path, named: false, route}`: the game takes the picture F2 takes and writes
-/// the PNG into its own gallery under a name it chooses; `path` is echoed for the caller, which copies
-/// the newest gallery picture there.
+/// `screenshot {path}` → `{path, named: true, route: "present", width, height}`: the next frame the game
+/// presents, copied from its swap chain and written to `path` as a PNG (see [`capture`]). Works in menus
+/// and outside a world; the game's own screenshot (gallery, toast, sound) is not involved.
 pub fn screenshot(_core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     let path = text(params, "path")?;
     if path.trim().is_empty() {
         return Err(RpcError::invalid_params("path must not be empty"));
     }
-    world()?;
-    capture::request()?;
-    Ok(json!({ "path": path, "named": false, "route": "button" }))
+    let (width, height) = capture::request(path)?;
+    Ok(json!({ "path": path, "named": true, "route": "present", "width": width, "height": height }))
 }
 
 /* ------------------------------------------------------------------------------------------------

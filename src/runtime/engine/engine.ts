@@ -162,7 +162,7 @@ export interface EngineTickResult {
 }
 
 export interface EngineScreenshotResult {
-  /** Host path of the picture. Its extension follows the format: the game's own gallery keeps JPEGs. */
+  /** Host path of the picture. Its extension follows the format (a picture from a game gallery can be a JPEG). */
   path: string;
   bytes?: number;
   format?: "png" | "jpeg";
@@ -926,11 +926,12 @@ export class EngineSession {
   }
 
   /**
-   * `screenshot`. `path` is a host path. The game writes the PNG into its own gallery
-   * (`<appData>/screenshots/<world>/photos/<id>/`). The call carries a unique name; an agent that takes the picture
-   * through the game's own screenshot button answers `named: false` (the game picks the file name), and then the
-   * newest complete PNG the gallery gained after the request is the picture. Either way it is copied to `path`, and
-   * the game's gallery copy stays.
+   * `screenshot`. `path` is a host path. The call carries a unique name next to it; an agent that writes the picture
+   * itself (the retail agent copies the presented frame) answers `named: true` and the file under that name is the
+   * picture. An agent that takes it through the game's own screenshot code answers `named: false` (the game picks the
+   * name and writes into its gallery, `<appData>/screenshots/<world>/photos/<id>/`), and then the newest complete
+   * picture the gallery gained after the request is the picture, and the game's gallery copy stays. Either way it ends
+   * up at `path`.
    */
   async screenshot(path: string): Promise<EngineResult<EngineScreenshotResult>> {
     if (!path.trim()) return invalid("screenshot path cannot be empty");

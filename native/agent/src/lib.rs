@@ -7,10 +7,11 @@
 //! player from the game's own ECS (`ecs`, `live`), and answers the wire's methods (`methods`).
 //!
 //! Everything the engine does is a *recipe*: the assert-metadata triple for the frame function, the
-//! ECS component hash rule for the component lookups, a string reference for the screenshot and
-//! command entry points, and the option save tags for the settings registry. Nothing in this crate
-//! knows an address of a particular build, and a recipe that does not resolve uniquely leaves its
-//! anchor missing, which turns into `-32001 anchor not resolved` on the wire — never a guess.
+//! ECS component hash rule for the component lookups, a string reference for the command entry
+//! points, a throwaway swap chain's vtable for the screenshot, and the option save tags for the
+//! settings registry. Nothing in this crate knows an address of a particular build, and a recipe
+//! that does not resolve uniquely leaves its anchor missing, which turns into `-32001 anchor not
+//! resolved` on the wire — never a guess.
 
 #![no_std]
 
@@ -56,7 +57,8 @@ static METHODS: &[Method] = &[
     Method::main("tick.pause", m::tick_pause),
     Method::main("tick.step", m::tick_step),
     Method::main("tick.scale", m::tick_scale),
-    Method::main("screenshot", m::screenshot),
+    // The frame copy waits for the game's next `Present` (render thread), not for the main thread.
+    Method::socket("screenshot", m::screenshot),
     // Input and the player's state go through the game's own window procedure and the client's
     // component registry, both of which belong to the game's thread.
     Method::main("player.state", input::h_player_state),
@@ -143,6 +145,7 @@ impl Engine for Retail {
         anchors.extend(inventory::resolve(core));
         anchors.extend(workstation::resolve(core));
         anchors.extend(route::resolve(core));
+        anchors.extend(capture::resolve(core));
         hooks::install();
         let missing = anchors.iter().filter(|anchor| anchor.addr == 0).count();
         agent_core::log::fmt(format_args!(
@@ -166,6 +169,7 @@ impl Engine for Retail {
         list.extend(inventory::report());
         list.extend(workstation::report());
         list.extend(route::report());
+        list.extend(capture::report());
         list
     }
 

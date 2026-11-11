@@ -57,7 +57,6 @@
 //! item-registry pointer the drain's thread does not hold (the game asserts at `exe+0x18daf02`). Every
 //! click therefore runs inside the client's own item-registry scope, opened exactly as the client's
 //! methods open it ([`with_item_scope`]); `input.use` refuses (`-32001 input.item_scope`) without it.
-//! The same handler table also gives `button.screenshot`, F2's handler, which `screenshot` presses.
 //!
 //! **`input.look` — the camera's direct look.** The player's rotation follows the camera every frame,
 //! and the camera's orientation comes from its `CameraDirectLookComponent` (radians), which is where
@@ -95,8 +94,7 @@
 //!    be resolved (its hook fires every frame) before either is called.
 //! 3. **Look**: `input.look {pitch:30, yaw:90}` answers `route: "camera"`, the view turns, and
 //!    `player.state.rotation` still reads `[30, 90]` two seconds later.
-//! 4. **Screenshot**: `screenshot` answers `named: false` and the game shows "Screenshot captured".
-//! 5. **Health**: take damage and watch `health` follow the HUD's hearts.
+//! 4. **Health**: take damage and watch `health` follow the HUD's hearts.
 //!
 //! Nothing here holds a lock while it calls the game, and every game address is checked readable
 //! before it is read, so a build whose layouts moved answers `null` (or `-32001`) instead of a
@@ -708,9 +706,6 @@ static ATTACK_HANDLER: AtomicUsize = AtomicUsize::new(0);
 static ATTACK_TABLE: AtomicUsize = AtomicUsize::new(0);
 static USE_HANDLER: AtomicUsize = AtomicUsize::new(0);
 static USE_TABLE: AtomicUsize = AtomicUsize::new(0);
-/// The `button.screenshot` handler (F2's), registered beside the two gameplay buttons, and its table.
-static SHOT_HANDLER: AtomicUsize = AtomicUsize::new(0);
-static SHOT_TABLE: AtomicUsize = AtomicUsize::new(0);
 /// The client instance's own vtable, its `getLevel` method (hooked), and that hook's trampoline.
 static CLIENT_TABLE: AtomicUsize = AtomicUsize::new(0);
 static CLIENT_GETTER: AtomicUsize = AtomicUsize::new(0);
@@ -724,9 +719,6 @@ const SITE_CLIENT: &str = "client.instance";
 /// The button names the client registers its gameplay handlers under.
 const ATTACK_BUTTON: &[u8] = b"button.destroy_or_attack";
 const USE_BUTTON: &[u8] = b"button.build_or_interact";
-const SHOT_BUTTON: &[u8] = b"button.screenshot";
-/// `engine.status` anchor name of the screenshot button's handler.
-const SITE_SHOT: &str = "screenshot.button";
 /// A `ClientInstance` virtual's own `__FUNCSIG__`: the method that references it is in the client
 /// instance's vtable, which is how the table is found without RTTI.
 const CLIENT_SIGNATURE: &[u8] = b"virtual void __cdecl ClientInstance::requestLeaveGame(bool, bool)";
@@ -794,15 +786,9 @@ fn press_button(handler: usize, table: usize, client: usize) {
 }
 
 /// One button's handler: the `std::function` table stored just before the button's name is copied in
-/// the client's registration, and that table's `_Do_call` when `shape` accepts it. `registrar`, when
-/// given, keeps only registrations inside that function (the one that registers the gameplay
-/// buttons). `(handler, table, registrar)`; refused when two registrations disagree.
-fn button_handler(
-    image: &Image,
-    name: &[u8],
-    shape: fn(usize) -> Option<usize>,
-    registrar: Option<usize>,
-) -> Option<(usize, usize, usize)> {
+/// the client's registration, and that table's `_Do_call` when it is a button handler ([`lambda_body`]).
+/// `(handler, table, registrar)`; refused when two registrations disagree.
+fn button_handler(image: &Image, name: &[u8]) -> Option<(usize, usize, usize)> {
     let string = image.find_string(name)?;
     let sites = pe::scan_refs(image, &[string]).into_iter().next()?;
     let mut found: Option<(usize, usize, usize)> = None;
@@ -810,9 +796,6 @@ fn button_handler(
         let Some(start) = image.function_start(site) else {
             continue;
         };
-        if registrar.is_some_and(|registrar| registrar != start) {
-            continue;
-        }
         let from = site.saturating_sub(0x100).max(start);
         let Some(window) = pe::bytes(from, site - from) else {
             continue;
@@ -830,7 +813,7 @@ fn button_handler(
         let Some(table) = table else {
             continue;
         };
-        let Some(handler) = shape(table) else {
+        let Some(handler) = lambda_body(table) else {
             continue;
         };
         if found.is_some_and(|(known, _, _)| known != handler) {
@@ -839,28 +822,6 @@ fn button_handler(
         found = Some((handler, table, start));
     }
     found
-}
-
-/// The `_Do_call` of a capture-less lambda's `std::function` table when the lambda only forwards the
-/// client to one of its methods: `mov rcx, r8; jmp <method>` (the `button.screenshot` handler is
-/// `ClientInstance`'s own screenshot method behind that jump — the F2 key and the pause menu's camera
-/// button take the same picture).
-fn forwarding_body(table: usize) -> Option<usize> {
-    if !pe::in_image_data(table) {
-        return None;
-    }
-    let copy = pe::read::<usize>(table)?;
-    let moved = pe::read::<usize>(table + 8)?;
-    let call = pe::read::<usize>(table + 16)?;
-    if !pe::in_image_code(copy) || copy != moved || !pe::in_image_code(call) {
-        return None;
-    }
-    let head = pe::bytes(call, 8)?;
-    if head[..4] != [0x4C, 0x89, 0xC1, 0xE9] {
-        return None;
-    }
-    let relative = i32::from_le_bytes([head[4], head[5], head[6], head[7]]) as isize;
-    pe::in_image_code((call + 8).wrapping_add_signed(relative)).then_some(call)
 }
 
 /// The `_Do_call` of a capture-less lambda's `std::function` table, when it is a button handler: the
@@ -1103,12 +1064,6 @@ fn resolve_release(table: usize, handler: usize) -> Option<usize> {
 pub(crate) fn use_click() -> Result<(), RpcError> {
     release_use();
     click_button(&USE_HANDLER, &USE_TABLE, "input.use", true)
-}
-
-/// One press of the client's own `button.screenshot` handler: the picture F2 takes, written by the
-/// game into its own gallery under a name it chooses. Used by `screenshot`.
-pub(crate) fn screenshot_click() -> Result<(), RpcError> {
-    click_button(&SHOT_HANDLER, &SHOT_TABLE, SITE_SHOT, false)
 }
 
 /* ------------------------------------------------------------------------------------------------
@@ -2233,8 +2188,8 @@ pub(crate) fn resolve(core: &'static Core) -> Vec<Anchor> {
         }
         None => core.site(SITE_MOVE, false),
     }
-    let attack = button_handler(image, ATTACK_BUTTON, lambda_body, None);
-    let usage = button_handler(image, USE_BUTTON, lambda_body, None);
+    let attack = button_handler(image, ATTACK_BUTTON);
+    let usage = button_handler(image, USE_BUTTON);
     let shared = match (attack, usage) {
         (Some((attack, _, attack_registrar)), Some((usage, _, usage_registrar))) => {
             attack_registrar == usage_registrar
@@ -2242,16 +2197,11 @@ pub(crate) fn resolve(core: &'static Core) -> Vec<Anchor> {
         }
         _ => false,
     };
-    if let (true, Some((handler, table, registrar)), Some((usage_handler, usage_table, _))) = (shared, attack, usage) {
+    if let (true, Some((handler, table, _)), Some((usage_handler, usage_table, _))) = (shared, attack, usage) {
         ATTACK_HANDLER.store(handler, Ordering::Release);
         ATTACK_TABLE.store(table, Ordering::Release);
         USE_HANDLER.store(usage_handler, Ordering::Release);
         USE_TABLE.store(usage_table, Ordering::Release);
-        // F2's handler is registered by the same function, right beside them.
-        if let Some((shot, shot_table, _)) = button_handler(image, SHOT_BUTTON, forwarding_body, Some(registrar)) {
-            SHOT_HANDLER.store(shot, Ordering::Release);
-            SHOT_TABLE.store(shot_table, Ordering::Release);
-        }
         if let Some(table) = client_table(image) {
             if let Some(getter) = client_getter(table, handler) {
                 CLIENT_TABLE.store(table, Ordering::Release);
@@ -2272,12 +2222,11 @@ pub(crate) fn resolve(core: &'static Core) -> Vec<Anchor> {
     }
     let describe = |address: usize| if address == 0 { String::from("missing") } else { alloc::format!("0x{:x}", address - image.base()) };
     agent_core::log::fmt(format_args!(
-        "resolve input: move {} (hooked {}), attack {}, use {}, screenshot {}, client table {}, getLevel {} (hooked {})",
+        "resolve input: move {} (hooked {}), attack {}, use {}, client table {}, getLevel {} (hooked {})",
         describe(MOVE_ENTRY.load(Ordering::Acquire)),
         MOVE_TRAMPOLINE.load(Ordering::Acquire) != 0,
         describe(ATTACK_HANDLER.load(Ordering::Acquire)),
         describe(USE_HANDLER.load(Ordering::Acquire)),
-        describe(SHOT_HANDLER.load(Ordering::Acquire)),
         describe(CLIENT_TABLE.load(Ordering::Acquire)),
         describe(CLIENT_GETTER.load(Ordering::Acquire)),
         CLIENT_TRAMPOLINE.load(Ordering::Acquire) != 0,
@@ -2310,7 +2259,6 @@ pub(crate) fn report() -> Vec<Anchor> {
         Anchor { name: "input.use", addr: USE_HANDLER.load(Ordering::Acquire) },
         Anchor { name: SITE_SCOPE, addr: if item_scope_resolved() { SCOPE_ENTER.load(Ordering::Acquire) } else { 0 } },
         Anchor { name: "input.registry_tls", addr: REGISTRY_TLS_INDEX.load(Ordering::Acquire) },
-        Anchor { name: SITE_SHOT, addr: SHOT_HANDLER.load(Ordering::Acquire) },
         Anchor { name: SITE_RELEASE, addr: RELEASE.load(Ordering::Acquire) },
         Anchor { name: SITE_CLIENT, addr: client().unwrap_or(0) },
     ]

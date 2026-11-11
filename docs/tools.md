@@ -753,7 +753,7 @@ Controls game time. Give exactly one input. The result has `paused`, `ticks`, `s
 
 ### engine_screenshot
 
-Asks the game's own screenshot code for a picture of the current frame, as F2 takes it (an open screen is not in it). The game saves the file in its own gallery; sculkwire waits for it to finish writing, copies it to `path`, and returns `path`, `bytes`, `format` (`png` or `jpeg`) and the image. The retail client saves JPEGs, so a `.png` path becomes `.jpg`. The game's gallery copy stays. A picture that does not appear in time is a `timeout`.
+Writes the next frame the game presents to `path` as a PNG and returns `path`, `bytes`, `format` (`png`) and the image. The picture is what the game window shows: the world, the HUD and any open screen. The in-game agent copies the frame itself, so the game shows no screenshot animation or toast, plays no sound and adds nothing to its gallery, and calls can follow each other at once. A game that presents no frame within 3 s (minimized) is a `timeout`.
 
 | Input | Description |
 |---|---|
