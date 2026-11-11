@@ -578,6 +578,11 @@ const RESPONSE_MS: u64 = 2_000;
 const SETTLE_TICK_MS: u32 = 50;
 /// The settle timer's id on the game window (any value the game and the other modules do not use).
 const SETTLE_TIMER_ID: usize = 0x0053_5754;
+/// How long `screen.close` waits after an Escape before it sends another: a screen with a focused text box
+/// (the chat screen opens with its text box focused) spends its first Escape on leaving the box.
+const CLOSE_RETRY_MS: u64 = 400;
+/// How many Escapes `screen.close` sends at most.
+const CLOSE_ESCAPES: u8 = 3;
 
 /// What a parked request is waiting for.
 #[derive(Clone, Copy)]
@@ -592,8 +597,8 @@ enum Phase {
     /// An item stack request went out; waiting for the server's answer to its id. `cursor`: the result
     /// lands on the cursor (a screen's result handler), which the answer names.
     Request { id: i32, moved: u32, take: bool, cursor: bool },
-    /// `screen.close` sent Escape; waiting for the screen to leave the top.
-    Close,
+    /// `screen.close` sent `escapes` Escapes; waiting for the screen to leave the top.
+    Close { escapes: u8 },
     /// A `craft.run`: its placements, the craft and the store, step by step ([`CraftRun`]).
     Craft,
 }
@@ -746,7 +751,8 @@ fn expire(core: &'static Core) {
         let slot = SETTLE.lock();
         slot.as_ref().is_some_and(|state| {
             let limit = match state.phase {
-                Phase::Aim | Phase::Open | Phase::Close => SETTLE_MS,
+                Phase::Aim | Phase::Open => SETTLE_MS,
+                Phase::Close { .. } => CLOSE_RETRY_MS * u64::from(CLOSE_ESCAPES),
                 Phase::Ready { .. } => READY_MS + u64::from(SETTLE_TICK_MS),
                 Phase::Request { .. } | Phase::Craft => RESPONSE_MS,
             };
@@ -775,7 +781,7 @@ fn expire(core: &'static Core) {
         Phase::Request { id, moved, take, cursor } => {
             state.deferred.resolve(request_outcome(response(id), moved, take, cursor, state.item));
         }
-        Phase::Close => {
+        Phase::Close { .. } => {
             let gone = screen_name(core).as_deref() != Some(state.before.as_str());
             state.deferred.resolve(json!({ "closed": gone }));
         }
@@ -931,11 +937,16 @@ unsafe extern "system" fn settle_tick(_window: win::Hwnd, _message: u32, _id: us
                 *SETTLE.lock() = Some(state);
             }
         }
-        Phase::Close => {
+        Phase::Close { escapes } => {
             let gone = screen_name(core).as_deref() != Some(state.before.as_str());
-            if gone || elapsed >= SETTLE_MS {
-                state.deferred.resolve(json!({ "closed": gone }));
+            if gone || elapsed >= CLOSE_RETRY_MS * u64::from(CLOSE_ESCAPES) {
+                state.deferred.resolve(json!({ "closed": gone, "escapes": escapes }));
                 stop_timer();
+            } else if elapsed >= CLOSE_RETRY_MS * u64::from(escapes) && escapes < CLOSE_ESCAPES {
+                // Still on top: the last Escape went to something inside the screen (its focused text box).
+                let sent = ui::h_key(core, &json!({ "key": "Escape", "action": "press" })).is_ok();
+                state.phase = Phase::Close { escapes: escapes + u8::from(sent) };
+                *SETTLE.lock() = Some(state);
             } else {
                 *SETTLE.lock() = Some(state);
             }
@@ -4774,7 +4785,7 @@ pub(crate) fn h_screen_close(core: &'static Core, _params: &Value) -> Result<Val
     }
     ui::h_key(core, &json!({ "key": "Escape", "action": "press" }))?;
     // The window procedure handles the Escape on a later frame: answer once the screen left the top.
-    park(core, before.top, Phase::Close, None)
+    park(core, before.top, Phase::Close { escapes: 1 }, None)
 }
 
 /* ------------------------------------------------------------------------------------------------
