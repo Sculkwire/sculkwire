@@ -307,8 +307,9 @@ export function register(server: McpServer): void {
       title: "Reload scripts or packs",
       description:
         "Copy the project's current packs into the game again (building Regolith projects with rgl first), then run " +
-        "`/reload` (scripts and functions) or `/reload all`, which the game documents as rejoining the world to reload " +
-        "every pack (new or changed blocks, items, entities and other JSON). The retail client 1.26.63 answers " +
+        "`/reload` (scripts and functions; it re-reads known .mcfunction files but does not register a new one) or " +
+        "`/reload all`, which the game documents as rejoining the world to reload every pack (new .mcfunction files, new " +
+        "or changed blocks, items, entities and other JSON). The retail client 1.26.63 answers " +
         "`/reload all` from /connect like `/reload` and stays in the world; relaunch with game_launch when new JSON " +
         "content does not show up. Returns the redeployed folders and the content-log and script errors logged by the reload.",
       inputSchema: { all: z.boolean().optional().describe("Run /reload all instead of /reload") },
