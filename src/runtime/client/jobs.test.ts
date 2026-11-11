@@ -80,7 +80,7 @@ describe("PlayJobs", () => {
     expect(done.progress.steps).toBe(4);
     expect(seen.at(-1)).toBe(4);
     expect(jobs.current).toBeUndefined();
-    expect(jobs.status("play-1").status).toBe("done");
+    expect(jobs.status("play-1")).toMatchObject({ status: "done", stopReason: "goal_done" });
   });
 
   it("returns from wait at the timeout while the job keeps running", async () => {
@@ -136,7 +136,7 @@ describe("PlayJobs", () => {
       throw new Error("model unreachable");
     });
     const r = await jobs.wait(undefined, 1000);
-    expect(r).toMatchObject({ status: "failed", error: "model unreachable" });
+    expect(r).toMatchObject({ status: "failed", error: "model unreachable", stopReason: "error" });
   });
 
   it("names a job that does not exist", async () => {

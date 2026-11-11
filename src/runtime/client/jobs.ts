@@ -24,7 +24,11 @@ export interface PlayJobInfo {
   status: JobStatus;
   startedAt: number;
   progress: PlayProgress;
-  /** Why the job was stopped from outside (player_job stop, a new play job, game_stop, shutdown). */
+  /**
+   * Why the job ended, present once it has: the outside reason when it was stopped (player_job stop, a new play job,
+   * game_stop, shutdown), else the play loop's own `stoppedBy` (`goal_done`, `timeout`, `died`, `error`), and `error`
+   * when the run threw.
+   */
   stopReason?: string;
   /** The finished run: trace, stop reason and final state. */
   result?: PlayResult;
@@ -130,6 +134,7 @@ export class PlayJobs {
         job.status = job.controller.signal.aborted ? "stopped" : "failed";
       } finally {
         job.finishedAt = Date.now();
+        job.stopReason ??= job.result?.stoppedBy ?? "error";
         job.listeners.clear();
       }
     })();

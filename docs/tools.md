@@ -591,7 +591,7 @@ Follows the `play` job that `player_act` started. Without `id` it uses the runni
 | `wait` | Blocks until the job ends or `timeoutMs` passes, then returns the same as `status`. 25 s stays under the 30 s many clients allow one call, so call it again until the job ends. With a progress token, each step sends a progress notification |
 | `stop` | Ends the job, lets go of every key and returns its result |
 
-The result has `id`, `goal`, `status`, `startedAt`, `progress`, and once the job has ended `stopReason`, `result` (the full play result described above) or `error`. `status` is `running`, `done`, `stopped` (by `stop`, a new play job, `game_stop`, `game_launch` or shutdown, named in `stopReason`) or `failed`.
+The result has `id`, `goal`, `status`, `startedAt`, `progress`, and once the job has ended `stopReason` plus `result` (the full play result described above) or `error`. `status` is `running`, `done`, `stopped` or `failed`. `stopReason` is the outside reason for a stopped job (`stop`, a new play job, `game_stop`, `game_launch` or shutdown, by name), the play loop's own `result.stoppedBy` for a job that ended by itself (`goal_done`, `timeout`, `died` or `error`), and `error` for a job whose run failed.
 
 ### player_state
 
