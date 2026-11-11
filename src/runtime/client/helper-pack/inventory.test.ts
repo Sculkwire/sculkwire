@@ -152,7 +152,8 @@ describe("helper inventory query", () => {
     });
     const reply = (await query({ kind: "inventory" })) as { inventory: unknown; attributes: unknown };
     const parsed = parseInventory(reply.inventory);
-    expect(parsed?.selectedSlot).toBe(1);
+    // selectedSlotIndex 1 is the second hotbar slot, which player_state calls 2 as well.
+    expect(parsed?.selectedSlot).toBe(2);
     expect(parsed?.hotbar).toHaveLength(9);
     expect(parsed?.hotbar[0]).toEqual({
       item: "minecraft:diamond_sword",

@@ -75,7 +75,10 @@ export interface ArmorSlots {
   feet: Slot;
 }
 
-/** The player's whole inventory. Slot indices are 0-based, as the engine and the Script API report them. */
+/**
+ * The player's whole inventory. Array indices are 0-based, as the engine and the Script API report them; `selectedSlot`
+ * is the hotbar slot 1 to 9 (`hotbar[selectedSlot - 1]`), the number `player_state` and `player_act select_slot` use.
+ */
 export interface PlayerInventory {
   selectedSlot: number;
   hotbar: Slot[];
@@ -267,8 +270,10 @@ export function parseSlots(raw: unknown): Slot[] | undefined {
 
 export function parseInventory(raw: unknown): PlayerInventory | undefined {
   if (!isRecord(raw)) return undefined;
-  const selectedSlot = raw.selectedSlot === undefined ? 0 : whole(raw.selectedSlot);
-  if (selectedSlot === undefined || selectedSlot < 0) return undefined;
+  // Both sources count from 0 (the engine and `selectedSlotIndex`); the result counts hotbar slots 1 to 9.
+  const index = raw.selectedSlot === undefined ? 0 : whole(raw.selectedSlot);
+  if (index === undefined || index < 0) return undefined;
+  const selectedSlot = index + 1;
   const hotbar = parseSlots(raw.hotbar);
   const inventory = parseSlots(raw.inventory);
   if (!hotbar || !inventory) return undefined;
@@ -586,10 +591,10 @@ function failedWith(err: unknown): ToolResult {
 
 /** A short summary of an inventory: how much of it is filled, and the slot the hotbar points at. */
 function inventoryText(source: InventorySource, state: PlayerInventoryState): string {
-  const held = state.inventory.hotbar[state.inventory.selectedSlot] ?? null;
+  const held = state.inventory.hotbar[state.inventory.selectedSlot - 1] ?? null;
   const stacks = [...state.inventory.hotbar, ...state.inventory.inventory].filter((slot) => slot !== null).length;
   const health = state.attributes.health;
-  const parts = [`${stacks} stack(s)`, `slot ${state.inventory.selectedSlot + 1}`];
+  const parts = [`${stacks} stack(s)`, `slot ${state.inventory.selectedSlot}`];
   if (held) parts.push(`holding ${held.item} x${held.count}`);
   if (health) parts.push(`health ${health.current}/${health.max ?? "?"}`);
   const armor = state.attributes.armor;
@@ -633,7 +638,7 @@ function schemas() {
     })).optional(),
     inventory: z
       .object({
-        selectedSlot: z.number(),
+        selectedSlot: z.number().describe("Hotbar slot 1 to 9, as player_state counts it: hotbar[selectedSlot - 1]"),
         hotbar: z.array(maybeSlot),
         inventory: z.array(maybeSlot),
         armor: z.object({ head: maybeSlot, chest: maybeSlot, legs: maybeSlot, feet: maybeSlot }),
@@ -679,7 +684,7 @@ export function registerInventoryTools(server: McpServer): void {
         "The local player's attributes (health, absorption, movement, attack damage, luck, hunger, saturation, level, " +
         "experience, ... plus armour points and armour toughness the game derives) and the whole inventory: hotbar, " +
         "main inventory, armour, offhand and cursor stack, with each item's id, count, custom name, lore, durability " +
-        "and enchantments. Through the agent it is the game's own data. Without the agent it comes from the helper " +
+        "and enchantments. selectedSlot is the hotbar slot 1 to 9, as player_state counts it. Through the agent it is the game's own data. Without the agent it comes from the helper " +
         "pack's Script API components (source: script), which has no aux value, no bundle contents and no cursor " +
         "stack, and only the attributes the running game exposes as components.",
       inputSchema: {},

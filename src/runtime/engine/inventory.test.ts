@@ -102,8 +102,9 @@ describe("parseSlot", () => {
 
 describe("parseInventory", () => {
   it("fills the slots an answer leaves out", () => {
+    // The game's 0-based index becomes the hotbar slot 1 to 9 player_state reports.
     expect(parseInventory({ selectedSlot: 2, hotbar: [null], inventory: [] })).toEqual({
-      selectedSlot: 2,
+      selectedSlot: 3,
       hotbar: [null],
       inventory: [],
       armor: { head: null, chest: null, legs: null, feet: null },
@@ -221,6 +222,7 @@ describe("routes", () => {
     const result = await readPlayerInventory(session);
     expect(result.ok).toBe(true);
     expect(result.ok && result.value.source).toBe("engine");
+    expect(result.ok && result.value.inventory.selectedSlot).toBe(2);
     expect(result.ok && result.value.inventory.hotbar[0]).toEqual({ item: "minecraft:torch", count: 12, enchantments: [] });
     expect(bridge.query).not.toHaveBeenCalled();
   });
@@ -233,6 +235,7 @@ describe("routes", () => {
     const result = await readPlayerInventory(detached());
     expect(result.ok).toBe(true);
     expect(result.ok && result.value.source).toBe("script");
+    expect(result.ok && result.value.inventory.selectedSlot).toBe(1);
     expect(result.ok && result.value.attributes.health?.current).toBe(14);
     expect(bridge.query).toHaveBeenCalledWith("inventory");
   });

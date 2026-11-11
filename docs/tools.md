@@ -595,13 +595,13 @@ The result has `id`, `goal`, `status`, `startedAt`, `progress`, and once the job
 
 ### player_state
 
-Returns the player's position, rotation, ground contact, velocity, health, held item, selected slot (1 to 9), and the block and entity under the crosshair, as `state`. The helper pack streams it, so the call is fast.
+Returns the player's position, rotation, ground contact, velocity, health, held item, selected slot (1 to 9, the same number `player_inventory` reports as `selectedSlot`), and the block and entity under the crosshair, as `state`. The helper pack streams it, so the call is fast.
 
 No inputs.
 
 ### player_inventory
 
-The local player's attributes and whole inventory, read from the game on the thread that owns the data. Attributes are `{name: {current, min, max, default, base}}` for every attribute the player has (health, absorption, movement, attack damage, knockback resistance, luck, hunger, saturation, exhaustion, level, experience, ...; `base` is the value before modifiers) plus `armor` (total armour points) and `armorToughness` as `{current}`, computed by the game's own functions. The inventory is `selectedSlot`, `hotbar` (9), `inventory` (27), `armor` (`head`, `chest`, `legs`, `feet`), `offhand` and `cursor`; a slot is `null` or `{item, count, data?, name?, durability?: {damage, max}, enchantments: [{id, level}], lore?, contents?}`, where `contents` holds what is inside a bundle or a shulker box.
+The local player's attributes and whole inventory, read from the game on the thread that owns the data. Attributes are `{name: {current, min, max, default, base}}` for every attribute the player has (health, absorption, movement, attack damage, knockback resistance, luck, hunger, saturation, exhaustion, level, experience, ...; `base` is the value before modifiers) plus `armor` (total armour points) and `armorToughness` as `{current}`, computed by the game's own functions. The inventory is `selectedSlot` (the hotbar slot 1 to 9, as `player_state` and `select_slot` count it, so the held stack is `hotbar[selectedSlot - 1]`), `hotbar` (9), `inventory` (27), `armor` (`head`, `chest`, `legs`, `feet`), `offhand` and `cursor`; a slot is `null` or `{item, count, data?, name?, durability?: {damage, max}, enchantments: [{id, level}], lore?, contents?}`, where `contents` holds what is inside a bundle or a shulker box.
 
 Takes no input. The result has `source`, `attributes` and `inventory`. Through the agent `source` is `engine`, the game's own data. Without an agent it is `script`, read through the helper pack's Script API components (inventory and equippable), which has no item aux value, no bundle contents and no cursor stack, and only the attributes the running game exposes as components. Crafting and setting up inventories stay on commands through `engine_command` (`/give`, `/clear`, `/replaceitem`, `/setblock`).
 
