@@ -304,6 +304,13 @@ describe("screen.move, screen.act and screen.close answers", () => {
     expect(parseScreenClose("closed")).toBeUndefined();
     expect(parseScreenClose({ closed: 1 })).toBeUndefined();
   });
+
+  it("keeps the Escapes the close sent", () => {
+    expect(parseScreenClose({ closed: true, escapes: 2 })).toEqual({ closed: true, escapes: 2 });
+    expect(parseScreenClose({ closed: false, escapes: 3 })).toEqual({ closed: false, escapes: 3 });
+    expect(parseScreenClose({ closed: true, escapes: "2" })).toEqual({ closed: true });
+    expect(parseScreenClose({ closed: true, escapes: -1 })).toEqual({ closed: true });
+  });
 });
 
 describe("parameters", () => {

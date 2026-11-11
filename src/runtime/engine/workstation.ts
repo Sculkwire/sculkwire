@@ -249,6 +249,8 @@ export interface ScreenActOutcome {
 /** What closing the screen did. */
 export interface ScreenCloseOutcome {
   closed: boolean;
+  /** Escapes the agent sent: a screen with a focused text box (chat) spends its first on leaving the box. */
+  escapes?: number;
 }
 
 /** A screen action to run, with the parameters that action takes. */
@@ -547,12 +549,17 @@ export function parseScreenAct(raw: unknown): ScreenActOutcome | undefined {
   return act;
 }
 
-/** A close answer. A call that returned without an error closed the screen; `closed: false` is a refusal. */
+/**
+ * A close answer `{closed, escapes}`. A call that returned without an error closed the screen; `closed: false` is
+ * a refusal. `escapes` is kept when it is a count.
+ */
 export function parseScreenClose(raw: unknown): ScreenCloseOutcome | undefined {
   if (raw === undefined || raw === null) return { closed: true };
   if (!isRecord(raw) || Array.isArray(raw)) return undefined;
-  if (raw.closed === undefined) return { closed: true };
-  return typeof raw.closed === "boolean" ? { closed: raw.closed } : undefined;
+  if (raw.closed !== undefined && typeof raw.closed !== "boolean") return undefined;
+  const closed = typeof raw.closed === "boolean" ? raw.closed : true;
+  const escapes = raw.escapes;
+  return typeof escapes === "number" && Number.isInteger(escapes) && escapes >= 0 ? { closed, escapes } : { closed };
 }
 
 /* -------------------------------------------------------------------------------------------------------------- */
@@ -927,6 +934,7 @@ function schemas() {
     from: slotRefSchema.optional(),
     to: slotRefSchema.optional(),
     closed: z.boolean().optional(),
+    escapes: z.number().optional(),
     done: z.boolean().optional(),
     result: maybeSlot.optional(),
     consumed: z.array(maybeSlot).optional(),
