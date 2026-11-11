@@ -271,6 +271,8 @@ Shows whether the game is running (`running`, `ready`), the display `mode`, the 
 
 `running` and `ready` follow the game process found for the launch, checked on every call: once it exits (a crash, or closed by hand) they turn false, `gameExited` is `true` and `manualSteps` says to call `game_stop` (which still cleans up the bridge, its options and deployed packs); `game_launch` does that cleanup itself. Until the process is found (a user still starting the game) `running` stays true and `ready` false.
 
+When sculkwire cannot type `/connect` itself (desktop mode), `manualSteps` asks the user to type it. That step shows only while no `/connect` client is attached: it goes once one attaches (`connect.method` is then `chat`) and comes back if the game drops the socket, e.g. on a rejoin.
+
 No inputs.
 
 ### game_command

@@ -183,6 +183,20 @@ function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/**
+ * The `/connect` part of game_status. The step that asks the user to type `/connect` shows only while no client is
+ * attached, so it goes once they typed it and comes back if the game drops the socket (a rejoin). A client that
+ * attached after the step was handed out was typed into the chat, so its method is `chat`.
+ */
+export function connectView(
+  step: string | undefined,
+  method: "automatic" | "chat" | undefined,
+  clients: number,
+): { status: BridgeStatus["connect"]; steps: string[] } {
+  const how = method ?? (clients > 0 && step ? "chat" : undefined);
+  return { status: { clients, ...(how ? { method: how } : {}) }, steps: step && clients === 0 ? [step] : [] };
+}
+
 export class ClientBridge {
   install?: ClientInstall;
   launchState?: LaunchState;
@@ -215,6 +229,11 @@ export class ClientBridge {
   #ready = false;
   #logCursor?: LogPosition;
   #manual: string[] = [];
+  /**
+   * The `/connect` step for the user, shown only while no `/connect` client is attached: it disappears once one dials in
+   * (typed by the user, or the game reconnecting) and comes back when the last one drops (a rejoin closes the socket).
+   */
+  #connectStep?: string;
   /** Pack copies this bridge put into development_*_packs; removed on stop. */
   #deployed: string[] = [];
   /** Warnings from the last deploy (foreign packs sharing a deployed uuid). */
@@ -244,15 +263,16 @@ export class ClientBridge {
 
   status(): BridgeStatus {
     const exited = this.#gameExited();
+    const connect = connectView(this.#connectStep, this.#connectMethod, this.#connect?.clients().length ?? 0);
     const s: BridgeStatus = {
       running: this.running,
       packs: this.#packs.map((p) => ({ ...p })),
       debugger: { attached: !!this.#session && !this.#session.closed },
-      connect: { clients: this.#connect?.clients().length ?? 0, ...(this.#connectMethod ? { method: this.#connectMethod } : {}) },
+      connect: connect.status,
       ready: this.#ready && !exited,
       manualSteps: exited
         ? [`the game process (pid ${this.launchState?.gamePid}) exited: call game_stop to clean up, then game_launch`]
-        : [...this.#manual],
+        : [...this.#manual, ...connect.steps],
       ...(this.#deployDiagnostics.length ? { deployDiagnostics: [...this.#deployDiagnostics] } : {}),
     };
     if (exited) s.gameExited = true;
@@ -289,6 +309,7 @@ export class ClientBridge {
     this.#deployDiagnostics = [];
     this.#ready = false;
     this.#connectMethod = undefined;
+    this.#connectStep = undefined;
     this.#screens = NO_SCREENS;
     this.#frame = undefined;
     this.#joinRecovery = undefined;
@@ -532,7 +553,7 @@ export class ClientBridge {
     }
     const line = `connect localhost:${connect.port}`;
     if (!hasInput(state)) {
-      this.#manual.push(`type "/${line}" in the game chat to enable /connect (commands still work through the script debugger)`);
+      this.#connectStep = `type "/${line}" in the game chat to enable /connect (commands still work through the script debugger)`;
       return;
     }
     await this.waitForPrint((p) => p.message.includes(SPAWN_MARK), 60_000).catch(() => undefined);
@@ -548,7 +569,7 @@ export class ClientBridge {
       }
     }
     if (connect.clients().length === 0) {
-      this.#manual.push(`/connect did not attach (${errors.join("; ")}); commands use the script debugger`);
+      this.#connectStep = `/connect did not attach (${errors.join("; ")}): type "/${line}" in the game chat to enable it (commands use the script debugger until then)`;
     }
   }
 
