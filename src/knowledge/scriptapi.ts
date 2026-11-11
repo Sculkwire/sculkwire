@@ -278,11 +278,17 @@ export async function apiLookup(opts: {
     }
   }
 
-  const entries = matches.slice(0, limit).map(({ sym, inheritedFrom }): ApiEntry => {
-    const inStable = (stableTable.byName.get(sym.name) ?? []).some((s) => s.module === sym.module);
+  /** The plain typings' declaration of a symbol, when it is not beta there. */
+  const stableOf = (sym: DtsSymbol): DtsSymbol | undefined =>
+    (stableTable.byName.get(sym.name) ?? []).find((s) => s.module === sym.module && !s.doc.beta);
+  const entries = matches.slice(0, limit).map(({ sym: betaSym, inheritedFrom }): ApiEntry => {
+    // A stable symbol is reported from the plain typings (their signature, docs and npm version); only a beta
+    // symbol comes from the beta typings.
+    const stableSym = stableOf(betaSym);
+    const sym = stableSym ?? betaSym;
     const entry: ApiEntry = {
       module: sym.module,
-      npmVersion: betaTable.packages[sym.module] ?? "",
+      npmVersion: (stableSym ? stableTable : betaTable).packages[sym.module] ?? "",
       name: sym.name,
       kind: sym.kind,
       signature: sym.signature,
@@ -290,7 +296,7 @@ export async function apiLookup(opts: {
       params: sym.doc.params,
       throws: sym.doc.throws,
       privileges: sym.doc.privileges,
-      beta: sym.doc.beta || !inStable,
+      beta: !stableSym,
       examples: sym.doc.examples.slice(0, 2),
     };
     if (sym.doc.returns) entry.returns = sym.doc.returns;
@@ -301,12 +307,10 @@ export async function apiLookup(opts: {
     if (sym.kind === "class" || sym.kind === "interface" || sym.kind === "enum") {
       entry.members = betaTable.all
         .filter((m) => m.container === sym.name && m.module === sym.module)
-        .map((m) => ({
-          name: m.name.slice(sym.name.length + 1),
-          kind: m.kind,
-          signature: m.signature,
-          beta: m.doc.beta || !(stableTable.byName.get(m.name) ?? []).some((x) => x.module === m.module),
-        }));
+        .map((betaMember) => {
+          const m = stableOf(betaMember) ?? betaMember;
+          return { name: m.name.slice(sym.name.length + 1), kind: m.kind, signature: m.signature, beta: m === betaMember };
+        });
     }
     return entry;
   });

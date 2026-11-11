@@ -52,7 +52,7 @@ Searches the official Minecraft Creator docs from Microsoft Learn with BM25. Ide
 
 ### api_lookup
 
-Looks up a Script API symbol in the channel's `@minecraft/*` typings, e.g. `Entity.applyDamage`, `Entity`, `applyDamage`, `world.getDimension` or `@minecraft/server-ui:ActionFormData.button`. Returns the signature, the docs, parameters, what it throws, the privileges, whether it is beta, and the module version that added it. A class lookup lists every member, and inherited members are found through the base classes. When nothing matches, `suggestions` lists close names.
+Looks up a Script API symbol in the channel's `@minecraft/*` typings, e.g. `Entity.applyDamage`, `Entity`, `applyDamage`, `world.getDimension` or `@minecraft/server-ui:ActionFormData.button`. Returns the signature, the docs, parameters, what it throws, the privileges, whether it is beta, and the module version that added it. A class lookup lists every member, and inherited members are found through the base classes. A stable symbol is described from the channel's plain typings (`npmVersion` is the plain build, e.g. `2.11.0`); only a beta symbol comes from the beta typings. When nothing matches, `suggestions` lists close names.
 
 | Input | Description |
 |---|---|
