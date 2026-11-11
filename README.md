@@ -21,9 +21,10 @@
 | Knowledge | `docs_search`, `api_lookup`, `component_lookup`, `command_lookup`, `molang_lookup`, `vanilla_example`, `changelog_search`, `knowledge_versions` |
 | Validation | `validate_pack`, `validate_file` |
 | Server | `bds_check`, `gametest_run`, `bds_session_start`, `bds_session_command`, `bds_session_logs`, `bds_session_stop`, `script_profile` |
-| Game | `game_launch`, `game_status`, `game_command`, `game_reload`, `game_log`, `game_screenshot`, `game_query`, `game_registry`, `game_input`, `game_stop` |
-| Player | `player_act`, `player_job`, `player_state` |
-| In-Game Agent | `engine_attach`, `engine_status`, `engine_command`, `engine_player`, `engine_tick`, `engine_screenshot`, `game_input_lock`, `game_settings`, `world_settings`, `game_ui`, `player_inventory`, `container`, `craft`, `interact`, `screen` |
+| Game | `game_launch`, `game_status`, `game_command`, `game_reload`, `game_log`, `game_screenshot`, `game_query`, `game_registry`, `game_input`, `game_input_lock`, `game_ui`, `game_settings`, `world_settings`, `game_stop` |
+| Player | `player_act`, `player_job`, `player_state`, `player_inventory` |
+| Containers and Crafting | `container`, `craft`, `interact`, `screen` |
+| Engine | `engine_attach`, `engine_status`, `engine_command`, `engine_player`, `engine_tick`, `engine_screenshot` |
 | Game Files | `game_builds`, `game_vanilla_packs`, `game_extract_pack` |
 | Decision Model | `decision_status` |
 

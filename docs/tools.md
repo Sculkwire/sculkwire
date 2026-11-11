@@ -6,7 +6,9 @@ Every tool returns structured JSON plus a short text summary. Problems found in 
 - [Validation](#validation)
 - [Bedrock Dedicated Server](#bedrock-dedicated-server)
 - [Game Client](#game-client)
-- [In-Game Agent](#in-game-agent)
+- [Player](#player)
+- [Containers and Crafting](#containers-and-crafting)
+- [Engine](#engine)
 - [Game Files](#game-files)
 - [Decision Model](#decision-model)
 - [sculkwire](#sculkwire)
@@ -341,6 +343,93 @@ Presses keys, types text, clicks or moves the mouse in the game, like a player w
 | `x`, `y` | For `click` and `move` |
 | `button` | For `click`. 1 (left, default), 2 (middle) or 3 (right) |
 
+### game_input_lock
+
+Keeps your own keyboard and mouse out of the game while sculkwire plays through the in-game agent, so a click or key in the game window cannot disturb an action. While locked, the game also does not pause when its window loses focus, and the action bar shows a badge. F9 in the game always works: it hands control to you, which stops the running `player_act` action with `the user took control (F9)` and pauses a `play` job, and pressing it again gives control back. Needs `engine_attach`.
+
+| Input | Description |
+|---|---|
+| `mode` | `on` locks now, `off` never locks, `auto` (the default) locks while a `player_act` action or `play` job runs. Omit it to read the state |
+
+The result carries these fields.
+
+| Field | Meaning |
+|---|---|
+| `locked` | Your input is kept out of the game now |
+| `mode` | `on`, `off` or `auto` |
+| `by` | Who made the last change: `agent` (a lock call) or `user` (F9) |
+| `user` | You hold control after F9 and have not given it back |
+| `active` | Some connection declared an action or play job running, which is what `auto` locks for |
+| `window` | The game window is hooked. False until the first frame after injection |
+| `dropped` | Input events dropped since injection |
+| `focusLost`, `focusKept` | Focus-loss events seen, and how many the lock kept from the game |
+| `hostFocused` | The game window has focus on your desktop, as sculkwire last reported it. True until a report says otherwise, and true when nothing watches the desktop |
+| `focusWatch` | The desktop focus watcher: `backend` (`kwin`, `x11`, `windows` or `none`), the `gamePid` it matches, whether it is `running`, the number of `reports`, the `activePid` of the active window in the last report, `focused`, and the start `error` if it failed. On Linux it is absent when no `display: window` game runs. On Windows every launched game reports `backend: windows` with `running: false`, because the game sees its own focus |
+| `pad` | The controller gate: `hooked` polled functions, `reads`, `active` reads with a pressed button or moved stick, and `hidden` reads the agent turned neutral |
+| `keysHidden` | Polled key-state answers the agent turned into "not pressed" |
+| `shift` | Shift presses by path, each `[background, foreground]`: `message` counts window messages, `raw` counts raw input |
+| `wineFocused`, `wineForeground` | Diagnostic only: focus and foreground as the game process sees them. Under gamescope Wine never learns about desktop focus changes, so these stay true there; on Windows they are the real window focus. `hostFocused` is the desktop focus sculkwire reported |
+| `camera` | The game's own camera permission the lock uses: `disabled` while locked in a world, `enabled` otherwise, `null` when it could not be set |
+
+The keyboard route cannot be locked, because its keys and mouse reach the game the same way as yours. Without an attached agent the call fails and says to attach or to launch with `display: headless`.
+
+### game_ui
+
+Drives the game's own UI from inside the process: the screen, its controls, and keys, text, clicks and scrolling. This is how a menu is driven without the keyboard and mouse route, which only reaches the game while its window is in the foreground. It works in the background, on Linux and Windows alike, and needs no loaded world, so the title screen, the Play screen and Settings are reachable while the game sits in a menu. Every input is refused on a store, Marketplace, Minecoins, Dressing Room or persona editor screen except `Escape`, which leaves it. On an OreUI page (every one is named `ui://./hbui/index.html`) the agent reads the page's route from the game's own router, and refuses clicks, `Return` and `space` while the route cannot be read or is not one of the Play screen's (`/play`, `/create-new-world`, `/edit-world`) or the option pages of Settings (`/settings`, `/oreui-settings/` `game`, `video`, `audio`, `general`, `accessibility`, `keyboard-and-mouse`, `controller`, `touch`, `creator`); Multiplayer, Party, Account and Global Resources are refused. Without `engine_attach` it connects to an agent that is already listening on the agent port.
+
+| Input | Description |
+|---|---|
+| `action` | `screen`, `controls`, `press`, `key`, `text`, `click` or `scroll` (required) |
+| `name` | `press`: the control's name, as `controls` lists it |
+| `filter` | `controls`: only names or labels containing this |
+| `key` | `key`: one key or chord, with the key names `game_input` takes, e.g. `Escape`, `Return`, `space`, `F3`, `ctrl+a` |
+| `keyAction` | `key`: `press` (default), `down` or `up` |
+| `text` | `text`: what to type into the focused text box |
+| `x`, `y` | `click` and `scroll`: client pixels, the same frame a screenshot shows |
+| `button` | `click`: `left` (default) or `right` |
+| `delta` | `scroll`: whole notches, positive up |
+
+The result has `screen` (`name`, `stack` bottom to top, `modal`, and on an OreUI page its `route`, `null` when unread) for `screen`, `controls` for `controls`, each with `name`, `type` (`button`, `toggle`, `slider`, `text`, `label`, `list` or `other`), `rect` (`[x, y, width, height]`), `text` and `enabled`; and `pressed`, `key` (with `keyAction`), `typed` (characters), `click` (`x`, `y`, `button`) or `scroll` (`x`, `y`, `delta`) for the inputs. When the UI tree cannot be read, `controls` and `press` answer `anchor_missing` and `click` remains. A click while the game has not read the mouse for over 500 ms answers `anchor_missing` `ui.click_input`.
+
+### game_settings
+
+Reads or changes the game's own options, named by their `options.txt` save tag (`gfx_viewdistance`, `game_thirdperson`, `showcoordinates`). Through the running game when the agent is attached, so a change applies at once and the game saves it itself; in `options.txt` when it is not, which applies at the next launch and can only change options the game already saved. Every value sculkwire changes is put back by `game_stop`. The script debugger, WebSocket and content-log keys belong to the bridge: `game_launch` writes them and `game_stop` restores them, and this tool refuses them.
+
+| Input | Description |
+|---|---|
+| `action` | `list` every option, `get` one, or `set` one (required) |
+| `id` | `get` and `set`: the option's `options.txt` tag (required). `list`: an id substring, like `filter` |
+| `value` | `set`: the new value, a boolean, number or string (required) |
+| `filter` | `list`: case-insensitive id substring |
+
+The result has `source` (`engine` or `options.txt`), and for `list` the `settings` array, each with `id`, `type` (`bool`, `int`, `float`, `string` or `enum`), `value`, and `min`/`max` or `values` where the game gives them. `get` returns `setting`. `set` returns `setting`, the `previous` value, `appliesAt` (`now` or `next launch`) and `saved`: `true` when the value reached `options.txt`, which it always does on the file route, `false` when the change is live only and is lost on restart unless the game saves later, and absent when the agent does not report it. With an attached agent a value outside the option's range or allowed values is an `invalid_params` failure.
+
+### world_settings
+
+Reads or changes a test world: game rules, difficulty, game type, time and weather. Through the running game when the agent is attached, the answer being what the loaded level itself says and a change applied the way the game applies its own command; otherwise sculkwire reads and rewrites `level.dat`, and only for a `sculkwire-*` world no game has loaded. Only `sculkwire-*` worlds are ever changed. World changes need no restore: a test world is disposable and the next launch replaces it.
+
+| Input | Description |
+|---|---|
+| `action` | `get` or `set` (required) |
+| `world` | `get` and `set` without an agent: world name, `sculkwire-` added when missing (default: the loaded world, else the newest `sculkwire-*` world) |
+| `gamerules` | `set`: game rule values, e.g. `{ "keepinventory": true }` |
+| `difficulty` | `set`: `peaceful`, `easy`, `normal` or `hard` |
+| `gameType` | `set`: `survival`, `creative`, `adventure` or `spectator` |
+| `time` | `set`: game ticks, 0 to 24000 in a day |
+| `weather` | `set`: `{ "rain": true, "lightning": false }`. In `level.dat` it is written as rain and lightning levels with a five-day timer |
+
+The result has `source` (`engine` or `level.dat`), the `world` (`name`, and for a file read `levelId` and `dir`), and `settings`: `name`, `seed` (as text, because it is a 64-bit integer), `gameType`, `difficulty`, `cheats`, `education`, `experiments`, `gamerules`, `time`, `dayCycle`, `weather`, `spawn` and `dimension`. A field the engine cannot read is `null`, never a guess. In `level.dat` mode only the game rules the file stores by name are reported and settable.
+
+### game_stop
+
+Closes the game, closes the bridge and puts back the `options.txt` keys sculkwire changed. It stops a running play job first. The result has `stopped`, `message` and `restoredOptions`. The message says what happened, for example `closed the game (1 process(es))`, `the game was not running`, or that the game had to be forced to quit.
+
+No inputs.
+
+## Player
+
+These tools control the player in the game and read its state.
+
 ### player_act
 
 Controls the player like a person playing, run in a fast loop by sculkwire, so the agent does not wait on the model between steps. Pass up to 50 actions to run them in order in one call. The call stops at the first failed action unless `continueOnError` is set. Needs `game_launch` with `display: window` or `headless` on Linux, or any display on Windows. It refuses to run while an [input provider](extensions.md#input-provider) reports the simulation paused, because the player cannot move then. When the MCP client cancels the call or the call times out, the running action stops and every key and mouse button is let go. A client that sends a progress token gets a progress notification after each action.
@@ -355,7 +444,7 @@ On the engine route the input provider's input lock keeps your own keyboard and 
 | `continueOnError` | Keep going after a failed action (default false) |
 | `input` | `auto` (default, the engine route when the input provider answers, else keyboard and mouse), `engine` (fails when the provider cannot be used) or `keyboard`. See the input routes below |
 
-There are two input routes. The keyboard route sends held keys, mouse buttons and relative mouse motion: through `xdotool` into the game's own gamescope display on Linux, through `SendInput` on Windows. The engine route goes through the in-process [input provider](extensions.md#input-provider): the built-in one drives the [in-game agent](#in-game-agent) once `engine_attach` has loaded it, and an extension may install its own instead. Through it sculkwire sets the view every frame, holds a movement vector, asks for an attack or a use of the held item, and reads the player's position, rotation, velocity, ground contact and health from the provider's motion stream (the agent's tick stream, one tick old) instead of the helper pack (50 to 100 ms old there). Entities, the block and entity under the crosshair, the held item and the hotbar slot still come from the helper pack. `auto` takes the engine route when the provider answers and the keyboard otherwise. `engine` fails when no provider can be used. When the engine route fails during an action, every input is let go, the action runs again from the start on the keyboard, and its message says so. The call stays on the keyboard after that. Each action's result names the route that carried it out in `input`, and the text summary starts with the route the call picked. `mine`, `select_slot` and `hold` always use the keyboard and mouse buttons.
+There are two input routes. The keyboard route sends held keys, mouse buttons and relative mouse motion: through `xdotool` into the game's own gamescope display on Linux, through `SendInput` on Windows. The engine route goes through the in-process [input provider](extensions.md#input-provider): the built-in one drives the [in-game agent](#engine) once `engine_attach` has loaded it, and an extension may install its own instead. Through it sculkwire sets the view every frame, holds a movement vector, asks for an attack or a use of the held item, and reads the player's position, rotation, velocity, ground contact and health from the provider's motion stream (the agent's tick stream, one tick old) instead of the helper pack (50 to 100 ms old there). Entities, the block and entity under the crosshair, the held item and the hotbar slot still come from the helper pack. `auto` takes the engine route when the provider answers and the keyboard otherwise. `engine` fails when no provider can be used. When the engine route fails during an action, every input is let go, the action runs again from the start on the keyboard, and its message says so. The call stays on the keyboard after that. Each action's result names the route that carried it out in `input`, and the text summary starts with the route the call picked. `mine`, `select_slot` and `hold` always use the keyboard and mouse buttons.
 
 | Action | What it does |
 |---|---|
@@ -504,146 +593,15 @@ Returns the player's position, rotation, ground contact, velocity, health, held 
 
 No inputs.
 
-### game_stop
-
-Closes the game, closes the bridge and puts back the `options.txt` keys sculkwire changed. It stops a running play job first. The result has `stopped`, `message` and `restoredOptions`. The message says what happened, for example `closed the game (1 process(es))`, `the game was not running`, or that the game had to be forced to quit.
-
-No inputs.
-
-## In-Game Agent
-
-These tools talk to a small DLL loaded into the running game, which answers on `127.0.0.1:19160` and runs the requests that touch the game on its main thread. Any PC (GDK) install sculkwire detects works: a Wine or Proton install on Linux (Flarial, mcbe-gdk-installer, Bottles, Lutris, Steam), a native install on Windows, and the game must already be running. See [In-Game Agent](engine.md) for the requirements per OS, the attach flow, the input lock and the wire protocol.
-
-Every call returns `ok`. A failed call carries a stable `reason`, the JSON-RPC `code` and a `message`: `anchor_missing` (`-32001`, the anchor's name in `anchor`), `not_in_world` (`-32002`), `wrong_thread` (`-32003`), `timeout` (`-32004`), `command_failed` (`-32006`), `path_not_writable` (`-32007`), `scripting_unavailable` (`-32014`), `invalid_params` (`-32602`), `unknown_method` (`-32601`, an agent older than the method), `not_attached` and `disconnected` (no agent answers on the port), `protocol` (the agent answered a shape sculkwire does not know) or `rpc_error` (any other agent error). A host-side problem fails with `prerequisite` and no code: no install, the game not running, no `cargo` and no release build, or a file that cannot be read or written.
-
-### engine_attach
-
-Builds the agent DLL, injects it into the running `Minecraft.Windows.exe`, connects and returns the engine status (the fields of `engine_status`). The DLL comes from an extension's [agent source](extensions.md#agent-source) when one matches the game folder, else from `SCULKWIRE_AGENT_DLL`, a cargo build of `native/`, or the matching GitHub release (downloaded and checked against its sha256). The build is cached by a hash of its sources, and repeat calls reuse the loaded agent: they only read its status again. The call waits until the agent has resolved its anchors after the injection. Start the game first; an error says which install or game folder was not found, that the game has to run, or where `sculkwire-agent.log` is when the DLL loaded but nothing answered.
-
-No inputs.
-
-### engine_status
-
-Returns the `build` identity as the DLL reports it (the executable's file name and version), whether the main-thread hook runs requests (`hooked`), the current `tick`, every `resolved` anchor with its address, and every `missing` one. Without a prior attach it connects to an agent that is already listening on the agent port.
-
-No inputs.
-
-### engine_command
-
-Runs a command on the game's main thread as the local player, through the engine's command dispatcher, exactly as if it were typed: chat commands, client-side commands and `/reload` all work. The result carries the `command`, `success`, taken from the command's own output (`false` when it reported an error, `null` when it prints nothing, as `say` does), and the game's output text in `message`.
-
-The agent replays the origin of a real player command, so the first command after an attach or a world change types `/testfor @s` in chat itself, with its output kept out of chat. It does so only while the HUD alone is showing; with another screen open the call fails with `anchor_missing` `command.origin` and says to run one line in chat yourself and retry. An empty command or one with a newline is `invalid_params`.
-
-| Input | Description |
-|---|---|
-| `command` | Command line, with or without the leading slash (required). Newlines are rejected, because the game would split them into several commands |
-
-### engine_player
-
-Returns the local player's `position` (the feet), `rotation` (pitch, yaw; each `null` when not readable) and movement since the previous tick (`delta`), read from the engine on the game's main thread, plus the simulation tick it was read on (`simTick`) and the numeric `dimension` (`null` when unknown). Needs `engine_attach` and a loaded world; right after an attach it answers `not_in_world` until the agent's first client tick.
-
-No inputs.
-
-### engine_tick
-
-Controls game time. Give exactly one input. The result has `paused`, `ticks`, `scale`, `success` and the engine's own `message` when it said anything.
-
-| Input | Description |
-|---|---|
-| `pause` | `true` freezes the simulation, `false` resumes it |
-| `step` | Pauses if needed, then runs exactly this many simulation ticks (1 to 600) inside one main-thread request and stays paused |
-| `scale` | Sets the tick rate multiplier, a positive number |
-
-### engine_screenshot
-
-Asks the game's own screenshot code for a picture of the current frame, as F2 takes it (an open screen is not in it). The game saves the file in its own gallery; sculkwire waits for it to finish writing, copies it to `path`, and returns `path`, `bytes`, `format` (`png` or `jpeg`) and the image. The retail client saves JPEGs, so a `.png` path becomes `.jpg`. The game's gallery copy stays. A picture that does not appear in time is a `timeout`.
-
-| Input | Description |
-|---|---|
-| `path` | Where to save the picture, a host path (default under sculkwire's cache) |
-
-### game_input_lock
-
-Keeps your own keyboard and mouse out of the game while sculkwire plays through the in-game agent, so a click or key in the game window cannot disturb an action. While locked, the game also does not pause when its window loses focus, and the action bar shows a badge. F9 in the game always works: it hands control to you, which stops the running `player_act` action with `the user took control (F9)` and pauses a `play` job, and pressing it again gives control back. Needs `engine_attach`.
-
-| Input | Description |
-|---|---|
-| `mode` | `on` locks now, `off` never locks, `auto` (the default) locks while a `player_act` action or `play` job runs. Omit it to read the state |
-
-The result carries these fields.
-
-| Field | Meaning |
-|---|---|
-| `locked` | Your input is kept out of the game now |
-| `mode` | `on`, `off` or `auto` |
-| `by` | Who made the last change: `agent` (a lock call) or `user` (F9) |
-| `user` | You hold control after F9 and have not given it back |
-| `active` | Some connection declared an action or play job running, which is what `auto` locks for |
-| `window` | The game window is hooked. False until the first frame after injection |
-| `dropped` | Input events dropped since injection |
-| `focusLost`, `focusKept` | Focus-loss events seen, and how many the lock kept from the game |
-| `hostFocused` | The game window has focus on your desktop, as sculkwire last reported it. True until a report says otherwise, and true when nothing watches the desktop |
-| `focusWatch` | The desktop focus watcher: `backend` (`kwin`, `x11`, `windows` or `none`), the `gamePid` it matches, whether it is `running`, the number of `reports`, the `activePid` of the active window in the last report, `focused`, and the start `error` if it failed. On Linux it is absent when no `display: window` game runs. On Windows every launched game reports `backend: windows` with `running: false`, because the game sees its own focus |
-| `pad` | The controller gate: `hooked` polled functions, `reads`, `active` reads with a pressed button or moved stick, and `hidden` reads the agent turned neutral |
-| `keysHidden` | Polled key-state answers the agent turned into "not pressed" |
-| `shift` | Shift presses by path, each `[background, foreground]`: `message` counts window messages, `raw` counts raw input |
-| `wineFocused`, `wineForeground` | Diagnostic only: focus and foreground as the game process sees them. Under gamescope Wine never learns about desktop focus changes, so these stay true there; on Windows they are the real window focus. `hostFocused` is the desktop focus sculkwire reported |
-| `camera` | The game's own camera permission the lock uses: `disabled` while locked in a world, `enabled` otherwise, `null` when it could not be set |
-
-The keyboard route cannot be locked, because its keys and mouse reach the game the same way as yours. Without an attached agent the call fails and says to attach or to launch with `display: headless`.
-
-### game_settings
-
-Reads or changes the game's own options, named by their `options.txt` save tag (`gfx_viewdistance`, `game_thirdperson`, `showcoordinates`). Through the running game when the agent is attached, so a change applies at once and the game saves it itself; in `options.txt` when it is not, which applies at the next launch and can only change options the game already saved. Every value sculkwire changes is put back by `game_stop`. The script debugger, WebSocket and content-log keys belong to the bridge: `game_launch` writes them and `game_stop` restores them, and this tool refuses them.
-
-| Input | Description |
-|---|---|
-| `action` | `list` every option, `get` one, or `set` one (required) |
-| `id` | `get` and `set`: the option's `options.txt` tag (required). `list`: an id substring, like `filter` |
-| `value` | `set`: the new value, a boolean, number or string (required) |
-| `filter` | `list`: case-insensitive id substring |
-
-The result has `source` (`engine` or `options.txt`), and for `list` the `settings` array, each with `id`, `type` (`bool`, `int`, `float`, `string` or `enum`), `value`, and `min`/`max` or `values` where the game gives them. `get` returns `setting`. `set` returns `setting`, the `previous` value, `appliesAt` (`now` or `next launch`) and `saved`: `true` when the value reached `options.txt`, which it always does on the file route, `false` when the change is live only and is lost on restart unless the game saves later, and absent when the agent does not report it. With an attached agent a value outside the option's range or allowed values is an `invalid_params` failure.
-
-### world_settings
-
-Reads or changes a test world: game rules, difficulty, game type, time and weather. Through the running game when the agent is attached, the answer being what the loaded level itself says and a change applied the way the game applies its own command; otherwise sculkwire reads and rewrites `level.dat`, and only for a `sculkwire-*` world no game has loaded. Only `sculkwire-*` worlds are ever changed. World changes need no restore: a test world is disposable and the next launch replaces it.
-
-| Input | Description |
-|---|---|
-| `action` | `get` or `set` (required) |
-| `world` | `get` and `set` without an agent: world name, `sculkwire-` added when missing (default: the loaded world, else the newest `sculkwire-*` world) |
-| `gamerules` | `set`: game rule values, e.g. `{ "keepinventory": true }` |
-| `difficulty` | `set`: `peaceful`, `easy`, `normal` or `hard` |
-| `gameType` | `set`: `survival`, `creative`, `adventure` or `spectator` |
-| `time` | `set`: game ticks, 0 to 24000 in a day |
-| `weather` | `set`: `{ "rain": true, "lightning": false }`. In `level.dat` it is written as rain and lightning levels with a five-day timer |
-
-The result has `source` (`engine` or `level.dat`), the `world` (`name`, and for a file read `levelId` and `dir`), and `settings`: `name`, `seed` (as text, because it is a 64-bit integer), `gameType`, `difficulty`, `cheats`, `education`, `experiments`, `gamerules`, `time`, `dayCycle`, `weather`, `spawn` and `dimension`. A field the engine cannot read is `null`, never a guess. In `level.dat` mode only the game rules the file stores by name are reported and settable.
-
-### game_ui
-
-Drives the game's own UI from inside the process: the screen, its controls, and keys, text, clicks and scrolling. This is how a menu is driven without the keyboard and mouse route, which only reaches the game while its window is in the foreground. It works in the background, on Linux and Windows alike, and needs no loaded world, so the title screen, the Play screen and Settings are reachable while the game sits in a menu. Every input is refused on a store, Marketplace, Minecoins, Dressing Room or persona editor screen except `Escape`, which leaves it. On an OreUI page (every one is named `ui://./hbui/index.html`) the agent reads the page's route from the game's own router, and refuses clicks, `Return` and `space` while the route cannot be read or is not one of the Play screen's (`/play`, `/create-new-world`, `/edit-world`) or the option pages of Settings (`/settings`, `/oreui-settings/` `game`, `video`, `audio`, `general`, `accessibility`, `keyboard-and-mouse`, `controller`, `touch`, `creator`); Multiplayer, Party, Account and Global Resources are refused. Without `engine_attach` it connects to an agent that is already listening on the agent port.
-
-| Input | Description |
-|---|---|
-| `action` | `screen`, `controls`, `press`, `key`, `text`, `click` or `scroll` (required) |
-| `name` | `press`: the control's name, as `controls` lists it |
-| `filter` | `controls`: only names or labels containing this |
-| `key` | `key`: one key or chord, with the key names `game_input` takes, e.g. `Escape`, `Return`, `space`, `F3`, `ctrl+a` |
-| `keyAction` | `key`: `press` (default), `down` or `up` |
-| `text` | `text`: what to type into the focused text box |
-| `x`, `y` | `click` and `scroll`: client pixels, the same frame a screenshot shows |
-| `button` | `click`: `left` (default) or `right` |
-| `delta` | `scroll`: whole notches, positive up |
-
-The result has `screen` (`name`, `stack` bottom to top, `modal`, and on an OreUI page its `route`, `null` when unread) for `screen`, `controls` for `controls`, each with `name`, `type` (`button`, `toggle`, `slider`, `text`, `label`, `list` or `other`), `rect` (`[x, y, width, height]`), `text` and `enabled`; and `pressed`, `key` (with `keyAction`), `typed` (characters), `click` (`x`, `y`, `button`) or `scroll` (`x`, `y`, `delta`) for the inputs. When the UI tree cannot be read, `controls` and `press` answer `anchor_missing` and `click` remains. A click while the game has not read the mouse for over 500 ms answers `anchor_missing` `ui.click_input`.
-
 ### player_inventory
 
 The local player's attributes and whole inventory, read from the game on the thread that owns the data. Attributes are `{name: {current, min, max, default, base}}` for every attribute the player has (health, absorption, movement, attack damage, knockback resistance, luck, hunger, saturation, exhaustion, level, experience, ...; `base` is the value before modifiers) plus `armor` (total armour points) and `armorToughness` as `{current}`, computed by the game's own functions. The inventory is `selectedSlot`, `hotbar` (9), `inventory` (27), `armor` (`head`, `chest`, `legs`, `feet`), `offhand` and `cursor`; a slot is `null` or `{item, count, data?, name?, durability?: {damage, max}, enchantments: [{id, level}], lore?, contents?}`, where `contents` holds what is inside a bundle or a shulker box.
 
 Takes no input. The result has `source`, `attributes` and `inventory`. Through the agent `source` is `engine`, the game's own data. Without an agent it is `script`, read through the helper pack's Script API components (inventory and equippable), which has no item aux value, no bundle contents and no cursor stack, and only the attributes the running game exposes as components. Crafting and setting up inventories stay on commands through `engine_command` (`/give`, `/clear`, `/replaceitem`, `/setblock`).
+
+## Containers and Crafting
+
+These tools use blocks, entities and the screens they open from inside the game: containers, crafting and every station. They go through the [engine](#engine); only `container` `get` has a fallback without it.
 
 ### container
 
@@ -727,6 +685,60 @@ A state the agent decodes but cannot read at that moment is `{ unavailable, anch
 `move` moves items between those containers through the game's own item stack requests, the way dragging with the mouse does, and answers `moved` with the `from` and `to` it was given. `act` runs the screen's own action through the game's own request and answers `done`, `result`, `consumed` (`[{ item, count }]`), `xpCost` where one applies and `reason` (why a screen refused it). `close` closes the screen like `Escape` and answers `closed`; with nothing open it is `invalid_params`, because `Escape` while playing would open the pause menu.
 
 All four actions need the agent, and so does `interact`: there is no Script API or `level.dat` equivalent for using a block or reading a screen. Without `engine_attach` they fail and say so; an agent too old to have these methods says to rebuild it. Setup stays on commands (`/setblock`, `/summon`, `/give`, `/enchant`, `/xp`) through `engine_command`.
+
+## Engine
+
+These tools talk to the in-game agent, a small DLL loaded into the running game, which answers on `127.0.0.1:19160` and runs the requests that touch the game on its main thread. Any PC (GDK) install sculkwire detects works: a Wine or Proton install on Linux (Flarial, mcbe-gdk-installer, Bottles, Lutris, Steam), a native install on Windows, and the game must already be running. See [In-Game Agent](engine.md) for the requirements per OS, the attach flow, the input lock and the wire protocol.
+
+Other tools go through the same agent once `engine_attach` has loaded it, and are listed with what they act on: `game_input_lock`, `game_ui`, `game_settings` and `world_settings` under [Game Client](#game-client), `player_inventory` under [Player](#player), and `container`, `craft`, `interact` and `screen` under [Containers and Crafting](#containers-and-crafting).
+
+Every call that goes through the agent returns `ok`. A failed call carries a stable `reason`, the JSON-RPC `code` and a `message`: `anchor_missing` (`-32001`, the anchor's name in `anchor`), `not_in_world` (`-32002`), `wrong_thread` (`-32003`), `timeout` (`-32004`), `command_failed` (`-32006`), `path_not_writable` (`-32007`), `scripting_unavailable` (`-32014`), `invalid_params` (`-32602`), `unknown_method` (`-32601`, an agent older than the method), `not_attached` and `disconnected` (no agent answers on the port), `protocol` (the agent answered a shape sculkwire does not know) or `rpc_error` (any other agent error). A host-side problem fails with `prerequisite` and no code: no install, the game not running, no `cargo` and no release build, or a file that cannot be read or written.
+
+### engine_attach
+
+Builds the agent DLL, injects it into the running `Minecraft.Windows.exe`, connects and returns the engine status (the fields of `engine_status`). The DLL comes from an extension's [agent source](extensions.md#agent-source) when one matches the game folder, else from `SCULKWIRE_AGENT_DLL`, a cargo build of `native/`, or the matching GitHub release (downloaded and checked against its sha256). The build is cached by a hash of its sources, and repeat calls reuse the loaded agent: they only read its status again. The call waits until the agent has resolved its anchors after the injection. Start the game first; an error says which install or game folder was not found, that the game has to run, or where `sculkwire-agent.log` is when the DLL loaded but nothing answered.
+
+No inputs.
+
+### engine_status
+
+Returns the `build` identity as the DLL reports it (the executable's file name and version), whether the main-thread hook runs requests (`hooked`), the current `tick`, every `resolved` anchor with its address, and every `missing` one. Without a prior attach it connects to an agent that is already listening on the agent port.
+
+No inputs.
+
+### engine_command
+
+Runs a command on the game's main thread as the local player, through the engine's command dispatcher, exactly as if it were typed: chat commands, client-side commands and `/reload` all work. The result carries the `command`, `success`, taken from the command's own output (`false` when it reported an error, `null` when it prints nothing, as `say` does), and the game's output text in `message`.
+
+The agent replays the origin of a real player command, so the first command after an attach or a world change types `/testfor @s` in chat itself, with its output kept out of chat. It does so only while the HUD alone is showing; with another screen open the call fails with `anchor_missing` `command.origin` and says to run one line in chat yourself and retry. An empty command or one with a newline is `invalid_params`.
+
+| Input | Description |
+|---|---|
+| `command` | Command line, with or without the leading slash (required). Newlines are rejected, because the game would split them into several commands |
+
+### engine_player
+
+Returns the local player's `position` (the feet), `rotation` (pitch, yaw; each `null` when not readable) and movement since the previous tick (`delta`), read from the engine on the game's main thread, plus the simulation tick it was read on (`simTick`) and the numeric `dimension` (`null` when unknown). Needs `engine_attach` and a loaded world; right after an attach it answers `not_in_world` until the agent's first client tick.
+
+No inputs.
+
+### engine_tick
+
+Controls game time. Give exactly one input. The result has `paused`, `ticks`, `scale`, `success` and the engine's own `message` when it said anything.
+
+| Input | Description |
+|---|---|
+| `pause` | `true` freezes the simulation, `false` resumes it |
+| `step` | Pauses if needed, then runs exactly this many simulation ticks (1 to 600) inside one main-thread request and stays paused |
+| `scale` | Sets the tick rate multiplier, a positive number |
+
+### engine_screenshot
+
+Asks the game's own screenshot code for a picture of the current frame, as F2 takes it (an open screen is not in it). The game saves the file in its own gallery; sculkwire waits for it to finish writing, copies it to `path`, and returns `path`, `bytes`, `format` (`png` or `jpeg`) and the image. The retail client saves JPEGs, so a `.png` path becomes `.jpg`. The game's gallery copy stays. A picture that does not appear in time is a `timeout`.
+
+| Input | Description |
+|---|---|
+| `path` | Where to save the picture, a host path (default under sculkwire's cache) |
 
 ## Game Files
 

@@ -95,7 +95,7 @@ An input lock must fail open: a missing or bad signal must never block the user'
 
 ## Agent Source
 
-The in-game agent serves every [In-Game Agent](tools.md#in-game-agent) tool (`engine_*`, `game_input_lock`, `game_settings`, `world_settings`, `game_ui`, `player_inventory`, `container`, `craft`, `interact`, `screen`), the engine route of `player_act`, and the agent routes of `game_input` and the `game_launch` sign-in recovery. sculkwire supplies it from the prebuilt release archive or a cargo build of the checkout's `native/`. An extension may instead supply its own agent DLL for the game folders it knows:
+The in-game agent serves the [Engine](tools.md#engine) tools (`engine_*`) and every tool that goes through it (`game_input_lock`, `game_settings`, `world_settings`, `game_ui`, `player_inventory`, `container`, `craft`, `interact`, `screen`), the engine route of `player_act`, and the agent routes of `game_input` and the `game_launch` sign-in recovery. sculkwire supplies it from the prebuilt release archive or a cargo build of the checkout's `native/`. An extension may instead supply its own agent DLL for the game folders it knows:
 
 ```ts
 host.registerAgentSource({

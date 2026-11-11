@@ -22,7 +22,7 @@ With the agent attached, `player_act` and `sculk bench` use the engine route thr
 | `sculk interact block <x> <y> <z> [--dimension <id>] [--face up]`, `sculk interact entity <id>` | Use a block or an entity like a right click and say what opened (`interact`) |
 | `sculk screen state`, `sculk screen move <container:slot> <container:slot> [--count N]`, `sculk screen act <action> [--recipe id] [--times N] [--name text] [--pattern id] [--option 0\|1\|2] [--offer N] [--primary effect] [--secondary effect]`, `sculk screen close` | The open screen: its containers, moving items, its own action, closing it (`screen`) |
 
-Every command prints JSON on stdout and its hints on stderr. Exit codes are the shared ones: 0 success, 1 the agent reported a failure, 2 usage or a missing prerequisite. The MCP tools are listed in the [tool reference](tools.md#in-game-agent).
+Every command prints JSON on stdout and its hints on stderr. Exit codes are the shared ones: 0 success, 1 the agent reported a failure, 2 usage or a missing prerequisite. The MCP tools are listed in the [tool reference](tools.md#engine).
 
 ```sh
 sculk engine attach
@@ -106,7 +106,7 @@ The agent serves up to eight connections, so `sculk game lock` and the `engine_*
 
 ## Tools
 
-Full inputs and results are in the [tool reference](tools.md#in-game-agent). This is what each one does inside the game.
+Full inputs and results are in the [tool reference](tools.md#engine), which names the section of each tool. This is what each one does inside the game.
 
 | Tool | Inside the game |
 |---|---|
