@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { clientDiagnostics, normalizeClientMessage } from "./contentlog.ts";
 import { appxToGameVersion, splitCommand } from "./install.ts";
-import { activationArgs, defaultMode, gamescopeBackend, gamescopeBlocker, launchArgv, parseGamescopeLog, winePrefix, windowsMode, worldUri } from "./launcher.ts";
+import { activationArgs, defaultMode, gamescopeArgv, gamescopeBackend, gamescopeBlocker, launchArgv, parseGamescopeLog, winePrefix, windowsMode, worldUri } from "./launcher.ts";
 import { applyOptions, parseOptions, removeOptions } from "./options.ts";
 import { belongsToInstall, chordKeys, encodeCommand, parseHelperLine, parseProcessList, virtualKey } from "./windows.ts";
 
@@ -151,6 +151,19 @@ describe("launch modes", () => {
     expect(gamescopeBackend("window", { WAYLAND_DISPLAY: "wayland-1" })).toBe("wayland");
     expect(gamescopeBackend("window", { DISPLAY: ":0" })).toBe("sdl");
     expect(gamescopeBackend("headless", { WAYLAND_DISPLAY: "wayland-1" })).toBe("headless");
+  });
+
+  it("runs the game inside gamescope at the requested size, its window forced to the nested display", () => {
+    expect(gamescopeArgv("wayland", 1920, 1080, 60, ["mcbe-gdk-linux", "launch"])).toEqual([
+      "gamescope",
+      ...["--backend", "wayland"],
+      ...["-W", "1920", "-H", "1080", "-w", "1920", "-h", "1080"],
+      ...["-r", "60"],
+      "--force-windows-fullscreen",
+      "--",
+      "mcbe-gdk-linux",
+      "launch",
+    ]);
   });
 
   it("finds the Wine prefix an install's data folder lives in, so only that prefix's game is managed", () => {

@@ -229,6 +229,23 @@ export function gamescopeBackend(mode: "window" | "headless", env: NodeJS.Proces
 }
 
 /**
+ * gamescope's command line around the game. `--force-windows-fullscreen` sizes the game's window to the nested display,
+ * so the picture is rendered at width x height rather than the game's last windowed size scaled up.
+ */
+export function gamescopeArgv(backend: string, width: number, height: number, fps: number, game: string[]): string[] {
+  return [
+    "gamescope",
+    "--backend",
+    backend,
+    ...["-W", String(width), "-H", String(height), "-w", String(width), "-h", String(height)],
+    ...["-r", String(fps)],
+    "--force-windows-fullscreen",
+    "--",
+    ...game,
+  ];
+}
+
+/**
  * The desktop session's environment. MCP clients may start sculkwire with a trimmed environment; gamescope, pactl and
  * xdotool need XDG_RUNTIME_DIR to find the user's Wayland, PipeWire and gamescope sockets.
  */
@@ -307,17 +324,7 @@ export async function launch(install: ClientInstall, opts: LaunchOptions): Promi
     }
   }
   const game = launchArgv(install.launch, install.passesArgs ? args : [], uri);
-  const argv = !gamescope
-    ? game
-    : [
-        "gamescope",
-        "--backend",
-        gamescopeBackend(mode === "headless" ? "headless" : "window"),
-        ...["-W", String(width), "-H", String(height), "-w", String(width), "-h", String(height)],
-        ...["-r", String(opts.fps ?? 60)],
-        "--",
-        ...game,
-      ];
+  const argv = !gamescope ? game : gamescopeArgv(gamescopeBackend(mode === "headless" ? "headless" : "window"), width, height, opts.fps ?? 60, game);
   state.argv = argv;
   const env = sessionEnv();
   if ((opts.mute ?? mode === "headless") && process.platform === "linux") {
