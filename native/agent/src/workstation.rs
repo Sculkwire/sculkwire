@@ -146,6 +146,11 @@ fn on_hud(name: &str) -> bool {
 /// The screen the game shows, as the game names it.
 struct Screen {
     top: String,
+    /// Every screen on the stack is the HUD or an always-active overlay. A closed screen stays on the
+    /// stack under the HUD while it leaves (about 350 ms, `modal` set), and until it is gone the
+    /// client's use handler ignores a click (live: a hopper used 150-300 ms after `screen.close` of a
+    /// crafter opened nothing; 500 ms after it opened).
+    settled: bool,
 }
 
 /// The current screen from the live scene stack, through `ui.screen` (the one reader of the stack).
@@ -157,7 +162,11 @@ fn screen_now(core: &'static Core) -> Result<Screen, RpcError> {
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .ok_or_else(|| RpcError::anchor("ui.scene_name"))?;
-    Ok(Screen { top: String::from(top) })
+    let settled = value
+        .get("stack")
+        .and_then(Value::as_array)
+        .is_some_and(|stack| stack.iter().all(|name| name.as_str().is_some_and(on_hud)));
+    Ok(Screen { top: String::from(top), settled })
 }
 
 /// The current screen's name, or `None` when the stack cannot be read right now (a settling
@@ -572,6 +581,8 @@ const SETTLE_MS: u64 = 1_200;
 const READY_MS: u64 = 2_000;
 /// How long the aim is left for the game to pick with (two client ticks and a frame) before the use.
 const AIM_MS: u64 = 120;
+/// How long an interaction waits for a closed screen to leave the stack before it aims (see [`Screen::settled`]).
+const CLEAR_MS: u64 = 1_500;
 /// How long a request waits for the server's answer.
 const RESPONSE_MS: u64 = 2_000;
 /// How often the settle timer looks (one client tick at 20 tps).
@@ -587,7 +598,8 @@ const CLOSE_ESCAPES: u8 = 3;
 /// What a parked request is waiting for.
 #[derive(Clone, Copy)]
 enum Phase {
-    /// The aim is written; the use waits for the game to pick with the new view.
+    /// The aim is written; the use waits for a closed screen to leave the stack, then for the game to
+    /// pick with the new view.
     Aim,
     /// The use went out; waiting for a screen to open.
     Open,
@@ -610,6 +622,8 @@ struct Settle {
     before: String,
     /// `GetTickCount64` when the current phase began.
     started: u64,
+    /// `GetTickCount64` when the request was parked.
+    requested: u64,
     phase: Phase,
     /// The slot a `take_result` takes, for its answer.
     item: Option<Value>,
@@ -667,7 +681,8 @@ fn park_settle(
     let Some(deferred) = core.defer() else {
         return Err(RpcError::wrong_thread());
     };
-    let previous = SETTLE.lock().replace(Settle { deferred, before, started: win::tick_ms(), phase, item, craft, aim, opened: None });
+    let now = win::tick_ms();
+    let previous = SETTLE.lock().replace(Settle { deferred, before, started: now, requested: now, phase, item, craft, aim, opened: None });
     if let Some(previous) = previous {
         previous.deferred.fail(RpcError::timeout());
     }
@@ -890,6 +905,20 @@ unsafe extern "system" fn settle_tick(_window: win::Hwnd, _message: u32, _id: us
     let elapsed = now.saturating_sub(state.started);
     match state.phase {
         Phase::Aim => {
+            // A screen closed just before the request is still leaving the stack: the use would be
+            // ignored, so the aim's own wait starts once the stack holds only the HUD.
+            if !screen_now(core).is_ok_and(|screen| screen.settled) {
+                if now.saturating_sub(state.requested) >= CLEAR_MS {
+                    state.deferred.fail(RpcError::timeout().with_data(json!({
+                        "message": format!("the closed screen did not leave the stack within {CLEAR_MS} ms; nothing was used"),
+                    })));
+                    stop_timer();
+                    return;
+                }
+                state.started = now;
+                *SETTLE.lock() = Some(state);
+                return;
+            }
             if elapsed < AIM_MS {
                 *SETTLE.lock() = Some(state);
                 return;
