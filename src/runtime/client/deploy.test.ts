@@ -53,7 +53,7 @@ describe("pack deploy plan", () => {
     ]);
   });
 
-  it("reuses a pack already deployed under another folder, matching the uuid case-insensitively", () => {
+  it("deploys its own folder next to a foreign folder with the uuid, matched case-insensitively, and lists it as foreign", () => {
     const plan = planPackDeploy({
       project,
       comMojang,
@@ -65,12 +65,13 @@ describe("pack deploy plan", () => {
       kind: "behavior",
       uuid: "UUID-BP",
       version: "1.0.0",
-      folder: "MyProject_BP",
-      path: deployedPath("behavior", "MyProject_BP"),
+      folder: "sculkwire_project_BP",
+      path: deployedPath("behavior", "sculkwire_project_BP"),
+      copyFrom: bp,
       built: false,
-      owned: false,
+      owned: true,
       remove: [],
-      foreign: [],
+      foreign: [deployedPath("behavior", "MyProject_BP")],
     });
   });
 
@@ -103,17 +104,7 @@ describe("pack deploy plan", () => {
     });
     const [behavior, resource] = plan;
     expect(behavior).toMatchObject({ folder: "sculkwire_project_BP", path: deployedPath("behavior", "sculkwire_project_BP"), copyFrom: bp, owned: true });
-    expect(resource).toEqual({
-      kind: "resource",
-      uuid: "UUID-RP",
-      version: "1.0.0",
-      folder: "MyProject_RP",
-      path: deployedPath("resource", "MyProject_RP"),
-      built: false,
-      owned: false,
-      remove: [],
-      foreign: [],
-    });
+    expect(resource).toMatchObject({ folder: "sculkwire_project_RP", copyFrom: rp, owned: true, remove: [], foreign: [deployedPath("resource", "MyProject_RP")] });
   });
 
   it("refreshes every project-derived folder on reload, even with deploy off, and never writes a foreign one", () => {
@@ -133,17 +124,20 @@ describe("pack deploy plan", () => {
     expect(behavior).toMatchObject({ folder: "sculkwire_project_BP", copyFrom: bp, owned: true, remove: [], foreign: [] });
     expect(resource).toMatchObject({ folder: "Echo Wand_rp", copyFrom: rp, owned: false, remove: [], foreign: [deployedPath("resource", "MyProject_RP")] });
 
-    // Without a project-derived folder, a refresh reuses the foreign folder as it is, like a launch does.
-    const [foreignOnly] = planPackDeploy({
-      project,
-      comMojang,
-      deploy: true,
-      refresh: true,
-      deployed: [dev("behavior", "MyProject_BP", "uuid-bp")],
-      packs: [{ kind: "behavior", dir: bp, uuid: "UUID-BP", version: "1.0.0" }],
-    });
-    expect(foreignOnly).toMatchObject({ folder: "MyProject_BP", owned: false });
-    expect(foreignOnly?.copyFrom).toBeUndefined();
+    // Without a project-derived folder, a refresh with deploy on copies into the project's sculkwire folder; with
+    // deploy off it uses the foreign folder as it is.
+    const foreignOnly = (deploy: boolean) =>
+      planPackDeploy({
+        project,
+        comMojang,
+        deploy,
+        refresh: true,
+        deployed: [dev("behavior", "MyProject_BP", "uuid-bp")],
+        packs: [{ kind: "behavior", dir: bp, uuid: "UUID-BP", version: "1.0.0" }],
+      })[0];
+    expect(foreignOnly(true)).toMatchObject({ folder: "sculkwire_project_BP", copyFrom: bp, owned: true, foreign: [deployedPath("behavior", "MyProject_BP")] });
+    expect(foreignOnly(false)).toMatchObject({ folder: "MyProject_BP", owned: false, foreign: [] });
+    expect(foreignOnly(false)?.copyFrom).toBeUndefined();
   });
 
   it("deploys the Regolith build output under the source pack's folder and lists a foreign folder with the uuid", () => {
@@ -279,7 +273,7 @@ describe("one uuid, one folder after a deploy", () => {
       expect(first.diagnostics).toHaveLength(1);
       expect(first.diagnostics[0]).toMatchObject({ severity: "warning", code: "client.duplicate-pack-uuid", file: join(bps, "Copied By Hand", "manifest.json") });
       expect(first.diagnostics[0]?.message).toContain("development_behavior_packs/Copied By Hand");
-      expect(first.diagnostics[0]?.message).toContain("may load it instead");
+      expect(first.diagnostics[0]?.message).toContain("may load that folder instead");
 
       // A reload follows the same rule: still one project folder for the uuid.
       await cp(join(bps, "Echo Wand_bp"), join(bps, sculkFolder), { recursive: true });
@@ -350,6 +344,64 @@ describe("one uuid, one folder after a deploy", () => {
       expect(await readFile(join(target, "marker.txt"), "utf8")).toBe("edited again");
       expect((await readdir(bps)).sort()).toEqual([deployFolderName(root, src), "Unrelated"].sort());
       expect(await readFile(join(bps, "Unrelated", "marker.txt"), "utf8")).toBe("unrelated");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("deploys its own folder next to another project's sculkwire copy of the same uuids and warns about that copy", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "sculk-deploy-"));
+    try {
+      // A copy of good_addon in another folder: same pack uuids, so the earlier session's folders share them.
+      const root = join(tmp, "sw-reload-proj");
+      const bpSrc = join(root, "BP");
+      const rpSrc = join(root, "RP");
+      const bpUuid = "11111111-0000-4000-8000-000000000001";
+      const rpUuid = "22222222-0000-4000-8000-000000000002";
+      await pack(bpSrc, bpUuid, "project v1");
+      await pack(rpSrc, rpUuid, "project v1");
+      const mojang = join(tmp, "com.mojang");
+      const bps = join(mojang, "development_behavior_packs");
+      const rps = join(mojang, "development_resource_packs");
+      await pack(join(bps, "sculkwire_good_addon_BP"), bpUuid, "other project");
+      await pack(join(rps, "sculkwire_good_addon_RP"), rpUuid, "other project");
+      const ownBP = join(bps, deployFolderName(root, bpSrc));
+      const ownRP = join(rps, deployFolderName(root, rpSrc));
+
+      const deploy = async (refresh: boolean) =>
+        applyPackDeploy(
+          planPackDeploy({
+            project: root,
+            comMojang: mojang,
+            deploy: true,
+            refresh,
+            deployed: await listDevPacks(mojang),
+            packs: [
+              { kind: "behavior", dir: bpSrc, uuid: bpUuid, version: "1.0.0" },
+              { kind: "resource", dir: rpSrc, uuid: rpUuid, version: "1.0.0" },
+            ],
+          }),
+        );
+
+      const launch = await deploy(false);
+      expect(launch.copied).toEqual([ownBP, ownRP]);
+      expect(launch.owned).toEqual([ownBP, ownRP]);
+      expect(await readFile(join(ownBP, "marker.txt"), "utf8")).toBe("project v1");
+      expect(launch.diagnostics.map((d) => [d.code, d.file])).toEqual([
+        ["client.duplicate-pack-uuid", join(bps, "sculkwire_good_addon_BP", "manifest.json")],
+        ["client.duplicate-pack-uuid", join(rps, "sculkwire_good_addon_RP", "manifest.json")],
+      ]);
+      expect(launch.diagnostics[0]?.message).toContain("development_behavior_packs/sculkwire_good_addon_BP");
+      expect(launch.diagnostics[0]?.message).toContain("another project");
+      expect(launch.diagnostics[0]?.message).toContain("may load that folder instead");
+
+      // game_reload: the edit reaches the project's folder, the other project's copy stays as it was.
+      await writeFile(join(bpSrc, "marker.txt"), "project v2");
+      const reload = await deploy(true);
+      expect(reload.copied).toEqual([ownBP, ownRP]);
+      expect(await readFile(join(ownBP, "marker.txt"), "utf8")).toBe("project v2");
+      expect(await readFile(join(bps, "sculkwire_good_addon_BP", "marker.txt"), "utf8")).toBe("other project");
+      expect(reload.diagnostics).toHaveLength(2);
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }

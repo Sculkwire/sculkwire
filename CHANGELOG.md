@@ -5,6 +5,7 @@ Release notes for sculkwire. Each `## vX.Y.Z` section becomes the GitHub release
 ## Unreleased
 
 - `game_command` through the script debugger answers `ok: false` when the output is one of the game's failure messages (`No targets matched selector`, `Function <name> not found.`), read from the installed game's language file. Before, only syntax errors and unknown commands failed.
+- `game_launch` and `game_reload` always copy the project into its own pack folder. Before, when only another folder served a pack's uuid (such as another project folder's `sculkwire_*` copy with the same uuids), that folder was used silently and project edits never reached the game; now it is left alone and reported as a `client.duplicate-pack-uuid` warning that says the game may load it instead.
 
 ## v0.1.1
 

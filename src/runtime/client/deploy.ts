@@ -112,13 +112,14 @@ export function deployFolderName(projectRoot: string, sourceDir: string): string
  * export folder is not `owned`, so stopping the game leaves it in place. Without an export the build goes to the
  * project's `sculkwire_*` folder. Every other project-derived folder with the uuid is listed in `remove`.
  *
- * A pack without a build goes to an existing folder with its uuid: the rgl export first, then the project's
- * `sculkwire_*` folder, then any other; the other project-derived copies are removed. The project's `sculkwire_*`
- * folder is always copied again from the project when `deploy` is on, even when an earlier launch or another
- * sculkwire process left it behind, so a stale copy never stands in for the project. `refresh` (a redeploy before
- * `/reload`) also copies the project into its rgl export and into its `sculkwire_*` folder with `deploy: false`:
- * every project-derived folder gets the current packs. A foreign folder is never written. With `deploy: false` a
- * pack without a build is only deployed when an existing folder already serves its uuid.
+ * A pack without a build goes to the project's rgl export when there is one. Otherwise, with `deploy` on, it always
+ * goes to the project's `sculkwire_*` folder, copied again from the project on every launch and refresh, even when an
+ * earlier launch or another sculkwire process left it behind, so a stale copy never stands in for the project. A
+ * foreign folder with the uuid, another project's `sculkwire_*` copy included, is never reused as the project's
+ * deployment while `deploy` is on: it stays in `foreign`. `refresh` (a redeploy before `/reload`) also copies the
+ * project into its rgl export and into its `sculkwire_*` folder with `deploy: false`: every project-derived folder
+ * gets the current packs. A foreign folder is never written. With `deploy: false` a pack without a build is only
+ * deployed when an existing folder already serves its uuid, and then that folder is used as it is.
  */
 export function planPackDeploy(opts: {
   /** Project root; names the folders sculkwire deploys to. */
@@ -171,10 +172,12 @@ export function planPackDeploy(opts: {
         ? plan(sculkCopy, { copyFrom: pack.dir, built: false, owned: true }, foreign)
         : plan(sculkCopy, { built: false, owned: false }, foreign);
     }
+    // With `deploy` on, the project's own copy always goes to its `sculkwire_*` folder, so every reload copies the
+    // current files; a foreign folder with the uuid (including another project's `sculkwire_*` copy) is only reported.
+    if (opts.deploy) return plan(sculkFolder, { copyFrom: pack.dir, built: false, owned: true }, foreign);
     const [existing, ...others] = foreign;
     if (existing) return plan(existing, { built: false, owned: false }, others);
-    if (!opts.deploy) return { ...base, built: false, owned: false, remove: [], foreign: [] };
-    return plan(sculkFolder, { copyFrom: pack.dir, built: false, owned: true }, []);
+    return { ...base, built: false, owned: false, remove: [], foreign: [] };
   });
 }
 
@@ -204,9 +207,11 @@ export async function applyPackDeploy(plan: readonly PackDeploy[]): Promise<{ co
         severity: "warning",
         code: "client.duplicate-pack-uuid",
         message:
-          `development_${entry.kind}_packs/${basename(dir)} has the same header uuid ${entry.uuid} as the deployed ` +
-          `${entry.kind} pack ${entry.folder ?? ""}, and the game may load it instead. sculkwire leaves it alone because it ` +
-          "is not a copy of this project: remove it or give it another uuid.",
+          `development_${entry.kind}_packs/${basename(dir)} has the same header uuid ${entry.uuid} as this project's ` +
+          `${entry.kind} pack, deployed to development_${entry.kind}_packs/${entry.folder ?? ""}, and the game may load ` +
+          "that folder instead, so project edits may not show up. sculkwire leaves it alone because it is not this " +
+          `project's copy${basename(dir).startsWith("sculkwire_") ? " (it is the sculkwire copy of another project folder, left by a session of that project)" : ""}: ` +
+          "delete that folder or give one of the two packs another header uuid, then relaunch with game_launch so the game loads this project's folder.",
         source: "client",
         file: join(dir, "manifest.json"),
       });
