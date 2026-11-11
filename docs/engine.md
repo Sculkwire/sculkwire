@@ -286,6 +286,7 @@ Without a game, the unit tests check the build driver (route order, source hash,
 
 ## Known Limitations
 
+- **Bundles cannot be filled or emptied through `screen.move`**: a carried bundle's contents (`dynamic_container_<id>`) have no model in the screen's controller until the game's own bundle code creates one, and the transfer faulted on it, so `screen.move` refuses such a slot (`invalid_params`); moving onto a bundle slot answers the swap refusal.
 - **A use within about 150 ms of `screen.close`** opens nothing (`interact` answers `screen: null`): measured on 1.26.63.1 on a chest, 0 of 4 at 0 and 100 ms after the close answered, 4 of 4 at 200 ms and later. Wait 200 ms between closing a screen and the next `interact`.
 - **`Escape` on the chat screen** first leaves its text box, which has focus when the screen opens (the header's `Back` turns into `Exit`); the second `Escape` closes the screen, and one does once a click elsewhere took the focus. Measured on 1.26.63.1 with a press, a 0, 120, 200 and 300 ms hold and a hardware-keyboard message source: the same every time, so it is the page's behaviour for a key message, not a timing. `Return` submits on the first press.
 - **Drain recovery after a fault inside a handler** releases the drain and fails the request (live on 1.26.63.1), but it cannot undo what a game function the handler called had already done before it faulted: a fault inside the game is a bug to fix at its call, never a state the agent can continue from.

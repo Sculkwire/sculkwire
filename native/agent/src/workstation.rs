@@ -913,7 +913,7 @@ unsafe extern "system" fn settle_tick(_window: win::Hwnd, _message: u32, _id: us
             let ready = still_open && screen_ready(&name);
             if !still_open || (ready && seen) || elapsed >= READY_MS {
                 #[cfg(feature = "debug-rpc")]
-                agent_core::log::fmt(format_args!("interact: {name} open {still_open} ready {ready} after {elapsed} ms"));
+                agent_core::log::fmt(format_args!("interact: {name} open {still_open} ready {ready} after {elapsed} ms, controller {:x?}", ui::screen_controller()));
                 state.deferred.resolve(json!({ "screen": name, "changed": true }));
                 stop_timer();
             } else {
@@ -3219,8 +3219,11 @@ fn move_through(kind: u8, from: (&Open, usize), to: (&Open, usize), count: u8) -
         return Err(RpcError::anchor("screen.move"));
     }
     let controller = screen_manager(MOVE_SLOT.load(Ordering::Acquire), "screen.move")?;
+    // The collection name the controller resolves: a dynamic container's (a bundle's contents) carries its
+    // id, `<name>_<id>`, the way the game's own bundle code names it; the bare name resolves to nothing.
     let collection = |open: &Open| -> Result<Vec<u8>, RpcError> {
-        let mut name = name_of(open.name).ok_or_else(|| RpcError::anchor("screen.container_names"))?.into_bytes();
+        name_of(open.name).ok_or_else(|| RpcError::anchor("screen.container_names"))?;
+        let mut name = open.key().into_bytes();
         name.push(0);
         Ok(name)
     };
@@ -3228,6 +3231,17 @@ fn move_through(kind: u8, from: (&Open, usize), to: (&Open, usize), count: u8) -
     let source = SlotData { name: ConstString::new(&from_name), index: from.1 as i32, pad: 0 };
     let target = SlotData { name: ConstString::new(&to_name), index: to.1 as i32, pad: 0 };
     let amount = Amount { kind: 0, value: count as i32, all: 0, pad: [0; 3] };
+    // The transfer dereferences the model it resolves for each slot without a check: a collection the
+    // controller has no model of (a carried bundle's contents, before the game's own bundle code made one)
+    // faulted inside it (live, 1.26.63.1), so such a slot is refused here.
+    for (slot, open) in [(&source, from.0), (&target, to.0)] {
+        if !slot_known(controller, slot as *const SlotData as usize) {
+            return Err(RpcError::invalid_params(format!(
+                "the screen's controller has no model of {}: moving into or out of a bundle is not supported yet",
+                open.key()
+            )));
+        }
+    }
     let (id, actions) = in_request(|| {
         // SAFETY: the controller's own transfer on the open screen's validated controller, with two slots
         // and an amount laid out as its callers build them (the names outlive the call).
