@@ -93,7 +93,9 @@ export function dangerOf(info: MobInfo, distance: number, approach: number, fuse
 
 export function vitalsOf(me: PlayerState, loadout?: Loadout): Vitals {
   const weapon = loadout ? bestWeaponSlot(loadout.hotbar) : undefined;
-  const food = loadout ? bestFoodSlot(loadout.hotbar, loadout.hunger ?? 0) : undefined;
+  // A full player still carries food: name what would be eaten once hungry (hunger 0 ranks by nutrition alone).
+  // The eat tactic gates on hunger itself, so this does not make it eat at 20.
+  const food = loadout ? (bestFoodSlot(loadout.hotbar, loadout.hunger ?? 0) ?? bestFoodSlot(loadout.hotbar)) : undefined;
   return {
     health: me.health ?? 20,
     ...(loadout?.hunger !== undefined ? { hunger: loadout.hunger } : {}),

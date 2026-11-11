@@ -100,6 +100,13 @@ describe("threat map", () => {
     const m = mapOf([], { health: 12 }, kit(15));
     expect(m.vitals).toMatchObject({ health: 12, hunger: 15, armor: 15, heldDamage: 6, weapon: { slot: 1 }, food: { slot: 2, typeId: "minecraft:cooked_beef" } });
   });
+
+  it("names the carried food at full hunger without offering to eat it", () => {
+    // Live retail: steak in slot 2 at food 20/20 made the advisor's state say `Food: none`.
+    const full = mapOf([], { health: 5 }, kit(20));
+    expect(full.vitals).toMatchObject({ hunger: 20, armor: 15, weapon: { slot: 1 }, food: { slot: 2, typeId: "minecraft:cooked_beef" } });
+    expect(scoreTactics(full, parseGoal("explore")).some((t) => t.kind === "eat")).toBe(false);
+  });
 });
 
 describe("tactic scores", () => {
