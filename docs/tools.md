@@ -189,7 +189,7 @@ Runs your GameTests on a throwaway server with no game window. Returns `passed`,
 
 ### bds_session_start
 
-Starts a server that keeps running, with your packs attached and the script debugger connected. Returns the session `id` for the tools below, plus the state, server version, port, instance folder, packs and debugger state. A Regolith project whose profile runs filters is built with rgl first and the world links the build output; `reload` through `bds_session_command` builds again, so source edits apply (in `symlink` mode). A failed build stops the start, or the reload with the previous build still loaded, with the `regolith.build-failed` diagnostic.
+Starts a server that keeps running, with your packs attached and the script debugger connected. Returns the session `id` for the tools below, plus the state, server version, port, instance folder, packs (each with its name, kind and `path` relative to the project, `.` when the project folder is itself the pack) and debugger state. A Regolith project whose profile runs filters is built with rgl first and the world links the build output; `reload` through `bds_session_command` builds again, so source edits apply (in `symlink` mode). A failed build stops the start, or the reload with the previous build still loaded, with the `regolith.build-failed` diagnostic.
 
 | Input | Description |
 |---|---|

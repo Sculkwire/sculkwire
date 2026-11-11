@@ -42,6 +42,7 @@ export interface SessionInfo {
   /** UDP port clients can join on (`localhost:<port>`). */
   port: number;
   debugger: { attached: boolean; port: number; protocolVersion?: number; error?: string };
+  /** `path` is the pack folder relative to `projectRoot`, `.` when the project folder is itself the pack. */
   packs: { name: string; kind: string; path: string }[];
   startedAt: string;
 }
@@ -60,7 +61,7 @@ export function info(s: BdsSession): SessionInfo {
     instanceDir: s.instance.dir,
     port: s.instance.port,
     debugger: dbg,
-    packs: s.indexed.map((p) => ({ name: p.pack.name ?? p.pack.uuid ?? p.folder ?? "", kind: p.pack.kind, path: p.pack.relDir })),
+    packs: s.indexed.map((p) => ({ name: p.pack.name ?? p.pack.uuid ?? p.folder ?? "", kind: p.pack.kind, path: p.pack.relDir || "." })),
     startedAt: new Date(s.startedAt).toISOString(),
   };
 }
