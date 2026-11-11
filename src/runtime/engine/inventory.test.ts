@@ -24,6 +24,7 @@ import {
   normalizeGrid,
   craftRun,
 } from "./inventory.ts";
+import { itemSlotSchema } from "./workstation.ts";
 
 const slot = (item: string, count = 1) => ({ item, count });
 
@@ -91,6 +92,11 @@ describe("parseSlot", () => {
     expect(bundle?.name).toBe("Kit");
     expect(bundle?.lore).toEqual(["line one"]);
     expect(bundle?.contents).toEqual([{ item: "minecraft:bread", count: 3, enchantments: [] }, null]);
+  });
+
+  it("publishes a shulker box with empty inner slots through the output schema", () => {
+    const box = parseSlot({ item: "minecraft:shulker_box", contents: [slot("minecraft:emerald"), null, null, slot("minecraft:golden_apple", 2)] });
+    expect(itemSlotSchema.safeParse(box).success).toBe(true);
   });
 });
 

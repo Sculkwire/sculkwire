@@ -282,7 +282,8 @@ export interface SlotSchema {
   durability?: { damage: number; max: number };
   enchantments: { id: string; level: number }[];
   lore?: string[];
-  contents?: SlotSchema[];
+  /** Positional: an empty slot inside the container item is null. */
+  contents?: (SlotSchema | null)[];
 }
 
 export const itemSlotSchema: z.ZodType<SlotSchema> = z.lazy(() =>
@@ -294,7 +295,7 @@ export const itemSlotSchema: z.ZodType<SlotSchema> = z.lazy(() =>
     durability: z.object({ damage: z.number(), max: z.number() }).optional(),
     enchantments: z.array(z.object({ id: z.string(), level: z.number() })),
     lore: z.array(z.string()).optional(),
-    contents: z.array(itemSlotSchema).optional(),
+    contents: z.array(itemSlotSchema.nullable()).optional(),
   }),
 );
 
