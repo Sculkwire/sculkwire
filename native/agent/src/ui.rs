@@ -248,11 +248,10 @@ const VTABLE_SCAN_BUDGET: usize = 512 << 20;
 
 /// The concrete screen's name, as the game's own scene name slot implements it: `[scene + 0x48]` is a
 /// guard the game asserts points at a zero byte, `[scene + 0x58]` the screen controller,
-/// `controller->vtable[0x588]` the object that names the screen and `->vtable[0x28]` fills the
-/// `std::string` with this in `rcx` and the out string in `rdx`.
+/// a controller virtual slot the object that names the screen (decoded per scene by [`view_walk`]) and
+/// `->vtable[0x28]` fills the `std::string` with this in `rcx` and the out string in `rdx`.
 const SCENE_CONTROLLER_GUARD: usize = 0x48;
 const SCENE_CONTROLLER: usize = 0x58;
-const CONTROLLER_OWNER_SLOT: usize = 0x588;
 
 /// Scene vtable slots the game itself calls: the flags mask (`0x1b0`, which the stack searches test on
 /// every entry) and the name getter (`0x1b8`). Both must be image code for an object to be a scene; a
@@ -549,6 +548,12 @@ pub(crate) fn h_click(_core: &'static Core, params: &Value) -> Result<Value, Rpc
             gameinput::client_origin(origin.0, origin.1);
             // What became of the click before this one (`released` = delivered, `dropped` = never read).
             let previous = gameinput::last_click();
+            // The press is GameInput, but the cursor a page hit-tests at is the one the game's window
+            // procedure keeps from `WM_MOUSEMOVE` (it feeds the mouse device a move at that point): a
+            // client the real pointer never entered has no cursor there at all, so the press landed
+            // nowhere until the user's pointer crossed the window. The game's own procedure is given the
+            // move, which places its cursor without touching the user's desktop pointer.
+            send(window, procedure, WM_MOUSEMOVE, 0, point_lparam(x, y));
             if gameinput::click(x, y, button) {
                 return Ok(json!({
                     "x": x,
@@ -615,6 +620,9 @@ pub(crate) fn h_scroll(_core: &'static Core, params: &Value) -> Result<Value, Rp
     if gameinput::mouse_read() {
         if let Some(origin) = client_origin(window) {
             gameinput::client_origin(origin.0, origin.1);
+            // The wheel targets the control under the game's cursor, which `WM_MOUSEMOVE` places (see
+            // `h_click`).
+            send(window, procedure, WM_MOUSEMOVE, 0, point_lparam(x, y));
             if gameinput::scroll(x, y, notches as i32) {
                 return Ok(json!({
                     "x": x,
@@ -914,7 +922,9 @@ fn client_origin(window: usize) -> Option<(i32, i32)> {
 ///
 /// * `ui.oreui_dom` — the scene keeps no JSON-UI screen controller, so its DOM lives in the embedded
 ///   browser (an OreUI/cohtml screen) and there is no in-process control tree to read;
-/// * `ui.control_tree` — a JSON-UI scene whose screen view did not resolve to a readable root control;
+/// * `ui.control_tree` — the scene has a screen controller, but it does not hand out a view (its class
+///   table has no view getter — the forwarded controllers of the start and pause screens on 1.26.63.1),
+///   or the view did not resolve to a readable root control;
 /// * `ui.control_rect` — the tree *is* reachable (the count is reported), but the field map that turns a
 ///   control into `{name, type, rect, text, enabled}` is not decoded on this build.
 fn control_err() -> RpcError {
@@ -937,9 +947,23 @@ fn control_err() -> RpcError {
         }
         payload
     };
-    match screen_view() {
-        None => RpcError::anchor("ui.oreui_dom").with_data(data(
+    // Right after an input the screen may be swapping its scene, and its controller is not followed then:
+    // that is "retry", not "this screen has no tree".
+    if settling() {
+        return RpcError::anchor("ui.control_tree").with_data(data(
+            "the screen is still changing after the last input; retry in a moment",
+            json!({ "retryAfterMs": QUIET_AFTER_INPUT_MS }),
+        ));
+    }
+    if screen_controller().is_none() {
+        return RpcError::anchor("ui.oreui_dom").with_data(data(
             "this scene has no in-process JSON-UI control tree (an OreUI/cohtml screen renders its DOM in the embedded browser)",
+            json!({}),
+        ));
+    }
+    match screen_view() {
+        None => RpcError::anchor("ui.control_tree").with_data(data(
+            "this scene's screen controller hands out no JSON-UI view on this build (its class has no view getter), so there is no control tree to read",
             json!({}),
         )),
         Some(view) => match control_count(view) {
@@ -1312,21 +1336,40 @@ fn scene_shape(scene: usize) -> bool {
 
 /// The pointer a virtual method of `object` returns, with a scratch buffer for the out parameter the
 /// game's own caller leaves in `rdx` (`controller->vtable[0x588]` returns a `shared_ptr` in `rax`).
+///
+/// Only through [`virtual_method`]: an object whose class table is shorter than `slot` puts *another*
+/// class's method at that offset (the start screen's forwarded controller has 64 methods).
 fn call_pointer(object: usize, slot: usize) -> Option<usize> {
-    let vtable = pe::read::<usize>(object)?;
-    if !pe::in_image_data(vtable) {
-        return None;
-    }
-    let function = pe::read::<usize>(vtable + slot)?;
-    if !pe::in_image_code(function) {
-        return None;
-    }
+    let function = virtual_method(object, slot)?;
     let mut scratch = [0u8; 32];
     // SAFETY: the function is a validated virtual method of a scene's screen controller, and the call is
     // the one the game's own scene name body makes (`rcx` = the object, `rdx` = the out buffer).
     let call: unsafe extern "system" fn(usize, *mut u8) -> usize = unsafe { core::mem::transmute(function) };
     let pointer = unsafe { call(object, scratch.as_mut_ptr()) };
     (pointer >= 0x1_0000).then_some(pointer)
+}
+
+/// `object`'s virtual method at byte offset `slot`, only when the class table really reaches that far:
+/// the table is image data and every entry from the first through `slot` is image code. A table ends at
+/// the next class's RTTI locator (image data) or at data that is not code at all, so a table too short
+/// for `slot` answers `None` instead of handing out a method of whatever follows it.
+fn virtual_method(object: usize, slot: usize) -> Option<usize> {
+    if object < 0x1_0000 || slot % 8 != 0 {
+        return None;
+    }
+    let table = pe::read::<usize>(object)?;
+    if !pe::in_image_data(table) {
+        return None;
+    }
+    let entries = pe::bytes(table, slot + 8)?;
+    let mut function = 0usize;
+    for entry in entries.chunks_exact(8) {
+        function = usize::from_ne_bytes(entry.try_into().ok()?);
+        if !pe::in_image_code(function) {
+            return None;
+        }
+    }
+    Some(function)
 }
 
 /// A `std::string`-filling function called the way the game calls it: `rcx` = the object, `rdx` = a
@@ -1450,7 +1493,7 @@ fn top_scene() -> Option<usize> {
 /// controller's own fields and virtual methods, so it waits for the transition to settle.
 /// `workstation` reaches an open container screen's model through this controller.
 pub(crate) fn screen_controller() -> Option<usize> {
-    if win::tick_ms().saturating_sub(INPUT_STAMP.load(Ordering::Acquire)) < QUIET_AFTER_INPUT_MS {
+    if settling() {
         return None;
     }
     let scene = top_scene()?;
@@ -1492,11 +1535,63 @@ fn forwarded_controller(scene: usize) -> Option<usize> {
     Some(controller)
 }
 
-/// The current screen's view object, or `None` when this scene has no JSON-UI controller.
+/// The current screen's view object, or `None` when this scene's controller hands none out.
+///
+/// The view getter is called only where the game itself calls it, with the field and slot the game's
+/// own code uses: [`view_walk`] reads them out of the scene's name body. A slot taken from elsewhere is
+/// some other class's method on other controllers: on 1.26.63.1 the start screen's forwarded controller
+/// has a table too short to reach it (another class's three-argument method sits there and faulted on a
+/// garbage third argument), and the pause screen's table reaches it with a whole screen operation that
+/// wrote through garbage and took the game down.
 fn screen_view() -> Option<usize> {
-    let controller = screen_controller()?;
-    let holder = call_pointer(controller, CONTROLLER_OWNER_SLOT)?;
+    if settling() {
+        return None;
+    }
+    let scene = top_scene()?;
+    let walk = view_walk(scene)?;
+    let guard = pe::read::<usize>(scene + walk.guard).unwrap_or(0);
+    if guard < 0x1_0000 || pe::read::<u8>(guard) != Some(0) {
+        return None;
+    }
+    let controller = pe::read::<usize>(scene + walk.controller).filter(|controller| *controller >= 0x1_0000)?;
+    let holder = call_pointer(controller, walk.slot)?;
     pe::read::<usize>(holder)
+}
+
+/// Where a scene's own name body finds its view: the guard field it asserts, the controller field, and
+/// the controller's virtual slot it calls for the view.
+struct ViewWalk {
+    guard: usize,
+    controller: usize,
+    slot: usize,
+}
+
+/// Decodes the view walk from `scene`'s name body (scene slot [`SCENE_SLOT_NAME`]), the code the game
+/// runs every time it names this screen: `mov rax,[rcx+guard]` and the zero-byte assertion on it, then
+/// `mov rcx,[rcx+controller]; mov rax,[rcx]; mov rax,[rax+slot]` and the call. A scene whose name body
+/// does not make that call (a forwarding scene, an OreUI page) has no walk, and its controller is never
+/// called for a view.
+fn view_walk(scene: usize) -> Option<ViewWalk> {
+    /// The name bodies that make the walk do it within their first instructions.
+    const BODY_BYTES: usize = 64;
+    let table = pe::read::<usize>(scene).filter(|table| pe::in_image_data(*table))?;
+    let name = pe::read::<usize>(table + SCENE_SLOT_NAME).filter(|function| pe::in_image_code(*function))?;
+    let code = pe::bytes(name, BODY_BYTES)?;
+    // `mov rcx,[rcx+disp8]; mov rax,[rcx]; mov rax,[rax+disp32]`.
+    let (at, controller, slot) = code.windows(14).enumerate().find_map(|(at, window)| {
+        (window[..3] == [0x48, 0x8B, 0x49] && window[4..7] == [0x48, 0x8B, 0x01] && window[7..10] == [0x48, 0x8B, 0x80])
+            .then(|| (at, window[3] as usize, u32::from_le_bytes([window[10], window[11], window[12], window[13]]) as usize))
+    })?;
+    // Before it, `mov rax,[rcx+disp8]; test rax,rax`: the guard the body asserts.
+    let guard = code[..at].windows(7).find_map(|window| {
+        (window[..3] == [0x48, 0x8B, 0x41] && window[4..7] == [0x48, 0x85, 0xC0]).then_some(window[3] as usize)
+    })?;
+    Some(ViewWalk { guard, controller, slot })
+}
+
+/// True while the screens may be changing after a `ui.*` input ([`QUIET_AFTER_INPUT_MS`]).
+fn settling() -> bool {
+    win::tick_ms().saturating_sub(INPUT_STAMP.load(Ordering::Acquire)) < QUIET_AFTER_INPUT_MS
 }
 
 /// Every control in `view`'s tree, counted once, or `None` when the root or a children vector does not

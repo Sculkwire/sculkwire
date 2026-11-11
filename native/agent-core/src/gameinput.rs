@@ -493,6 +493,9 @@ struct Syn {
     cursor: bool,
     x: i32,
     y: i32,
+    /// The agent has placed the cursor at [`Syn::x`], [`Syn::y`] at least once: where the game's cursor
+    /// is as far as the agent knows, reported after the synthetic position's hold is over.
+    placed: bool,
     /// When the synthetic position stops being reported.
     until: u64,
     /// When the last synthetic wheel step stops being reported (the offsets themselves stay, because
@@ -542,6 +545,7 @@ impl Syn {
         cursor: false,
         x: 0,
         y: 0,
+        placed: false,
         until: 0,
         wheel_until: 0,
         pressed: 0,
@@ -582,6 +586,7 @@ impl Syn {
         self.x = x;
         self.y = y;
         self.cursor = true;
+        self.placed = true;
     }
 
     fn key_down(&mut self, vk: u8, since: u64) {
@@ -869,7 +874,7 @@ pub fn json() -> serde_json::Value {
     let (cursor, keys) = {
         let state = STATE.lock();
         (
-            if state.cursor { serde_json::json!([state.x, state.y]) } else { serde_json::Value::Null },
+            if state.placed { serde_json::json!([state.x, state.y]) } else { serde_json::Value::Null },
             state.key_len,
         )
     };
