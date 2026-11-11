@@ -2288,6 +2288,33 @@ const MODEL_PATTERN: &[Option<u8>] = &[
     Some(0x0F), Some(0x10), Some(0x86), None, None, None, None, Some(0x4C), Some(0x8B), Some(0xBE), None, None, None, None,
 ];
 
+/// In the loom's result builder (which its take handler calls): `mov eax,[rdi+SELECTED]; test eax,eax; js;
+/// mov rcx,[rip+END]; sub rcx,[rip+BEGIN]; shr rcx,6; imul ecx,ecx,0xaaaaaaab; cmp eax,ecx` — the selected
+/// pattern's index into the game's banner pattern list, bounds-checked against it (records of 3 << 6 bytes).
+const LOOM_INDEX_PATTERN: &str =
+    "8B 87 ?? ?? ?? ?? 85 C0 0F 88 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 2B 0D ?? ?? ?? ?? 48 C1 E9 06 69 C9 AB AA AA AA 39 C8";
+/// A banner pattern record's size: the `shr 6` and the multiply by the inverse of 3 in [`LOOM_INDEX_PATTERN`].
+const LOOM_RECORD: usize = 3 << 6;
+/// Further in the builder: `add rdi,NAME; lea rcx,[rbp+..]; mov rdx,rdi; call` — the selected record's
+/// pattern id (`std::string`, `bo`, `bri`, ...), copied into the controller's pattern name.
+const LOOM_NAME_PATTERN: &str = "48 81 C7 ?? ?? ?? ?? 48 8D 8D ?? ?? ?? ?? 48 89 FA E8";
+/// `controller + LOOM_SELECTED` = the selected pattern's index (`i32`); the builder clears the pattern name
+/// and rebuilds it (and the result) from this index, so the index is what a pattern button sets.
+static LOOM_SELECTED: AtomicUsize = AtomicUsize::new(0);
+/// The address of the banner pattern list's `begin` pointer (its `end` follows).
+static LOOM_LIST: AtomicUsize = AtomicUsize::new(0);
+/// `record + LOOM_NAME` = the record's pattern id.
+static LOOM_NAME: AtomicUsize = AtomicUsize::new(0);
+/// The loom's own pattern button `void (controller, u32 button)`: `test edx,edx; js; mov rax,[rcx+OFFERED];
+/// mov r8,[rcx+OFFERED+8]; sub r8,rax; shr r8,2; cmp edx,r8d; jge; mov edx,edx; mov eax,[rax+rdx*4];
+/// cmp [rcx+SELECTED],eax; je; mov [rcx+SELECTED],eax` — it selects the button's pattern (an index into
+/// the list the screen offers now) and rebuilds the result preview through the builder.
+const LOOM_SELECT_PATTERN: &str =
+    "85 D2 0F 88 ?? ?? ?? ?? 48 8B 81 ?? ?? ?? ?? 4C 8B 81 ?? ?? ?? ?? 49 29 C0 49 C1 E8 02 44 39 C2 7D ?? 89 D2 8B 04 90 39 81 ?? ?? ?? ?? 74 ?? 89 81";
+static LOOM_SELECT: AtomicUsize = AtomicUsize::new(0);
+/// `controller + LOOM_OFFERED` = the patterns the screen offers now (`std::vector<i32>` of list indices).
+static LOOM_OFFERED: AtomicUsize = AtomicUsize::new(0);
+
 /// `"41 C6 ?? 08"` → wildcard bytes.
 fn parse_pattern(text: &str) -> Vec<Option<u8>> {
     text.split_ascii_whitespace().map(|token| if token == "??" { None } else { u8::from_str_radix(token, 16).ok() }).collect()
@@ -2600,7 +2627,16 @@ fn resolve_screen_actions(core: &'static Core) {
     }
     let mut patterns: Vec<Vec<Option<u8>>> = HANDLER_RECIPES.iter().map(|recipe| parse_pattern(recipe.pattern)).collect();
     let extra = patterns.len();
-    for text in [SCOPE_END_PATTERN, STONECUTTER_SELECTION_PATTERN, TRADE_SELECTION_PATTERN, ANVIL_TEXT_PATTERN, ENUM_NAMES_PATTERN, MOVE_PATTERN] {
+    for text in [
+        SCOPE_END_PATTERN,
+        STONECUTTER_SELECTION_PATTERN,
+        TRADE_SELECTION_PATTERN,
+        ANVIL_TEXT_PATTERN,
+        ENUM_NAMES_PATTERN,
+        MOVE_PATTERN,
+        LOOM_INDEX_PATTERN,
+        LOOM_SELECT_PATTERN,
+    ] {
         patterns.push(parse_pattern(text));
     }
     let sites = unique_sites(image, &patterns);
@@ -2765,6 +2801,36 @@ fn resolve_screen_actions(core: &'static Core) {
             }
         }
     }
+    // The loom's selected pattern: the index its result builder (called by the loom's take handler)
+    // reads, the banner pattern list it indexes and the record's pattern id.
+    let loom = HANDLERS[H_LOOM].load(Ordering::Acquire);
+    if let Some(site) = sites[extra + 6] {
+        let code = pe::bytes(site, 28).unwrap_or(&[]);
+        let builder = image.function_start(site).filter(|builder| loom != 0 && calls(image, loom, *builder));
+        let pieces = (disp_at(site + 2), rip_target(site, code, 17, 21), rip_target(site, code, 24, 28));
+        if let (Some(builder), (Some(selected), Some(end), Some(begin))) = (builder, pieces) {
+            let name = body_of(image, builder, 0x4000)
+                .and_then(|(start, body)| find(&body[site - start..], &parse_pattern(LOOM_NAME_PATTERN)).map(|at| site + at))
+                .and_then(|at| disp_at(at + 3))
+                .filter(|name| *name + 0x20 <= LOOM_RECORD);
+            if let Some(name) = name.filter(|_| end == begin + 8 && (0x10..0x1000).contains(&selected)) {
+                LOOM_SELECTED.store(selected, Ordering::Release);
+                LOOM_LIST.store(begin, Ordering::Release);
+                LOOM_NAME.store(name, Ordering::Release);
+                // The pattern button: it writes the same index and rebuilds the preview through the builder.
+                if let Some(select_site) = sites[extra + 7] {
+                    let button = image.function_start(select_site).filter(|button| calls(image, *button, builder));
+                    let (offered, offered_end, written) = (disp_at(select_site + 11), disp_at(select_site + 18), disp_at(select_site + 41));
+                    if let (Some(button), Some(offered), Some(offered_end)) = (button, offered, offered_end) {
+                        if offered_end == offered + 8 && written == Some(selected) && (0x10..0x1000).contains(&offered) {
+                            LOOM_SELECT.store(button, Ordering::Release);
+                            LOOM_OFFERED.store(offered, Ordering::Release);
+                        }
+                    }
+                }
+            }
+        }
+    }
     // The crafting controller's class: the one caller of the crafting take that is a virtual (a slot of
     // the crafting controller's table), which identifies the controller the take may be called on.
     let craft = HANDLERS[H_CRAFT].load(Ordering::Acquire);
@@ -2838,7 +2904,7 @@ fn resolve_screen_actions(core: &'static Core) {
         line.push_str(&format!(" {name} {}", rva(HANDLERS[index].load(Ordering::Acquire))));
     }
     agent_core::log::fmt(format_args!(
-        "{line}; model +0x{:x}, beacon +0x{:x}, stonecutter +0x{:x}, trade +0x{:x}, loom +0x{:x}, anvil text slot 0x{:x}, enchant field +0x{:x}, beacon field +0x{:x}",
+        "{line}; model +0x{:x}, beacon +0x{:x}, stonecutter +0x{:x}, trade +0x{:x}, loom +0x{:x}, anvil text slot 0x{:x}, enchant field +0x{:x}, beacon field +0x{:x}, loom select {} (selected +0x{:x}, offered +0x{:x})",
         MODEL_AT.load(Ordering::Acquire),
         BEACON_SELECTION.load(Ordering::Acquire),
         STONECUTTER_SELECTION.load(Ordering::Acquire),
@@ -2847,6 +2913,9 @@ fn resolve_screen_actions(core: &'static Core) {
         ANVIL_TEXT_SLOT.load(Ordering::Acquire),
         ENCHANT_FIELD.load(Ordering::Acquire),
         BEACON_FIELD.load(Ordering::Acquire),
+        rva(LOOM_SELECT.load(Ordering::Acquire)),
+        LOOM_SELECTED.load(Ordering::Acquire),
+        LOOM_OFFERED.load(Ordering::Acquire),
     ));
 }
 
@@ -3727,14 +3796,45 @@ fn beacon_data() -> Result<Value, RpcError> {
     }))
 }
 
-/// The loom's selected pattern (its name id, `""` = none) as its controller holds it.
+/// The loom's selected pattern (its name id, `""` = none) as its controller holds it, and the patterns its
+/// screen offers now (in button order).
 fn loom_data() -> Result<Value, RpcError> {
     let field = LOOM_PATTERN.load(Ordering::Acquire);
     if field == 0 {
         return Err(RpcError::anchor("screen.loom"));
     }
     let controller = screen_manager(handler(H_LOOM)?, "screen.loom")?;
-    Ok(json!({ "pattern": pe::std_string(controller + field) }))
+    let patterns = match (loom_patterns(), loom_offered(controller)) {
+        (Some(names), Some(offered)) => json!(offered.iter().filter_map(|index| names.get(*index as usize)).collect::<Vec<_>>()),
+        _ => Value::Null,
+    };
+    Ok(json!({ "pattern": pe::std_string(controller + field), "patterns": patterns }))
+}
+
+/// The game's banner pattern list: each record's pattern id, by list index.
+fn loom_patterns() -> Option<Vec<String>> {
+    let (list, name) = (LOOM_LIST.load(Ordering::Acquire), LOOM_NAME.load(Ordering::Acquire));
+    if list == 0 || name == 0 {
+        return None;
+    }
+    let (begin, end) = (pe::read::<usize>(list)?, pe::read::<usize>(list + 8)?);
+    if end < begin || (end - begin) % LOOM_RECORD != 0 || (end - begin) / LOOM_RECORD > 256 {
+        return None;
+    }
+    (0..(end - begin) / LOOM_RECORD).map(|index| pe::std_string(begin + index * LOOM_RECORD + name)).collect()
+}
+
+/// The pattern list indices the open loom offers now, in button order.
+fn loom_offered(controller: usize) -> Option<Vec<i32>> {
+    let at = LOOM_OFFERED.load(Ordering::Acquire);
+    if at == 0 {
+        return None;
+    }
+    let (begin, end) = (pe::read::<usize>(controller + at)?, pe::read::<usize>(controller + at + 8)?);
+    if end < begin || (end - begin) % 4 != 0 || (end - begin) / 4 > 256 {
+        return None;
+    }
+    (0..(end - begin) / 4).map(|index| pe::read::<i32>(begin + index * 4)).collect()
 }
 
 /// `screen.state.data`: the open screen's own state, for the kinds whose state is decoded; `null` for a
@@ -4449,11 +4549,27 @@ pub(crate) fn h_screen_act(core: &'static Core, params: &Value) -> Result<Value,
             let pattern = required_text(params, "pattern", action)?;
             let screen = require_screen(core, &["loom"], action)?;
             let controller = screen_manager(handler(H_LOOM)?, "screen.loom")?;
-            let field = LOOM_PATTERN.load(Ordering::Acquire);
-            if field == 0 {
-                return Err(RpcError::anchor("screen.loom"));
+            let select = LOOM_SELECT.load(Ordering::Acquire);
+            let (Some(names), Some(offered)) = (loom_patterns(), loom_offered(controller)) else {
+                return Err(RpcError::anchor("screen.loom_select"));
+            };
+            if select == 0 {
+                return Err(RpcError::anchor("screen.loom_select"));
             }
-            write_string(controller + field, &pattern)?;
+            let offered_names = || offered.iter().filter_map(|index| names.get(*index as usize).cloned()).collect::<Vec<_>>().join(", ");
+            let Some(index) = names.iter().position(|name| *name == pattern) else {
+                return Err(RpcError::invalid_params(format!("no banner pattern is named {pattern}: the game's patterns are {}", names.join(", "))));
+            };
+            let Some(button) = offered.iter().position(|offer| *offer as usize == index) else {
+                return Err(RpcError::invalid_params(format!(
+                    "the loom does not offer {pattern} now (place a banner and a dye; a banner pattern item adds its own patterns); it offers: {}",
+                    offered_names()
+                )));
+            };
+            // SAFETY: the loom's own pattern button on the validated loom controller with a button the screen
+            // offers now: it records the pattern and rebuilds the result preview (item stacks are copied, so
+            // it runs in the item-registry scope).
+            input::with_item_scope(|| unsafe { transmute::<usize, extern "C" fn(usize, u32)>(select)(controller, button as u32) })?;
             take_screen(core, screen, controller, &LOOM_TAKE, 1)
         }
         "cartography" => {
