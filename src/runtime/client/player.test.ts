@@ -201,11 +201,13 @@ describe("projectile intercept", () => {
  * A fake game: mouse motion turns the view at `degPerPx`, WASD walk relative to the yaw. With `latencyMs`, the
  * state streams like the helper's (every 50 ms tick) and shows the game `latencyMs` before it arrives. With `engine`,
  * the world also has the agent's input route: absolute views, an analog movement vector and attacks that strike
- * whatever entity lies within 8 degrees of the view and 3 blocks; `failAfter` makes it fail from that call on.
+ * whatever entity lies within 8 degrees of the view and 3 blocks; `failAfter` makes it fail from that call on, and
+ * `lookFrameMs` applies (and answers) one look per that many milliseconds, first come first served, as the agent's
+ * main-thread drain does once per game frame.
  */
 function fakeWorld(
   degPerPx: number,
-  opts: { blocked?: boolean; latencyMs?: number; entities?: EntityInfo[]; engine?: { failAfter?: number; prepareFails?: boolean; noTick?: boolean; noKeys?: boolean; noAttackHold?: boolean } } = {},
+  opts: { blocked?: boolean; latencyMs?: number; entities?: EntityInfo[]; engine?: { failAfter?: number; prepareFails?: boolean; noTick?: boolean; noKeys?: boolean; noAttackHold?: boolean; lookFrameMs?: number } } = {},
 ) {
   const s: PlayerState = {
     tick: 0,
@@ -272,6 +274,10 @@ function fakeWorld(
     const seen = [...history].reverse().find((h) => h.at <= at - latency) ?? history[0];
     return { at, state: structuredClone(seen?.state ?? s) };
   };
+  /** Looks waiting for the agent's frame (`lookFrameMs`), and the views it applied. */
+  const lookQueue: { pitch: number; yaw: number; resolve: () => void }[] = [];
+  let lookDrain: NodeJS.Timeout | undefined;
+  const applied: { at: number; yaw: number }[] = [];
   let calls = 0;
   /** One engine call: logged, and failing once `failAfter` calls were made. */
   const call = (method: string, params: unknown) => {
@@ -288,6 +294,20 @@ function fakeWorld(
     reachable: async () => !opts.engine?.prepareFails,
     look: async (pitch, yaw) => {
       call("look", { pitch, yaw });
+      const frame = opts.engine?.lookFrameMs;
+      if (frame !== undefined) {
+        const { promise, resolve } = Promise.withResolvers<void>();
+        lookQueue.push({ pitch, yaw, resolve });
+        lookDrain ??= setInterval(() => {
+          const l = lookQueue.shift();
+          if (!l) return;
+          advance();
+          s.rotation = { x: l.pitch, y: l.yaw };
+          applied.push({ at: Date.now(), yaw: l.yaw });
+          l.resolve();
+        }, frame);
+        return promise;
+      }
       s.rotation = { x: pitch, y: yaw };
       advance();
     },
@@ -339,7 +359,7 @@ function fakeWorld(
     nearest: async () => opts.entities?.[0] ?? null,
     impacts: async () => ({ tick: 0, impacts: [] }),
   };
-  return { world, held, pressed, steps, s, engineLog, clicks };
+  return { world, held, pressed, steps, s, engineLog, clicks, applied, stop: () => clearInterval(lookDrain) };
 }
 
 afterEach(() => {
@@ -460,6 +480,36 @@ describe("PlayerController on the engine route", () => {
     expect(pc.input).toBe("engine");
     expect(pc.inputNote).toMatch(/tick stream not ready/);
     await expect(pc.selectInput("engine")).rejects.toThrow(/no tick notification/);
+  });
+
+  it("keeps the game's view within 2 frames of the commanded one when the agent applies one look a frame", async () => {
+    // The agent applies one look per game frame (16.7 ms) and answers it then; the camera runs at 120 Hz. Live, with
+    // up to 8 looks queued, each view reached the game about 8 frames late and the turn landed as one jump.
+    vi.useFakeTimers();
+    const frame = 1000 / 60;
+    const { world, s, applied, stop } = fakeWorld(0.26, { latencyMs: 20, engine: { lookFrameMs: frame } });
+    const pc = new PlayerController(world, { clock: fakeClock, random: seededRandom(3) });
+    expect(await drive(pc.selectInput())).toBe("engine");
+    const commanded: { at: number; yaw: number }[] = [];
+    let worst = 0;
+    const watch = setInterval(() => {
+      const now = Date.now();
+      const v = pc.camera.view();
+      if (v) commanded.push({ at: now, yaw: v.yaw });
+      // The game holds a view the camera commanded at most 2 frames ago (and a millisecond of timer rounding).
+      const recent = commanded.filter((c) => c.at >= now - 2 * frame - 1);
+      if (recent.length) worst = Math.max(worst, Math.min(...recent.map((c) => Math.abs(angleDiff(c.yaw, s.rotation.y)))));
+    }, 1);
+    const r = await drive(pc.run({ action: "look_at", yaw: 60, pitch: 0 }));
+    clearInterval(watch);
+    stop();
+    expect(r).toMatchObject({ ok: true, input: "engine" });
+    expect(worst).toBeLessThan(0.5);
+    // No applied step is bigger than the curve's biggest step by more than a frame's worth of it.
+    const curve = commanded.slice(1).map((c, k) => Math.abs(angleDiff((commanded[k] as { yaw: number }).yaw, c.yaw)));
+    const perMs = Math.max(...curve);
+    const steps = applied.slice(1).map((a, k) => Math.abs(angleDiff((applied[k] as { yaw: number }).yaw, a.yaw)));
+    expect(Math.max(...steps)).toBeLessThanOrEqual(perMs * (1000 / 120 + frame) + 0.1);
   });
 
   it("turns with absolute views every frame along the same smooth curve, without moving the mouse", async () => {

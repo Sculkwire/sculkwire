@@ -155,6 +155,16 @@ describe("pack hand and attack clocks", () => {
     expect(packMove(input([zombie("a", 2.45, 0, { strikeInMs: 150 })]))).toMatchObject({ foot: "retreat" });
   });
 
+  it("holds only while the hand can strike this tick every mob coming in inside the strike range", () => {
+    // 2.9 out and coming, the turn onto it estimated to land in time (100 ms): the view off it by more than the
+    // tolerance as the game shows it still means back now; on it, hold and strike.
+    expect(packMove(input([zombie("a", 2.9, 0, { strikeInMs: 100, strikeNow: false })]))).toMatchObject({ foot: "retreat" });
+    expect(packMove(input([zombie("a", 2.9, 0, { strikeInMs: 0, strikeNow: true })]))).toMatchObject({ foot: "hold" });
+    // Backing off (not coming in), or outside the 3.0 strike range and its 0.1 edge: the reading alone does not send the feet back.
+    expect(packMove(input([zombie("a", 2.9, 0, { closing: -1, strikeInMs: 100, strikeNow: false })]))).toMatchObject({ foot: "hold" });
+    expect(packMove(input([zombie("a", 3.15, 0, { closing: 0.5, strikeInMs: 0, strikeNow: false })])).foot).not.toBe("retreat");
+  });
+
   it("credits an attack to the mob due first and to every long-overdue one in reach; a block only to those in front", () => {
     const due = zombie("a", 1.3, 0, { dueMs: 0 });
     const cool = zombie("b", 1.2, 10, { dueMs: 600 });

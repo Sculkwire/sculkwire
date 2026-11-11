@@ -10,8 +10,9 @@
  *   a jump rises 0.42 blocks a tick under the game's gravity (apex 1.25 after 6 ticks, down after 12) and keeps its
  *   take-off motion in the air: 7.06 sprint-jumping forward, 4.32 walking, 3.78 backward.
  * - Input reaches the server 2 ticks after it is sent (engine route; the keyboard's key 1 tick). The engine agent
- *   answers a move or a look after `ENGINE_CALL_MS` and an attack after `ENGINE_ATTACK_MS` (measured on retail with
- *   calls 25 ms apart: 57 ms for `input.move` and `input.look`, 6 ms median and 17 ms p90 for `input.attack`).
+ *   answers a move after `ENGINE_CALL_MS` and an attack after `ENGINE_ATTACK_MS` (measured on retail with calls 25 ms
+ *   apart: 57 ms for `input.move`, 6 ms median and 17 ms p90 for `input.attack`), and applies one look per game frame
+ *   (`LOOK_FRAME_MS`), first come first served, answering it then.
  * - A zombie or husk chases at its speed, attacks when its box reach covers the player (centre gap under 1.4 on both
  *   x and z, `melee_box_attack`) and then every 20 ticks while it does (30 after an attack the shield blocked), for
  *   `MOB_HIT` health on iron armor.
@@ -78,9 +79,42 @@ export const SWORD = 6.89;
 export const MOB_HIT = 1.62;
 /** Ticks from an input being sent to the server acting on it. */
 export const ENGINE_INPUT_TICKS = 2;
-/** The engine agent's answer to a move or a look, and to an attack (the pessimistic measured case). */
+/** The engine agent's answer to a move, and to an attack (the pessimistic measured case). */
 export const ENGINE_CALL_MS = 50;
 export const ENGINE_ATTACK_MS = 10;
+/**
+ * The engine agent applies one `input.look` per game frame, on its main-thread drain, in the order they came, and
+ * answers it then: views sent faster than the frame rate queue up (live, 2026-11-11: the streamed aim error stood still
+ * for 100 to 200 ms after a target change while the camera sent at 120 Hz, then the view jumped tens of degrees).
+ */
+export const LOOK_FRAME_MS = 17; // one 60 fps frame, whole milliseconds
+/**
+ * A swing at a zombie or husk walking in (closing faster than `WALKING_IN_CLOSING` blocks a second; a creeper is struck
+ * where it is, live 2.92 to 2.99 still walking) lands as the distance its
+ * reading showed at the swing says, as measured live (2026-11-11, N=60 bench, every swing at a mob walking in by the
+ * target's centre distance in the frame: 3.20 to 3.35 hit 2 of 115, 3.15 9 of 240, 3.10 5 of 196, 3.05 12 of 81, 3.00
+ * 45 of 135, 2.95 63 of 137, 2.90 50 of 104, 2.85 123 of 162, 2.75 to 2.80 115 of 180, 2.60 to 2.70 84 of 115, 2.35
+ * to 2.55 57 of 67). Taken relative to the 76 % at 2.85, inside which the misses left are the aim's and the jump's
+ * (the simulator draws those itself): none from 3.05, 43 % at 3.0, 60 % at 2.95, 63 % at 2.9, all from 2.85.
+ */
+export const WALKING_IN_CLOSING = 1.5;
+const WALKING_IN_HIT: readonly [number, number][] = [
+  [2.85, 1],
+  [2.9, 0.63],
+  [2.95, 0.6],
+  [3.0, 0.43],
+  [3.05, 0],
+];
+export function walkingInHit(readDist: number): number {
+  if (readDist <= 2.85) return 1;
+  if (readDist >= 3.05) return 0;
+  for (let k = 1; k < WALKING_IN_HIT.length; k++) {
+    const [d1, p1] = WALKING_IN_HIT[k] as [number, number];
+    const [d0, p0] = WALKING_IN_HIT[k - 1] as [number, number];
+    if (readDist <= d1) return p0 + ((p1 - p0) * (readDist - d0)) / (d1 - d0);
+  }
+  return 0;
+}
 /** Ticks the server must have seen the sneak before a hit for the shield to block it. */
 export const SHIELD_TICKS = 6;
 export const SHIELD_ARC = 90;
@@ -165,6 +199,8 @@ export interface SimEvent {
 export interface SimLog {
   blast: number;
   meleeDamage: number;
+  /** Swings the miss rate (`missRate`) took: not the gate's. */
+  drawnMisses: number;
   /** Melee hits the player took and blocked. */
   hitsTaken: number;
   /** Of the hits taken, the arrows that hit. */
@@ -198,8 +234,10 @@ export interface SimOptions {
   pen?: { x0: number; x1: number; z0: number; z1: number };
   /** The player's start (default the origin, looking at +Z). */
   start?: { x: number; z: number; yaw?: number };
-  /** Delay of the engine's answer to a move or a look (default `ENGINE_CALL_MS`) and to an attack (`ENGINE_ATTACK_MS`). */
+  /** Delay of the engine's answer to a move (default `ENGINE_CALL_MS`) and to an attack (`ENGINE_ATTACK_MS`). */
   callMs?: number;
+  /** One look applied per this many milliseconds, first come first served (default `LOOK_FRAME_MS`). */
+  lookFrameMs?: number;
   attackMs?: number;
   /**
    * Share of swings that miss although the view ray meets the mob in reach (seeded, so a run repeats). Live on retail
@@ -335,7 +373,8 @@ export function sim(mobs: SimMob[], o: SimOptions = {}): Sim {
   const missRoll = seededRandom(o.missSeed ?? 11);
   const arrowRoll = seededRandom(o.arrowSeed ?? 13);
   const creeperRoll = seededRandom(o.creeperSeed ?? 17);
-  const log: SimLog = { blast: 0, meleeDamage: 0, hitsTaken: 0, arrowHits: 0, blocked: 0, exploded: 0, swings: 0, hits: 0, events: [] };
+  const reachRoll = seededRandom((o.missSeed ?? 11) + 1000);
+  const log: SimLog = { drawnMisses: 0, blast: 0, meleeDamage: 0, hitsTaken: 0, arrowHits: 0, blocked: 0, exploded: 0, swings: 0, hits: 0, events: [] };
   /** Movement sent and the tick the server acts on it. */
   const inbox: { tick: number; move: MoveVector }[] = [];
   let tick = 0;
@@ -533,6 +572,14 @@ export function sim(mobs: SimMob[], o: SimOptions = {}): Sim {
   };
   const history: PlayerState[] = [];
   const timer = setInterval(step, 50);
+  const looks: { pitch: number; yaw: number; resolve: () => void }[] = [];
+  const lookTimer = setInterval(() => {
+    const l = looks.shift();
+    if (!l) return;
+    p.pitch = l.pitch;
+    p.yaw = l.yaw;
+    l.resolve();
+  }, o.lookFrameMs ?? LOOK_FRAME_MS);
   /** The mob the view ray meets first, and the distance from the eye. */
   const aimed = (): { m: SimMob; dist: number } | undefined => {
     const cp = Math.cos((p.pitch * Math.PI) / 180);
@@ -582,7 +629,14 @@ export function sim(mobs: SimMob[], o: SimOptions = {}): Sim {
     swingTick = tick;
     const a = aimed();
     const m = a?.m;
-    if (!a || !m || Math.hypot(p.x - m.x, p.z - m.z) > REACH || Date.now() < m.hurtUntil || (o.missRate !== undefined && missRoll() < o.missRate)) {
+    // A mob walking in is struck as its reading's distance says (`WALKING_IN_HIT`), not where it is by then.
+    const read = m ? (m.trail?.[0] ?? m) : undefined;
+    const readDist = m && read ? Math.hypot(p.x - read.x, p.z - read.z) : 0;
+    const walkingIn = m !== undefined && m.typeId !== "minecraft:creeper" && readDist > 0.01 && read !== undefined && ((m.vx * (p.x - read.x) + m.vz * (p.z - read.z)) / readDist) * 20 > WALKING_IN_CLOSING;
+    const outOfReading = walkingIn && reachRoll() >= walkingInHit(readDist);
+    const drawn = !(!a || !m || outOfReading || Math.hypot(p.x - m.x, p.z - m.z) > REACH || Date.now() < m.hurtUntil) && o.missRate !== undefined && missRoll() < o.missRate;
+    if (!a || !m || outOfReading || Math.hypot(p.x - m.x, p.z - m.z) > REACH || Date.now() < m.hurtUntil || drawn) {
+      if (drawn) log.drawnMisses++;
       log.events.push({ at: Date.now(), kind: "miss" });
       return null;
     }
@@ -607,10 +661,10 @@ export function sim(mobs: SimMob[], o: SimOptions = {}): Sim {
   const engine: EngineInput = {
     prepare: async () => {},
     reachable: async () => true,
-    look: async (pitch, yaw) => {
-      p.pitch = pitch;
-      p.yaw = yaw;
-      await later(callMs);
+    look: (pitch, yaw) => {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      looks.push({ pitch, yaw, resolve });
+      return promise;
     },
     move: async (m) => {
       sent(m);
@@ -676,5 +730,9 @@ export function sim(mobs: SimMob[], o: SimOptions = {}): Sim {
         }
       : {}),
   };
-  return { world, log, player: () => ({ x: p.x, z: p.z, sneak: p.move.sneak }), stop: () => clearInterval(timer) };
+  return { world, log, player: () => ({ x: p.x, z: p.z, sneak: p.move.sneak }), stop: () => {
+      clearInterval(timer);
+      clearInterval(lookTimer);
+    },
+  };
 }

@@ -17,7 +17,7 @@ import { gridFor, type GridCache } from "../nav/grid.ts";
 import { bestWeaponSlot, bowSlot, hasShield } from "./items.ts";
 import { HIT_COOLDOWN_MS, meleePlan, type PendingSwing, swingOutcome } from "./melee.ts";
 import { isHostile, MELEE_COOLDOWN_MS, meleeReach, mobInfo, shortType, type MobInfo } from "./mobs.ts";
-import { STRIKE_AIM_DEG, AFTER_BLOCK_MS, attackInMs, attackers, ENGINE_LATENCY_MS, GUARD_STEP_OUT_MS, ROOM_NEEDED, KEYBOARD_LATENCY_MS, nextAttackMs, NO_WINDOW_MS, packMove, shieldSwingOk, type PackMob, type Stance, strikeTarget, STRIKE_DIST, STRIKE_REACH } from "./pack.ts";
+import { STRIKE_AIM_DEG, AFTER_BLOCK_MS, attackInMs, attackers, ENGINE_LATENCY_MS, GUARD_STEP_OUT_MS, ROOM_NEEDED, KEYBOARD_LATENCY_MS, nextAttackMs, NO_WINDOW_MS, packMove, shieldSwingOk, type PackMob, type Stance, strikeDistance, strikeTarget, STRIKE_DIST, STRIKE_REACH } from "./pack.ts";
 import { combatStats, fightText, logEvent, traceFrame, type CombatStats, type TraceEvent, type TraceMob } from "./stats.ts";
 import type { Death } from "./play.ts";
 import type { FightStats, SkillResult } from "./types.ts";
@@ -493,8 +493,9 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
   let runTurn = 0;
   let runCheck = { at: 0, x: 0, z: 0 };
   let runHeading = 0;
-  let strafe = Math.random() < 0.5 ? 1 : -1;
-  let strafeUntil = h.now() + 800 + Math.random() * 800;
+  const random = pc.camera.random;
+  let strafe = random() < 0.5 ? 1 : -1;
+  let strafeUntil = h.now() + 800 + random() * 800;
   /** The last tap of a step in to a creeper. */
   let stepTapAt = Number.NEGATIVE_INFINITY;
   /** A close-in on a lit creeper: forward until `until`, held as the strike attempt until its swing goes out. */
@@ -601,6 +602,11 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
         const c = v && d > 0.01 ? ((v.x * (s.location.x - m.location.x) + v.z * (s.location.z - m.location.z)) / d) * 20 : 0;
         trackFuse(fuseOf(m.id), now, d, c, m.ignited, mobInfo(m.typeId).fuseMs, v ? Math.hypot(v.x, v.z) * 20 : Math.abs(c), m.fuseTicks !== undefined ? m.fuseTicks * 50 + (m.ageMs ?? 0) + now - ctx.crowdAt : undefined);
       }
+      // Where the game shows the view (engine: the streamed rotation, a tick old; keyboard: the predicted one) and how far
+      // off the target it is: the hand strikes this tick only with the view within the tolerance of a mob.
+      const aimNow = pc.camera.error();
+      const targetAim = pc.input === "engine" ? aimNow.observed : aimNow.predicted;
+      const shownYaw = pc.input === "engine" ? s.rotation.y : view;
       // The melee mobs as the pack footwork reads them: reach toward the player, attack clock, invulnerability.
       const near = mobs
         .filter((m) => mobInfo(m.typeId).kind === "melee" && (m.health === undefined || m.health.current > 0))
@@ -616,6 +622,10 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
           // The hand can strike it once its invulnerability is over and the view is on it: the camera's turn for that
           // angle (150 to 450 ms), plus the view's latency.
           const turnMs = Math.abs(off) > STRIKE_AIM_DEG ? turnDurationMs(Math.abs(off), 10) + pc.camera.latencyMs : 0;
+          // The tolerance the swing uses: the mob's half width at its distance from the eye.
+          const eyeD = Math.hypot(d, m.location.y + (mi.climbs ? 0.45 : 1.0) - s.location.y - EYE_HEIGHT);
+          const tol = Math.max(5, (Math.atan2(0.4, eyeD) * 180) / Math.PI);
+          const aimed = m.id === target.id ? targetAim <= tol : Math.abs(angleDiff(shownYaw, bearing)) <= tol;
           return {
             m,
             info: mi,
@@ -630,6 +640,7 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
             dueMs: Math.max(0, (nextAttack.get(m.id) ?? Number.NEGATIVE_INFINITY) - now),
             ...(nextAttack.has(m.id) ? { overdueMs: Math.max(0, now - (nextAttack.get(m.id) as number)) } : {}),
             hittableMs,
+            strikeNow: hittableMs <= ctx.latencyMs && aimed,
             ...(mi.axe ? { axe: true } : {}),
           };
         })
@@ -709,7 +720,8 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
         foot = move;
         // One set of feet for both kinds: the pack's keep-out rule (no melee mob gets the player in its reach) holds
         // while the creeper is the target too, except for the strike itself and the escape from the fuse.
-        const pack = near.length > 0 ? packMove({ mobs: near, stance: "kite", hasShield: false, latencyMs: ctx.latencyMs, view, room: clear }) : undefined;
+        // The keep-out reads the mobs by the estimate (`strikeInMs`), not this tick's aim: the view is on the creeper.
+        const pack = near.length > 0 ? packMove({ mobs: near.map(({ strikeNow: _, ...m }) => m), stance: "kite", hasShield: false, latencyMs: ctx.latencyMs, view, room: clear }) : undefined;
         const keepOut = pack?.foot === "retreat" ? pack.heading : undefined;
         // Running from the fuse faces away from the creeper; everything else faces it.
         if (move !== "run" && running) {
@@ -752,7 +764,9 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
           await h.walk(openHeading({ me: s.location, desired: toward + 180 + lean, spreadDeg: 60, mobs: avoid, clear }), false);
         }
         // A melee mob about to have the player in its reach: back off from it, as the pack's footwork does.
-        else if (keepOut !== undefined && move !== "strike") {
+        // (Also while `strike` only waits out another mob in the line: live in the simulator, a zombie walking into the
+        // line took the swing and then hit the player standing there.)
+        else if (keepOut !== undefined && (move !== "strike" || blockedLine)) {
           foot = `${move} keep-out`;
           await h.walk(openHeading({ me: s.location, desired: keepOut, spreadDeg: 60, mobs: avoid, clear }), false);
         }
@@ -898,14 +912,16 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
       const tolerance = Math.max(5, (Math.atan2(0.4, eyeDist) * 180) / Math.PI);
       const hittable = (id: string) => now - (stats.struckAt.get(id) ?? Number.NEGATIVE_INFINITY) >= HIT_COOLDOWN_MS;
       const look = s.lookingAtEntity;
-      // A swing lands only within `STRIKE_REACH` of the eye (to the aim point) where the mob will be when it lands: the
-      // mob's closing carried forward by the input latency. A creeper only once it is inside at the send (a lead sent the
-      // first swing at 3.11 and missed; it is still walking in, so it is deeper when the click runs).
-      const landsIn = (eye: number, closingSpeed: number, isCreeper: boolean) => eye - (isCreeper ? 0 : (Math.max(0, closingSpeed) * ctx.latencyMs) / 1000) <= STRIKE_REACH;
+      // A swing lands where the mob reads now, within `STRIKE_REACH` of the eye (to the aim point): no lead for its walk
+      // (the reading is fresher than the latency, and the click runs within a frame; live, a closing lead sent 600 of
+      // about 1000 misses at 3.05 or more). A melee mob also by its reading's centre distance, `strikeDistance` (2.9
+      // walking in, 2.99 else). The eye distance keeps a swing from the top of a jump from going out (live, 58 of 69
+      // swings in the air at 2.6 to 2.85 missed: the raised eye is out of reach of the aim point).
+      const landsIn = (eye: number, centre: number, closingSpeed: number, isCreeper: boolean) => eye <= STRIKE_REACH && (isCreeper || centre <= strikeDistance(closingSpeed));
       const eyeTo = (m: EntityInfo) => Math.hypot(m.location.x - s.location.x, m.location.y + 1.0 - s.location.y - EYE_HEIGHT, m.location.z - s.location.z);
       const lookedAt = pc.input === "engine" && look && look.id !== target.id ? near.find((n) => n.id === look.id) : undefined;
-      const other = lookedAt && landsIn(eyeTo(lookedAt.m), lookedAt.closing, false) ? lookedAt.m : undefined;
-      const inStrike = landsIn(eyeDist, closing, exploder);
+      const other = lookedAt && landsIn(eyeTo(lookedAt.m), lookedAt.dist, lookedAt.closing, false) ? lookedAt.m : undefined;
+      const inStrike = landsIn(eyeDist, dist, closing, exploder);
       const aimedAt = look?.id === target.id && inStrike && aimError <= tolerance * 2;
       // With the view on the target (before the helper's crosshair reading shows it), the distance decides.
       const aimedClose = inStrike && aimError <= tolerance;
@@ -1041,6 +1057,7 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
           plan,
           readyMs: Math.round(ready),
           shield: ctx.blocking,
+          ...(info.kind === "melee" ? { room: Math.round(ctx.room * 100) / 100 } : {}),
           aimErr: Math.round(aimError * 10) / 10,
           aimTol: Math.round(tolerance * 10) / 10,
           fwd: round2(mv.forward),
@@ -1053,7 +1070,7 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
       while (ctx.frames.length > 0 && (ctx.frames[0]?.at ?? now) < now - (exploder ? CREEPER_FRAME_LOG_MS : FRAME_LOG_MS)) ctx.frames.shift();
       if (now > strafeUntil) {
         strafe = -strafe;
-        strafeUntil = now + 700 + Math.random() * 900;
+        strafeUntil = now + 700 + random() * 900;
       }
       duelTicks++;
       await h.sleep(25, signal);

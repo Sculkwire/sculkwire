@@ -66,6 +66,8 @@ export interface TraceFrame {
   ev?: TraceEvent[];
   /** health lost this frame */
   lost?: number;
+  /** free run (blocks) along the melee footwork's retreat heading */
+  room?: number;
 }
 
 export interface CombatStats {

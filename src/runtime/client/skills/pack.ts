@@ -56,6 +56,11 @@ export interface PackMob {
   strikeInMs?: number;
   /** Milliseconds until it can take a hit again (its 10-tick invulnerability after the player's last hit on it). */
   hittableMs: number;
+  /**
+   * The hand can strike it this tick once it is inside the strike range: it can take a hit, and the view is on it within
+   * the aim tolerance as the game shows it (undefined: not known, the estimate `strikeInMs` decides alone).
+   */
+  strikeNow?: boolean;
   /** It swings an axe: a hit on the raised shield disables the shield. */
   axe?: boolean;
 }
@@ -149,6 +154,22 @@ const WAIT_DIST = 4;
 export const STRIKE_REACH = 3.05;
 /** The same reach as a horizontal centre distance on level ground (struck at 3.0, not at 3.1). */
 export const STRIKE_CENTRE = 3.0;
+/**
+ * The swing goes out at a mob once its reading (the horizontal centre distance, as read now: no lead for its walk) is
+ * this close. Live (2026-11-11, N=60 bench, every swing at a mob walking in, closing above 1.5, by that reading;
+ * hits/misses): 3.20 to 3.35 2/113, 3.15 9/231, 3.10 5/191, 3.05 12/69, 3.00 45/90, 2.95 63/74, 2.90 50/54, 2.85
+ * 123/39, 2.75 to 2.80 115/65, 2.60 to 2.70 84/31, 2.35 to 2.55 57/10. The gate with a closing lead sent 600 of about
+ * 1000 misses at 3.05 or more. So 2.9 for a mob walking in (one tick of its walk inside 3.0; 48 % at 2.9, 76 % at
+ * 2.85), and 2.99 for one standing or backing off.
+ */
+export const STRIKE_DIST_WALKING_IN = 2.9;
+export const STRIKE_DIST_STILL = 2.99;
+/** A mob closing faster than this (blocks a second) is walking in. */
+export const WALKING_IN = 1.5;
+/** Where the swing at a mob goes out, by its closing speed. */
+export function strikeDistance(closing: number): number {
+  return closing > WALKING_IN ? STRIKE_DIST_WALKING_IN : STRIKE_DIST_STILL;
+}
 /** The feet hold a target this far (centre to centre): inside the strike reach with margin, outside a zombie's 1.4 to 1.98. */
 export const STRIKE_DIST = 2.8;
 /** `guard`: the shield goes up with a melee mob this close. */
@@ -156,10 +177,18 @@ const GUARD_DIST = 3.6;
 /** The view within this many degrees of a mob strikes it without a turn. */
 export const STRIKE_AIM_DEG = 8;
 /**
- * Mob readings this close are within the mob's hit as it happens: measured on retail 2026-11-11 (two N=60 bench files,
- * 41 hurts), the nearest mob 100 ms before a hurt read 1.6 to 2.5 blocks (median 2.0, a quarter at 2.3 to 2.5), where its
- * box reach is 1.4 to 1.98 (the readings are a tick or two old, and it closes about 0.23 blocks in those 100 ms). A mob
- * coming in this close that the hand cannot strike right now is stepped away from.
+ * A mob coming in counts as inside the 3.0 strike range this much beyond it: at 2.3 blocks a second it covers 0.1 in
+ * about 40 ms, under a tick, so holding one there the hand cannot strike leaves it inside the range with the hand still
+ * off. Whether the hand can strike it (`strikeNow`) is the view and its invulnerability only, not the swing's
+ * distance (`strikeDistance`): a mob coming in that the hand is on is waited for and struck at 2.9, never stepped back
+ * from first.
+ */
+export const UNANSWERED_EDGE = 0.1;
+const STRUCK_FIRST = true;
+/**
+ * Without the this-tick reading (`strikeNow`, the creeper duel's keep-out), a mob coming in this close that the hand
+ * cannot strike within the latency is stepped away from: measured on retail 2026-11-11 (two N=60 bench files, 41
+ * hurts), the nearest mob 100 ms before a hurt read 1.6 to 2.5 blocks (median 2.0, a quarter at 2.3 to 2.5).
  */
 export const HIT_READING_DIST = 2.5;
 /** Footwork without the shield keeps this much time between a mob and its reach (beyond the input latency). */
@@ -308,12 +337,26 @@ export function packMove(i: PackInput): PackMove {
   // No shield for an attack now: keep out of the mobs' reach with the feet.
   const kiteBy = i.latencyMs + KITE_MARGIN_MS;
   const threat = timed.find((t) => reachInMs(t.m) <= kiteBy);
-  // Never stand where the hand cannot answer: a mob in strike range that would be within its reach before the hand can
-  // strike it (its invulnerability, or the turn onto it) is stepped away from now.
+  // Never stand where the hand cannot answer. A mob coming in inside the strike range that the hand cannot strike this
+  // tick (its invulnerability, or the view off it by more than the tolerance as the game shows it) is stepped away
+  // from now, without weighing how soon the turn will land: walking back (4.32) the mob (2.3) cannot close, the view
+  // keeps turning, and the hand strikes on the way the tick it can. Live (2026-11-11, 3 runs of 60), every hurt in the
+  // slow runs came with the feet holding while the turn onto a mob walking in was estimated to land in time, and the
+  // aim stood still for 100 to 200 ms. Beyond the strike range, a mob that would have the player in its reach before
+  // the hand can strike it (`strikeInMs`) is stepped away from too.
   const strikeIn = (m: PackMob) => m.strikeInMs ?? m.hittableMs;
+  // A mob the hand cannot strike is not stepped back from while another one coming in, as near or nearer, is under the
+  // crosshair now: that one is struck first (its knockback throws it back) and the view turns on from there. Two mobs
+  // side by side a few degrees apart otherwise keep the feet backing off with the hand on neither in reach of its
+  // swing (in the simulator's dead end, until the player stood boxed in at the wall).
+  const struckFirst = (m: PackMob) => near.some((o) => o !== m && o.strikeNow === true && o.closing > 0 && o.dist <= m.dist);
   const unanswered = threat
     ? undefined
-    : timed.find((t) => t.m.dist <= STRIKE_CENTRE + 0.2 && (reachInMs(t.m) <= strikeIn(t.m) + i.latencyMs || (t.m.dist <= HIT_READING_DIST && t.m.closing > 0 && strikeIn(t.m) > i.latencyMs)));
+    : timed.find(
+        (t) =>
+          (t.m.dist <= STRIKE_CENTRE + UNANSWERED_EDGE && t.m.closing > 0 && t.m.strikeNow === false && !(STRUCK_FIRST && struckFirst(t.m))) ||
+          (t.m.dist <= STRIKE_CENTRE + 0.2 && (reachInMs(t.m) <= strikeIn(t.m) + i.latencyMs || (t.m.strikeNow === undefined && t.m.dist <= HIT_READING_DIST && t.m.closing > 0 && strikeIn(t.m) > i.latencyMs))),
+      );
   if (unanswered && room >= BOXED_ROOM) return withFace(retreat(`${unanswered.m.id} reaches the player before the hand can strike it`));
   if (threat) {
     if (room >= BOXED_ROOM || !shieldOk || i.stance === "auto") return withFace(retreat(`${threat.m.id} ${threat.m.dist.toFixed(2)} from its reach ${threat.m.mobReach.toFixed(2)}`));

@@ -510,6 +510,9 @@ export class Camera {
   #lastAim?: Aim;
   /** When the state will show where the last movement landed (see `#frame`). */
   #landsAt = Number.NEGATIVE_INFINITY;
+  /** Engine route without a stream: the newest state a background read brought, and the read under way. */
+  #read?: Sample;
+  #reading?: Promise<void>;
 
   constructor(world: PlayerWorld, clock: Clock = realClock, random: () => number = Math.random) {
     this.#world = world;
@@ -527,6 +530,11 @@ export class Camera {
   /** True while views go through the engine's absolute setter. */
   get absolute(): boolean {
     return this.#absolute !== undefined;
+  }
+
+  /** The controller's random source (seeded in tests), for the fight's other human variation too. */
+  get random(): () => number {
+    return this.#random;
   }
 
   /** Keep the crosshair on `target`, or stop moving the mouse (undefined). */
@@ -614,6 +622,19 @@ export class Camera {
   }
 
   async #latest(now: number): Promise<Sample | undefined> {
+    // The engine route steers on its own commanded view, so its loop never waits on a `state()` round trip: it takes
+    // the newest stream sample, or the newest state a background read brought, however old (live, a frame loop held up
+    // by that round trip froze the aim 100 to 200 ms and let the curve land as one jump).
+    if (this.#absolute) {
+      const streamed = this.#world.sample?.();
+      if (streamed) return this.#dejitter(streamed);
+      this.#reading ??= this.#world
+        .state(STALE_STATE_MS)
+        .then((state) => void (this.#read = { at: this.#clock.now(), state }))
+        .catch(() => undefined)
+        .finally(() => (this.#reading = undefined));
+      return this.#read;
+    }
     const streamed = this.#world.sample ? this.#world.sample() : { at: now, state: await this.#world.state(STALE_STATE_MS) };
     if (!streamed || now - streamed.at > STALE_STATE_MS) {
       // Never steer blind: wait for a fresh state (this also starts the stream).
@@ -1017,9 +1038,6 @@ export class KeyboardBackend implements InputBackend {
 /** The agent drops held movement after a second without an update, so a held move is repeated this often. */
 const MOVE_REFRESH_MS = 300;
 
-/** Views sent before the oldest one's answer is awaited: about 70 ms of camera frames at 120 Hz. */
-const MAX_LOOKS_IN_FLIGHT = 8;
-
 /**
  * The engine route: absolute view every frame, a movement vector held by the game every tick, and attacks and item
  * use through the game's own click callbacks. The first failure is kept and thrown by every later call as an
@@ -1036,7 +1054,9 @@ export class EngineBackend implements InputBackend {
   #sentAt = Number.NEGATIVE_INFINITY;
   #keepalive?: NodeJS.Timeout;
   #failure?: EngineInputError;
-  #looksInFlight = 0;
+  /** A look is out and not answered yet; `#lookNext` is the newest view asked for meanwhile. */
+  #lookOut = false;
+  #lookNext?: { pitch: number; yaw: number };
   /** Keys this route holds down through `EngineInput.key`. */
   readonly #keys = new Set<string>();
   /** Buttons this route holds, pressed again every `MOVE_REFRESH_MS`: the agent lets a held button go a second after its last press. */
@@ -1093,19 +1113,35 @@ export class EngineBackend implements InputBackend {
   }
 
   /**
-   * `input.look` answers after a frame or so (25 ms median, measured live), which would hold a 120 Hz camera to the
-   * game's frame rate and let a slow answer stall it. Views go out in order over the one connection, so a few may be
-   * in flight; a failure surfaces on the next view.
+   * The agent applies one `input.look` per game frame, on its main-thread drain, and answers it then (a call costs
+   * about 8 ms). A 120 Hz camera sending every view would queue them: live, with up to 8 in flight, each view reached the
+   * game about 8 frames late, the streamed aim stood still for 100 to 200 ms after a target change and then jumped.
+   * So one look is out at a time, and when its answer is back the newest view asked for meanwhile goes next (the views
+   * between are dropped: the camera's curve is absolute, the newest view is where it is). Never waits; a failure
+   * surfaces on the next view.
    */
   async #look(pitch: number, yaw: number): Promise<void> {
     if (this.#failure) throw this.#failure;
-    this.#looksInFlight++;
-    const sent = this.#engine
+    if (this.#lookOut) {
+      this.#lookNext = { pitch, yaw };
+      return;
+    }
+    this.#lookOut = true;
+    void this.#engine
       .look(pitch, yaw)
-      .catch((err: unknown) => void this.#fail(err))
-      .finally(() => this.#looksInFlight--);
-    if (this.#looksInFlight > MAX_LOOKS_IN_FLIGHT) await sent;
-    if (this.#failure) throw this.#failure;
+      .then(
+        () => {
+          this.#lookOut = false;
+          const next = this.#lookNext;
+          this.#lookNext = undefined;
+          if (next && !this.#failure) void this.#look(next.pitch, next.yaw).catch(() => undefined);
+        },
+        (err: unknown) => {
+          this.#lookOut = false;
+          this.#lookNext = undefined;
+          this.#fail(err);
+        },
+      );
   }
 
   /**
