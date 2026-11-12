@@ -180,6 +180,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks and where new code goes
 - [rockide/schemas](https://github.com/rockide/schemas) by the Rockide project provides the JSON schemas used by the validator and `component_lookup`.
 - Packs unpacked from your installed game stay in your local cache.
 - The icon is a pixel-art sculk block with a glowing pixel [Model Context Protocol](https://github.com/modelcontextprotocol/modelcontextprotocol) mark above it.
+- The social preview image (`assets/social-preview.png`) is set in [Departure Mono](https://github.com/rektdeckard/departure-mono) by Helena Zhang (SIL Open Font License).
 
 ## License
 
