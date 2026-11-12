@@ -34,15 +34,15 @@ To use your checkout from an MCP client, point the client at `node /path/to/scul
 
 ## Checks Before a Pull Request
 
-Run all of these from the repository root. CI runs the types, the tests, the default agent build and the agent's host tests on Linux and Windows; the `debug-rpc` build is only checked by you.
+Run all of these from the repository root. CI runs every one of them on Linux and Windows.
 
 | Check | Command | Notes |
 |---|---|---|
 | Types | `npx tsc --noEmit` | Must be clean |
-| Tests | `npx vitest run` | The `native.test.ts` test "lists no game processes" fails while any Minecraft runs on the machine. Close the game, or accept that one failure |
+| Tests | `npx vitest run` | Must pass, with or without a game running |
 | Agent, default | `cd native && cargo build --release --locked --target x86_64-pc-windows-msvc` | Only when `native/` changed |
 | Agent, `debug-rpc` | Same, plus `--features sculkwire-agent/debug-rpc` | Only when `native/` changed. Both builds must pass |
-| Agent, host tests | `cd native && for m in look screens registries click; do rustc --edition 2021 --test agent/src/$m.rs -o target/$m-test.exe && ./target/$m-test.exe \|\| exit 1; done` | Only when `native/agent/src/look.rs`, `screens.rs`, `registries.rs` or `click.rs` changed. The agent's pure modules (the view math, the screen rules, the tick stream's registry choice, the click's wait for the crosshair pick), which build on their own as host test crates (the agent itself builds only for the game's target) |
+| Agent, host tests | `cd native && sh host-tests.sh` | Only when `native/agent/` changed. The agent is `no_std` and builds only for the game's target, so its pure modules (the view math, the screen rules, the tick stream's registry choice, the click's wait for the crosshair pick) build on their own as host test crates; `native/host-tests.sh` holds the list. A new pure module with tests goes into that list |
 
 Code style follows the existing code: imports with `.ts` extensions, only erasable TypeScript (no enums, namespaces or parameter properties), machine output on stdout and progress on stderr, exit codes 0 ok, 1 findings, 2 usage or prerequisite error, and every problem reported as the one `Diagnostic` shape from `src/core/diagnostic.ts`.
 
@@ -86,18 +86,18 @@ Docs state what the code does now. A status table names the game version it was 
 These hold for anything that drives a real client, by hand or from a test:
 
 - **Only `sculkwire-*` worlds.** Create them through sculkwire (`game_launch`, `createWorld`): single player, multiplayer and every broadcast off. Never open, change or delete another world.
-- **Never the store.** Never click or confirm anything on a store, Marketplace, Minecoins, Realms, Dressing Room or profile screen. The agent refuses UI input on store, Marketplace, Minecoins, Dressing Room and persona screens except `Escape`; do not work around it.
+- **Never the store.** Never click or confirm anything on a store, Minecoins, Marketplace, Realms, Dressing Room or profile/persona editor screen. The agent refuses UI input on store, Marketplace, Minecoins, Dressing Room and persona screens except `Escape`; do not work around it.
 - **Restore every option you change.** `game_settings` records the original value and `game_stop` puts it back. Something changed by hand gets put back by hand.
 - **One driver at a time.** Only one agent or process sends input or commands to the game.
 - **The input lock fails open.** A missing or bad focus signal, an unloaded agent or a crash must never leave the user's keyboard and mouse locked out.
-- **Stop the game properly.** `game_stop`, `sculk game stop` or the launcher's own stop command; never kill the launcher's process group.
+- **Stop the game properly.** `game_stop`, `sculk game stop` or the launcher's own stop command (`mcbe-gdk-linux stop`); never kill the launcher's process group. On Linux, confirm `~/.local/share/mcbe-gdk-linux/profile/.gpu-launch-in-progress.json` is gone afterwards.
 
 ## Where New Things Go
 
 ### A Tool
 
 1. Put it in the feature it belongs to: `src/<feature>/mcp.ts` calls `server.registerTool` with a zod input schema and an `outputSchema`, and returns `structuredContent` plus a one-line text summary. A new feature exports `register(server)` and is listed in `src/features.ts`.
-2. Add the matching CLI command to the feature's `commands` in `src/<feature>/cli.ts` (listed in `src/features.ts` for a new feature).
+2. When the tool answers in one call from a fresh process (a lookup, a validation, a one-shot BDS run, a read through the agent or of the game files), add a CLI command to the feature's `commands` in `src/<feature>/cli.ts`. A tool that works on state the MCP server keeps between calls (a BDS session, the launched client, a `play` job, a profiler capture) has none. The tools without a command are listed in [CLI](README.md#cli).
 3. Keep every call under the client's timeout. Long work (BDS, the client, `play`) runs as a job the tool starts and another tool reads.
 4. Update the docs as above, and add tests for the parsing and the choices the tool makes.
 

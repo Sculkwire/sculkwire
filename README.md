@@ -140,7 +140,9 @@ Details are in [Install and Update](docs/install.md#updates).
 
 ## CLI
 
-Every feature also works from the command line. Installed, the command is `sculk`. In a git checkout, use `node src/cli.ts` instead.
+Most tools also have a command; `sculk --help` lists them. Installed, the command is `sculk`. In a git checkout, use `node src/cli.ts` instead.
+
+Tools that work on state the MCP server keeps between calls have no command: `bds_session_*`, `script_profile`, `game_launch` and the tools on the client it launched (`game_command`, `game_reload`, `game_query`, `game_registry`, `game_screenshot`, `game_input`, `player_act`, `player_job`, `player_state`). `sculk game check` runs a whole launch in one command instead. `command_lookup`, `molang_lookup`, `vanilla_example` and `validate_file` have no command either.
 
 ```sh
 sculk validate path/to/addon            # Exit code 1 when errors are found

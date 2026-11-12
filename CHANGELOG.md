@@ -4,6 +4,18 @@ Release notes for sculkwire. Each `## vX.Y.Z` section becomes the GitHub release
 
 ## Unreleased
 
+- `game_builds`, `game_vanilla_packs` and `game_extract_pack` look for the mcbe-gdk-installer game folder under `SCULKWIRE_GDK_ROOT`, else `$XDG_DATA_HOME/mcbe-gdk-linux`, as `game_launch` already did. Before, they searched only `~/.local/share/mcbe-gdk-linux`.
+- `sculk bds run`: a `reload` or `reload all` typed on stdin rebuilds a Regolith project first, as `bds_session_command` does, so the reload loads the edited sources.
+- The helper pack deployed into test worlds holds only what the game loads (`manifest.json`, `scripts/main.js`); before, its unit test files were copied too.
+
+### Internal
+
+- Shared plumbing lives in `src/core/` (errors, file writes, child processes, CLI entry, MCP results, Regolith builds); every area uses it.
+- `src/features.ts` is the one list of built-in features; `src/cli.ts` and the MCP server read it, and `wireFeatures()` connects them instead of import side effects.
+- `src/gamefiles/` owns the game on disk: installs, `options.txt`, `level.dat`, world names, Wine and Proton prefixes.
+- `src/runtime/engine/` sits below the game client and no longer imports it; the client hands it what it needs. No import cycle is left in `src/`.
+- The agent's method names are kept in one table (`src/runtime/engine/methods.ts`), checked by a test against the agent's `METHODS` and the Protocol table of `docs/engine.md`. CI also builds the `debug-rpc` agent and runs the host tests through `native/host-tests.sh`.
+
 ## v0.1.1
 
 Published again on 2026-11-12 under the same number, now with the fight, the plan runner and the task steps. An install that already has v0.1.1 keeps the first publication: `sculk update` only moves to a higher version, and an installed version folder is reused. To get this one, delete `versions/v0.1.1` in the sculkwire data folder and the `agent/prebuilt-0.1.1` folder in the sculkwire cache folder, then run the installer again.

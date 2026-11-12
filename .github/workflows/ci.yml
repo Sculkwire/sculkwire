@@ -25,10 +25,11 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup target add x86_64-pc-windows-msvc
       - run: cargo build --release --locked --target x86_64-pc-windows-msvc
-      # The agent's pure modules (`look.rs`, `screens.rs`, `registries.rs`, `click.rs`) also build on their own
-      # as host test crates.
+      # The diagnosis build: never published, but it must build too.
+      - run: cargo build --release --locked --target x86_64-pc-windows-msvc --features sculkwire-agent/debug-rpc
+      # The agent's host tests; the module list is in the script.
       - shell: bash
-        run: for m in look screens registries click; do rustc --edition 2021 --test agent/src/$m.rs -o target/$m-test.exe && ./target/$m-test.exe || exit 1; done
+        run: sh host-tests.sh
 
   test:
     strategy:
