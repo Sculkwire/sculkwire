@@ -50,6 +50,7 @@ function entityInfo(e) {
   if (health) out.health = { current: health.currentValue, max: health.effectiveMax };
   // A creeper's fuse, from its own entity events (the `minecraft:is_ignited` component never shows on a lit creeper).
   fuseOf(e, out);
+  heldOf(e, out);
   // Amplifier is 0-based (Slowness II = 1); duration is in ticks.
   const effects = e.getEffects().map((fx) => ({ typeId: fx.typeId, amplifier: fx.amplifier, duration: fx.duration }));
   if (effects.length) out.effects = effects;
@@ -595,7 +596,10 @@ world.afterEvents.dataDrivenEntityTrigger.subscribe(
   },
   { eventTypes: ["minecraft:start_exploding", "minecraft:start_exploding_forced", "minecraft:stop_exploding"] },
 );
-world.afterEvents.entityRemove.subscribe((ev) => FUSES.delete(ev.removedEntityId));
+world.afterEvents.entityRemove.subscribe((ev) => {
+  FUSES.delete(ev.removedEntityId);
+  HELD.delete(ev.removedEntityId);
+});
 
 /** `ignited` for every creeper (true or false, so a reader can trust a false), and the ticks it has burned. */
 function fuseOf(e, out) {
@@ -603,6 +607,61 @@ function fuseOf(e, out) {
   const lit = FUSES.get(e.id);
   out.ignited = lit !== undefined;
   if (lit !== undefined) out.fuseTicks = system.currentTick - lit;
+}
+
+/** The spears, cheapest first, and the mob types the vanilla files give one (behavior pack 1.26.60.5). */
+const SPEARS = ["wooden", "stone", "copper", "iron", "golden", "diamond", "netherite"].map((m) => `minecraft:${m}_spear`);
+const SPEAR_CARRIERS = new Set([
+  "minecraft:zombie",
+  "minecraft:husk",
+  "minecraft:drowned",
+  "minecraft:zombie_pigman",
+  "minecraft:piglin",
+  "minecraft:zombie_villager_v2",
+  "minecraft:skeleton",
+  "minecraft:stray",
+  "minecraft:bogged",
+  "minecraft:parched",
+]);
+/** Main-hand spear by entity id, from the `hasitem` selector: { held, tick read }. Re-read every `HELD_RECHECK_TICKS`. */
+const HELD = new Map();
+const HELD_RECHECK_TICKS = 100;
+/** The tick the last `hasitem` check ran: at most one entity is checked a tick. */
+let heldCheckTick = -1;
+
+/**
+ * `held`: the item id in a mob's main hand (a husk's spear changes how it fights). From its equippable component when
+ * the entity has one; mobs have none in this Script API, so for a type that can carry a spear the game is asked with
+ * the `hasitem` selector, one spear id after the other, for one entity a tick, cached per entity id and re-read every
+ * 5 s. Absent when nothing is held, nothing is known yet, or the API refuses.
+ */
+function heldOf(e, out) {
+  try {
+    const item = e.getComponent("minecraft:equippable")?.getEquipment("Mainhand");
+    if (item?.typeId) {
+      out.held = item.typeId;
+      return;
+    }
+  } catch {}
+  if (!SPEAR_CARRIERS.has(e.typeId)) return;
+  const known = HELD.get(e.id);
+  const now = system.currentTick;
+  if ((known && now - known.at < HELD_RECHECK_TICKS) || heldCheckTick === now) {
+    if (known?.held) out.held = known.held;
+    return;
+  }
+  heldCheckTick = now;
+  let held;
+  for (const id of SPEARS) {
+    try {
+      if (e.runCommand(`testfor @s[hasitem={item=${id},location=slot.weapon.mainhand}]`).successCount > 0) {
+        held = id;
+        break;
+      }
+    } catch {}
+  }
+  HELD.set(e.id, { held, at: now });
+  if (held) out.held = held;
 }
 
 /** The closest living entities (players left out), in the short form the state stream carries. */
@@ -616,6 +675,7 @@ function nearby(p, radius, limit) {
       one.velocity = vec(e.getVelocity());
     } catch {}
     fuseOf(e, one);
+    heldOf(e, one);
     out.push(one);
     if (out.length >= limit) break;
   }
@@ -720,7 +780,10 @@ world.afterEvents.entityHurt.subscribe(
     try {
       out.cause = ev.damageSource.cause;
       const damager = ev.damageSource.damagingEntity;
-      if (damager) out.damager = damager.typeId;
+      if (damager) {
+        out.damager = damager.typeId;
+        out.damagerId = damager.id;
+      }
     } catch {}
     HURTS.push(out);
     if (HURTS.length > MAX_HURTS) HURTS.shift();

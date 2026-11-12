@@ -12,6 +12,10 @@ interface FakeEntity {
   location: Vec;
   velocity?: Vec;
   health?: number;
+  /** The main-hand item id; `throws` makes the equippable component throw. */
+  held?: string;
+  /** A main-hand item only the `hasitem` selector sees (no equippable component, as on mobs). */
+  selectorHeld?: string;
 }
 
 /** A player handle as the fake world lists it: where it says the player stands, and whether the API calls it valid. */
@@ -30,6 +34,8 @@ function loadHelper(entities: FakeEntity[], opts: { players?: FakePlayer[] } = {
   let onQuery: Handler | undefined;
   const handlers = new Map<string, Handler>();
   const on = (name: string) => ({ subscribe: (h: Handler) => void handlers.set(name, h) });
+  /** Commands the helper ran on entities, `<id> <command>`. */
+  const commands: string[] = [];
   const asEntity = (e: FakeEntity) => ({
     id: e.id,
     typeId: e.typeId,
@@ -40,7 +46,22 @@ function loadHelper(entities: FakeEntity[], opts: { players?: FakePlayer[] } = {
     getVelocity: () => e.velocity ?? { x: 0, y: 0, z: 0 },
     getTags: () => [],
     getEffects: () => [],
-    getComponent: (c: string) => (c === "minecraft:health" && e.health !== undefined ? { currentValue: e.health, effectiveMax: 20 } : undefined),
+    runCommand: (cmd: string) => {
+      commands.push(`${e.id} ${cmd}`);
+      const m = /hasitem=\{item=([^,]+),location=slot\.weapon\.mainhand\}/.exec(cmd);
+      return { successCount: m && m[1] === e.selectorHeld ? 1 : 0 };
+    },
+    getComponent: (c: string) => {
+      if (c === "minecraft:health" && e.health !== undefined) return { currentValue: e.health, effectiveMax: 20 };
+      if (c === "minecraft:equippable" && e.held !== undefined)
+        return {
+          getEquipment: (slot: string) => {
+            if (e.held === "throws") throw new Error("fake: equipment unavailable");
+            return slot === "Mainhand" ? { typeId: e.held } : undefined;
+          },
+        };
+      return undefined;
+    },
   });
   const dim = {
     id: "minecraft:overworld",
@@ -111,6 +132,7 @@ function loadHelper(entities: FakeEntity[], opts: { players?: FakePlayer[] } = {
   return {
     lines,
     players,
+    commands,
     advance(ticks: number) {
       for (let i = 0; i < ticks; i++) {
         tick++;
@@ -181,6 +203,51 @@ describe("helper state stream", () => {
     const after = h.lastState().entities?.list[0];
     expect(after).toMatchObject({ ignited: false });
     expect(after?.fuseTicks).toBeUndefined();
+  });
+});
+
+describe("helper held items", () => {
+  it("reports a mob's main-hand item in the stream and the entity query, and nothing when it cannot be read", () => {
+    const h = loadHelper([
+      { id: "1", typeId: "minecraft:husk", location: { x: 3, y: 0, z: 0 }, health: 20, held: "minecraft:iron_spear" },
+      { id: "2", typeId: "minecraft:zombie", location: { x: 4, y: 0, z: 0 }, health: 20 },
+      { id: "3", typeId: "minecraft:zombie", location: { x: 5, y: 0, z: 0 }, health: 20, held: "throws" },
+    ]);
+    h.query({ kind: "stream", every: 1 });
+    h.advance(1);
+    const list = h.lastState().entities?.list ?? [];
+    expect(list[0]).toMatchObject({ held: "minecraft:iron_spear" });
+    expect(list[1]?.held).toBeUndefined();
+    expect(list[2]?.held).toBeUndefined();
+    expect(h.query({ kind: "entity", entityId: "1" })).toMatchObject({ held: "minecraft:iron_spear" });
+  });
+
+  it("asks the game with hasitem when a mob has no equippable component: one entity a tick, cached, spear carriers only", () => {
+    const h = loadHelper([
+      { id: "1", typeId: "minecraft:husk", location: { x: 3, y: 0, z: 0 }, health: 20, selectorHeld: "minecraft:iron_spear" },
+      { id: "2", typeId: "minecraft:zombie", location: { x: 4, y: 0, z: 0 }, health: 20, selectorHeld: "minecraft:diamond_spear" },
+      { id: "3", typeId: "minecraft:spider", location: { x: 5, y: 0, z: 0 }, health: 16 },
+      { id: "4", typeId: "minecraft:husk", location: { x: 6, y: 0, z: 0 }, health: 20 },
+    ]);
+    h.query({ kind: "stream", every: 1 });
+    h.advance(1);
+    // One entity checked this tick: the husk, which holds an iron spear (wooden, stone, copper, then iron).
+    expect(h.lastState().entities?.list[0]).toMatchObject({ held: "minecraft:iron_spear" });
+    expect(h.lastState().entities?.list[1]?.held).toBeUndefined();
+    expect(new Set(h.commands.map((c) => c.split(" ")[0]))).toEqual(new Set(["1"]));
+    expect(h.commands[0]).toBe("1 testfor @s[hasitem={item=minecraft:wooden_spear,location=slot.weapon.mainhand}]");
+    h.advance(3);
+    const list = h.lastState().entities?.list ?? [];
+    expect(list[1]).toMatchObject({ held: "minecraft:diamond_spear" });
+    expect(list[2]?.held).toBeUndefined();
+    expect(list[3]?.held).toBeUndefined();
+    // Cached: no spider asked, and each carrier asked once (all seven spears for the bare husk).
+    expect(h.commands.filter((c) => c.startsWith("3 "))).toEqual([]);
+    expect(h.commands.filter((c) => c.startsWith("4 ")).length).toBe(7);
+    const asked = h.commands.length;
+    h.advance(10);
+    expect(h.commands.length).toBe(asked);
+    expect(h.lastState().entities?.list[0]).toMatchObject({ held: "minecraft:iron_spear" });
   });
 });
 

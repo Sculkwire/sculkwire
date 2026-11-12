@@ -4,7 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { drive, fakeClock, seededRandom } from "../../../testing/faketime.ts";
-import { LIVE_MISS_RATE, sim, simMob, type Sim, type SimMob, type SimOptions } from "../../../testing/fightsim.ts";
+import { LIVE_MISS_RATE, sim, simMob, spearMob, type Sim, type SimMob, type SimOptions } from "../../../testing/fightsim.ts";
 import { PlayerController, type PlayerAction } from "../player.ts";
 import { ENGINE_LATENCY_MS, SWING_OPENS_SHIELD_MS } from "./pack.ts";
 import { play } from "./play.ts";
@@ -209,6 +209,8 @@ describe("fight loop in the measured game, engine route", () => {
         // Melee hits: the arrows (a guessed 50 % of shots every 2.5 s, not measured) are counted apart.
         expect(game.log.hitsTaken - game.log.arrowHits).toBeLessThanOrEqual(4);
         arrows += game.log.arrowHits;
+        // Arrows never mark a zombie as a spear mob: only a melee hit by a spear carrier's type teaches that.
+        expect(trace(pc).some((fr) => has(fr, "spear: learned"))).toBe(false);
         // No target flip between kinds every tick: a switch to or from the creeper holds at least 600 ms (or the creeper burns).
         const frames = trace(pc);
         const creeperTarget = frames.map((fr) => fr.mobs.find((m) => m.target)?.type === "creeper");
@@ -469,6 +471,76 @@ describe("fight loop in the measured game, engine route", () => {
     expect(events("block")).toBe(r.fight?.blocked);
     expect(frames[0]?.mobs[0]).toMatchObject({ type: "zombie", reach: expect.any(Number), coolMs: expect.any(Number) });
   }, 20_000);
+});
+
+describe("husks holding spears (combat/spears3)", () => {
+  const spears3 = () => [spearMob("-1", "minecraft:husk", -2, 10), spearMob("-2", "minecraft:husk", 0, 10), spearMob("-3", "minecraft:husk", 2, 10)];
+  const run = async (seed: number, hideHeld: boolean) => {
+    game?.stop();
+    const mobs = spears3();
+    game = sim(mobs, { missRate: 0.15, missSeed: seed, hideHeld });
+    const pc = new PlayerController(game.world, { clock: fakeClock, random: seededRandom(seed) });
+    await drive(pc.selectInput("engine"));
+    traceFights(pc, true);
+    const r = await fightIn(pc, { timeoutMs: 40_000 });
+    return { r, mobs, hits: game.log.hitsTaken, frames: trace(pc) };
+  };
+
+  it("with the helper's report missing: a husk that hurts from 2.3 or more is taken to hold a spear, then at most 2 more hits (one from each other husk), all three killed within 20 s", async () => {
+    for (let seed = 1; seed <= 10; seed++) {
+      const { r, mobs, frames } = await run(seed, true);
+      expect(mobs).toEqual([]);
+      expect(r.fight?.timeMs).toBeLessThan(20_000);
+      const learned = frames.findIndex((fr) => has(fr, "spear: learned"));
+      expect(learned).toBeGreaterThanOrEqual(0);
+      // The hurts after the first (the one it learns from) up to the end: at most 2.
+      const firstHurt = frames.findIndex((fr) => has(fr, "hurt"));
+      expect(learned).toBeGreaterThanOrEqual(firstHurt);
+      // Each husk is learned from its own first hit (the log names the damager): at most one more for each of the two others.
+      expect(frames.slice(firstHurt + 1).filter((fr) => has(fr, "hurt")).length).toBeLessThanOrEqual(2);
+      // No shield against a spear mob once it is known.
+      expect(frames.slice(learned).some((fr) => fr.shield)).toBe(false);
+    }
+  }, 120_000);
+
+  it("seen holding spears: at most 0.3 hits a fight on average, all three killed within 15 s, never a crit jump, never standing in a charge, never faster than 3.5 near one", async () => {
+    let hits = 0;
+    for (let seed = 1; seed <= 10; seed++) {
+      const { r, mobs, hits: taken, frames } = await run(seed, false);
+      hits += taken;
+      expect(mobs).toEqual([]);
+      expect(r.fight?.timeMs).toBeLessThan(15_000);
+      expect(frames.some((fr) => has(fr, "jump"))).toBe(false);
+      // The feet give ground while a husk charges inside 3.3 (3.25 in the trace: the footwork reads the crowd carried
+      // forward a few hundredths further than the frame's rounding).
+      for (const fr of frames) if (fr.mobs.some((m) => m.dist <= 3.25 && m.closing > 1)) expect(fr.foot === "retreat" || fr.fwd < -0.1).toBe(true);
+      // Never faster than 3.5 blocks a second with one within its 3.35 reach (live, every spear hit from 3.0 to 3.35
+      // came with the player at 4.1 or more), measured over 100 ms of positions.
+      for (const [k, fr] of frames.entries()) {
+        const back = frames.slice(0, k).findLast((g) => fr.t - g.t >= 100);
+        if (!back || !fr.mobs.some((m) => m.dist <= 3.35)) continue;
+        expect((Math.hypot(fr.x - back.x, fr.z - back.z) / (fr.t - back.t)) * 1000).toBeLessThanOrEqual(3.5);
+      }
+    }
+    expect(hits / 10).toBeLessThanOrEqual(0.3);
+  }, 120_000);
+
+  it("leaves bare-handed melee frame for frame as it was: a mob holding another item is fought the same as one holding nothing", async () => {
+    for (let seed = 1; seed <= 3; seed++) {
+      const frames: string[] = [];
+      for (const held of [undefined, "minecraft:iron_shovel"]) {
+        game?.stop();
+        const mobs = zombies3().map((m) => (held ? { ...m, held } : m));
+        game = sim(mobs, { missRate: 0.15, missSeed: seed });
+        const pc = new PlayerController(game.world, { clock: fakeClock, random: seededRandom(seed) });
+        await drive(pc.selectInput("engine"));
+        traceFights(pc, true);
+        await fightIn(pc, { timeoutMs: 40_000 });
+        frames.push(JSON.stringify(trace(pc)));
+      }
+      expect(frames[1]).toBe(frames[0]);
+    }
+  }, 120_000);
 });
 
 describe("the melee tail over 100 seeds (mob readings two ticks old, as live)", () => {

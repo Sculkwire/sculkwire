@@ -9,15 +9,15 @@
  * lighting its fuse (about 3 blocks) and gets out past 7 blocks, shield up, once it burns, shoots a creeper from range
  * when there is a bow, weaves toward archers, waits for a leaping spider to land, and moves on to the next hostile.
  */
-import { angleDiff, horizontalDistance, turnDurationMs, yawTo, type EntityInfo, type Follow, type Loadout, type PlayerController } from "../player.ts";
+import { angleDiff, horizontalDistance, turnDurationMs, yawTo, type EntityInfo, type Follow, type HurtLog, type Loadout, type PlayerController } from "../player.ts";
 import { navigate } from "../nav/navigate.ts";
 import { CROWD_RADIUS, crowdMove, isolated, pickDuelTarget } from "./crowd.ts";
 import { clearRun, CLOSE_IN_MARGIN, CLOSE_IN_SETTLE_MS, closeInTicks, CREEPER_MARGIN, CREEPER_STANDING, creeperStandFrom, STEP_TAP_MS, STRUCK_THROW, STRUCK_THROW_MS, CREEPER_START, CREEPER_STOP, creeperMove, critSafe, crowdedCreeper, findCover, type FuseMemory, openHeading, readyInMs, spiderAirborne, trackFuse, weaveDeg } from "./defense.ts";
 import { gridFor, type GridCache } from "../nav/grid.ts";
 import { bestWeaponSlot, bowSlot, hasShield } from "./items.ts";
 import { HIT_COOLDOWN_MS, meleePlan, type PendingSwing, swingOutcome } from "./melee.ts";
-import { isHostile, MELEE_COOLDOWN_MS, meleeReach, mobInfo, shortType, type MobInfo } from "./mobs.ts";
-import { STRIKE_AIM_DEG, AFTER_BLOCK_MS, attackInMs, attackers, ENGINE_LATENCY_MS, GUARD_STEP_OUT_MS, ROOM_NEEDED, KEYBOARD_LATENCY_MS, nextAttackMs, NO_WINDOW_MS, packMove, shieldSwingOk, type PackMob, type Stance, strikeDistance, strikeTarget, STRIKE_DIST, STRIKE_REACH } from "./pack.ts";
+import { holdsSpear, isHostile, SPEAR_CARRIERS, MELEE_COOLDOWN_MS, meleeReach, mobInfo, shortType, type MobInfo } from "./mobs.ts";
+import { STRIKE_AIM_DEG, AFTER_BLOCK_MS, attackInMs, attackers, ENGINE_LATENCY_MS, GUARD_STEP_OUT_MS, ROOM_NEEDED, KEYBOARD_LATENCY_MS, nextAttackMs, NO_WINDOW_MS, packMove, shieldSwingOk, type PackMob, type Stance, SPEAR_OPENING_STRIKE, strikeDistance, strikeTarget, STRIKE_DIST, STRIKE_REACH, WALKING_IN } from "./pack.ts";
 import { combatStats, fightText, logEvent, traceFrame, type CombatStats, type TraceEvent, type TraceMob } from "./stats.ts";
 import type { Death } from "./play.ts";
 import type { FightStats, SkillResult } from "./types.ts";
@@ -72,6 +72,35 @@ export async function pickTarget(pc: PlayerController, type: string | undefined,
   }
   const e = await pc.world.nearest(wanted, radius);
   return e && fits(e) ? e : undefined;
+}
+
+/** The helper's player hurts after game tick `since`: the world's own `hurts`, else its `hurts` query. */
+async function hurtLog(pc: PlayerController, since: number): Promise<HurtLog | undefined> {
+  if (pc.world.hurts) return pc.world.hurts(since).catch(() => undefined);
+  const r = (await pc.world.query?.("hurts", { since }).catch(() => undefined)) as { tick?: unknown; hurts?: unknown } | undefined;
+  return r && typeof r.tick === "number" && Array.isArray(r.hurts) ? { tick: r.tick, hurts: r.hurts as HurtLog["hurts"] } : undefined;
+}
+
+/** A melee mob that hurts the player from this far or more (and not past `SPEAR_LEARN_MAX`) is taken to hold a spear. */
+export const SPEAR_LEARN_DIST = 2.3;
+export const SPEAR_LEARN_MAX = 3.5;
+
+/** A hostile mob the fight has struck still alive within this many blocks keeps a fight over `all` going. */
+export const FOUGHT_RADIUS = 24;
+
+/**
+ * The nearest mob the fight struck that is still alive within `FOUGHT_RADIUS`, even one set aside as gone (a spear
+ * husk backs off to 9 to 11 blocks after its charge; live, the fight ended there and `play` idled to its timeout).
+ * Each one is taken up again at most `tries` times.
+ */
+async function foughtNear(pc: PlayerController, struck: ReadonlyMap<string, unknown>, again: Map<string, number>, tries = 5): Promise<EntityInfo | undefined> {
+  if (!pc.world.entities || struck.size === 0) return undefined;
+  const me = await pc.world.state(300);
+  const list = (await pc.world.entities(FOUGHT_RADIUS).catch(() => [] as EntityInfo[])).filter((e) => struck.has(e.id) && (e.health?.current ?? 1) > 0 && (again.get(e.id) ?? 0) < tries);
+  list.sort((a, b) => horizontalDistance(a.location, me.location) - horizontalDistance(b.location, me.location));
+  const e = list[0];
+  if (e) again.set(e.id, (again.get(e.id) ?? 0) + 1);
+  return e;
 }
 
 /** Hold the hardest-hitting weapon in the hotbar. */
@@ -203,6 +232,8 @@ interface FightContext {
   stepOutSince?: number;
   /** Free run along the retreat heading, as the footwork last read it. */
   room: number;
+  /** The helper's hurt log read up to this game tick (undefined: no log to learn spears from). */
+  hurtTick?: number;
   lastHealth?: number;
   lastOffhand?: number;
   hurtAt: number;
@@ -281,6 +312,10 @@ export async function fight(pc: PlayerController, args: FightArgs, signal?: Abor
   }
   // The death log's tick now: the player's kills are the deaths after it.
   deathTick = (await deathLog(pc, Number.MAX_SAFE_INTEGER))?.tick;
+  if (pc.world.hurts || pc.world.query) {
+    const hurtsNow = (await hurtLog(pc, Number.MAX_SAFE_INTEGER))?.tick;
+    if (hurtsNow !== undefined) ctx.hurtTick = hurtsNow;
+  }
   const loadout = await pc.world.loadout?.().catch(() => undefined);
   kit.shield = hasShield(loadout?.armor);
   const bow = loadout ? bowSlot(loadout.hotbar) : undefined;
@@ -300,6 +335,8 @@ export async function fight(pc: PlayerController, args: FightArgs, signal?: Abor
   })();
   let arrows = 0;
   let cancelled = false;
+  /** How often each struck mob was taken up again after it was set aside (`foughtNear`). */
+  const again = new Map<string, number>();
   try {
     while (target) {
       if (kit.bow && mobInfo(target.typeId).kind === "exploder") {
@@ -321,8 +358,9 @@ export async function fight(pc: PlayerController, args: FightArgs, signal?: Abor
       }
       if (d.outcome === "timeout") break;
       if (!ctx.all) break;
-      // The next mob without stopping: the crowd's when it has one, else a fresh look around.
-      target = d.next ?? (await pickTarget(pc, type, radius, ctx.skip));
+      // The next mob without stopping: the crowd's when it has one, else a fresh look around, else one it fought that is
+      // still alive near.
+      target = d.next ?? (await pickTarget(pc, type, radius, ctx.skip)) ?? (await foughtNear(pc, kit.struck, again));
     }
   } catch (err) {
     // Cancelled (preempted by `play`, the request cancelled): still report what the fight did.
@@ -607,6 +645,7 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
             hittableMs,
             strikeNow: hittableMs <= ctx.latencyMs && aimed,
             ...(mi.axe ? { axe: true } : {}),
+            ...(holdsSpear(m) || stats.spears.has(m.id) ? { spear: true } : {}),
           };
         })
         .sort((a, b) => a.dist - b.dist);
@@ -617,6 +656,30 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
         const by = archer ? [] : attackers(near, !(lost > 0));
         for (const id of by) nextAttack.set(id, nextAttackMs(now - HURT_SEEN_LAG_MS, !(lost > 0), near.find((n) => n.id === id)?.info.cooldownMs ?? MELEE_COOLDOWN_MS));
         if (blockedNow) ctx.blockedAt = now;
+        // A melee mob that hurt the player from `SPEAR_LEARN_DIST` or more holds a spear, whatever the helper said (it
+        // may not see mobs' hands): fought as one from then on. Live, a husk's spear hit from 2.3 to 2.9; a bare zombie's
+        // readings at its hit are 1.6 to 2.5, median 2.0.
+        // Only from a hurt the helper's log puts down to a melee attack (`entityAttack`) by a mob type that can carry
+        // a spear: never an arrow, a blast or anything else (live `mixed`: a skeleton's arrows from 10 blocks marked the
+        // zombies and broke the creeper's handling). The damager's id names the one mob; without it, its type's mobs
+        // at that distance.
+        if (lost > 0 && ctx.hurtTick !== undefined) {
+          const log = await hurtLog(pc, ctx.hurtTick);
+          if (log) {
+            ctx.hurtTick = log.tick;
+            for (const hurt of log.hurts) {
+              if (hurt.cause !== "entityAttack" || !hurt.damager || !SPEAR_CARRIERS.has(hurt.damager)) continue;
+              for (const n of near) {
+                if (hurt.damagerId ? n.id !== hurt.damagerId : n.m.typeId !== hurt.damager) continue;
+                if (n.dist < SPEAR_LEARN_DIST || n.dist > SPEAR_LEARN_MAX || n.spear || stats.spears.has(n.id)) continue;
+                stats.spears.add(n.id);
+                n.spear = true;
+                if (!ev?.includes("spear: learned")) ev?.push("spear: learned");
+                logEvent(stats, `${shortType(n.m.typeId)} ${n.id} hurt the player from ${n.dist.toFixed(2)}: taken to hold a spear`);
+              }
+            }
+          }
+        }
         if (lost > 0) logEvent(stats, `hurt ${lost.toFixed(1)} -> ${s.health} fighting ${shortType(target.typeId)}, credited ${by.map((id) => shortType(near.find((n) => n.id === id)?.m.typeId ?? "?")).join(", ") || "none"}`, ...ctx.frames.map((fr) => `  ${fr.at - now} ${fr.line}`));
       }
       if (ctx.retarget && mobs.length > 1) {
@@ -733,6 +796,10 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
         // line took the swing and then hit the player standing there.)
         else if (keepOut !== undefined && (move !== "strike" || blockedLine)) {
           foot = `${move} keep-out`;
+          // On a burning fuse the keep-out ends the strike attempt: the feet give ground from the zombie and then from
+          // the creeper for the rest of this fuse, and the creeper is taken on its next approach (live, run 4 of
+          // `mixed`: step and keep-out took turns every tick with a zombie at 2.3 to 2.8 until the creeper blew).
+          if (lit) fled = { id: target.id, back: true };
           await h.walk(openHeading({ me: s.location, desired: keepOut, spreadDeg: 60, mobs: avoid, clear }), false);
         }
         // A creeper that comes on by itself is met standing: walking into it on top of the input latency would carry
@@ -806,7 +873,7 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
           facing = undefined;
           h.track(f, aimHeight, 10);
         }
-        await h.walk(mv.heading, mv.sprint && !ctx.blocking);
+        await h.walk(mv.heading, mv.sprint && !ctx.blocking, mv.speed);
         if (mv.foot === "advance") {
           if (!(Math.hypot(s.location.x - moved.x, s.location.z - moved.z) < 0.3)) moved = { at: now, x: s.location.x, z: s.location.z };
           else if (now - moved.at > 600 && s.onGround) {
@@ -882,11 +949,13 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
       // about 1000 misses at 3.05 or more). A melee mob also by its reading's centre distance, `strikeDistance` (2.9
       // walking in, 2.99 else). The eye distance keeps a swing from the top of a jump from going out (live, 58 of 69
       // swings in the air at 2.6 to 2.85 missed: the raised eye is out of reach of the aim point).
-      const landsIn = (eye: number, centre: number, closingSpeed: number, isCreeper: boolean) => eye <= STRIKE_REACH && (isCreeper || centre <= strikeDistance(closingSpeed));
+      // A spear mob backing off is struck from 2.8 (its reading lags behind it, as a walking-in one's lags ahead).
+      const landsIn = (eye: number, centre: number, closingSpeed: number, isCreeper: boolean, spear = false) =>
+        eye <= STRIKE_REACH && (isCreeper || centre <= (spear && closingSpeed < -WALKING_IN ? SPEAR_OPENING_STRIKE : strikeDistance(closingSpeed)));
       const eyeTo = (m: EntityInfo) => Math.hypot(m.location.x - s.location.x, m.location.y + 1.0 - s.location.y - EYE_HEIGHT, m.location.z - s.location.z);
       const lookedAt = pc.input === "engine" && look && look.id !== target.id ? near.find((n) => n.id === look.id) : undefined;
-      const other = lookedAt && landsIn(eyeTo(lookedAt.m), lookedAt.dist, lookedAt.closing, false) ? lookedAt.m : undefined;
-      const inStrike = landsIn(eyeDist, dist, closing, exploder);
+      const other = lookedAt && landsIn(eyeTo(lookedAt.m), lookedAt.dist, lookedAt.closing, false, lookedAt.spear === true) ? lookedAt.m : undefined;
+      const inStrike = landsIn(eyeDist, dist, closing, exploder, near.find((n) => n.id === target.id)?.spear === true);
       const aimedAt = look?.id === target.id && inStrike && aimError <= tolerance * 2;
       // With the view on the target (before the helper's crosshair reading shows it), the distance decides.
       const aimedClose = inStrike && aimError <= tolerance;
@@ -924,7 +993,8 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
       const strikeAt = onTarget ? target : shieldOpen && other && hittable(other.id) ? other : undefined;
       // Critical hits only when no melee mob can attack before the falling swing (the jump leaves the player unable to
       // swing for its rise), never from behind the shield, and in place: a jump forward lands in the mob's reach.
-      const critsNow = ctx.crits && !exploder && !info.climbs && !ctx.blocking && isolated(s.location, target.id, mobs) && critSafe(near.map((n) => ({ ...n, closing: Math.max(n.closing, n.speed), coolMs: n.dueMs })));
+      // Never against a spear mob near: the jump holds the player in place for its charge.
+      const critsNow = ctx.crits && !exploder && !info.climbs && !near.some((n) => n.spear && n.dist < 8) && !ctx.blocking && isolated(s.location, target.id, mobs) && critSafe(near.map((n) => ({ ...n, closing: Math.max(n.closing, n.speed), coolMs: n.dueMs })));
       const plan = meleePlan({
         now,
         lastHit: stats.struckAt.get((strikeAt ?? target).id) ?? Number.NEGATIVE_INFINITY,

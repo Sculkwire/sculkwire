@@ -168,12 +168,13 @@ function notifyProgress(extra: Extra, progress: number, total: number | undefine
 function playText(p: PlayResult): string {
   const s = p.stats;
   const killed = Object.entries(s.killed).map(([t, n]) => `${n} ${t}`).join(", ");
+  const others = Object.entries(s.otherDeaths).map(([t, n]) => `${n} ${t}`).join(", ");
   const lines = [
     `play stopped by ${p.stoppedBy} after ${p.steps} tactic(s) in ${(p.durationMs / 1000).toFixed(1)} s: ${p.message}`,
     `goal (${p.goalCheck.kind}): ${p.goalCheck.progress}`,
     ...p.plan.map((r, i) => `  ${i + 1}. ${r.kind} ${r.status}${r.retries ? `, ${r.retries} retries` : ""}: "${r.text}": ${r.message}`),
     ...(p.orders.stance ? [`stance ${p.orders.stance}`] : []),
-    `kills ${s.kills}${killed ? ` (${killed})` : ""}, hits ${s.hits} (${s.crits} critical) and ${s.misses} misses of ${s.swings} swings, took ${s.hitsTaken} hits for ${s.damageTaken} damage, blocked ${s.blocked}, deaths ${s.deaths}${s.health !== undefined ? `, health ${s.health}` : ""}`,
+    `kills ${s.kills}${killed ? ` (${killed})` : ""}${others ? `, other deaths ${others}` : ""}, hits ${s.hits} (${s.crits} critical) and ${s.misses} misses of ${s.swings} swings, took ${s.hitsTaken} hits for ${s.damageTaken} damage, blocked ${s.blocked}, deaths ${s.deaths}${s.health !== undefined ? `, health ${s.health}` : ""}`,
     `${s.decisions} decisions`,
   ];
   for (const t of p.trace.slice(-5)) lines.push(`  ${stepText(t)}`);
@@ -668,6 +669,9 @@ export function register(server: McpServer): void {
         "steps are done and there has been nothing to do for 5 s (no hostile near), the run stops with goal_unknown, " +
         "quoting that part and listing the forms play understands with an example each; a goal that names a duration " +
         "(\"for 30 seconds\") or says to survive or defend runs to its time. `play` runs in the background and the call returns at once with a job id. " +
+        "A kill step counts its targets that died by another mob's attack within its radius (spear husks run each " +
+        "other through) next to the player's kills, and stops with targets_gone once none of its targets is left within " +
+        "the radius before the count is reached. " +
         "Follow it with player_job (status, wait, stop), which returns the current plan step while it runs and, once it " +
         "ends, the stop reason, the plan (per step: kind, done or not, message, task actions and inventory change), " +
         "kills, hits, misses, critical hits, " +

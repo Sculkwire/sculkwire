@@ -78,6 +78,11 @@ export interface GoalContext {
   kills: ReadonlyMap<string, string>;
   /** Entity id -> type of every entity `use_on` hit. */
   usedOn: ReadonlyMap<string, string>;
+  /**
+   * Entity id -> type and killer of every death not by the player of a mob seen within the goal radius during the
+   * run (spear husks run each other through): a kill goal's target that died is gone, whoever killed it.
+   */
+  otherDeaths?: ReadonlyMap<string, { typeId: string; killer?: string }>;
 }
 
 export interface GoalCheck {
@@ -97,8 +102,15 @@ export function checkGoal(goal: Goal, ctx: GoalContext): GoalCheck {
   switch (goal.kind) {
     case "kill": {
       const what = goal.type ? shortType(goal.type) : "hostile";
-      const killed = [...ctx.kills.entries()].filter(([, typeId]) => matches(goal.type, typeId, MOBS[shortType(typeId)]?.hostile === true)).length;
-      if (goal.count !== undefined) return { known: true, done: killed >= goal.count, progress: `${killed} of ${goal.count} ${what} killed` };
+      const isTarget = (typeId: string) => matches(goal.type, typeId, MOBS[shortType(typeId)]?.hostile === true);
+      const killed = [...ctx.kills.values()].filter(isTarget).length;
+      const others = [...(ctx.otherDeaths?.values() ?? [])].filter((d) => isTarget(d.typeId));
+      if (goal.count !== undefined) {
+        if (others.length === 0) return { known: true, done: killed >= goal.count, progress: `${killed} of ${goal.count} ${what} killed` };
+        const by = [...new Set(others.map((d) => (d.killer ? `another ${shortType(d.killer)}` : "something else")))].join(" or ");
+        const dead = killed + others.length;
+        return { known: true, done: dead >= goal.count, progress: `${dead} of ${goal.count} ${what} dead (${killed} killed by the player, ${others.length} by ${by})` };
+      }
       const left = ctx.map.entities.filter((e) => matches(goal.type, e.typeId, e.hostile) && e.distance <= goal.radius).length;
       return { known: true, done: left === 0, progress: `${killed} ${what} killed, ${left} left within ${goal.radius} blocks` };
     }

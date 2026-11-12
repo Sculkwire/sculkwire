@@ -52,9 +52,9 @@ function fakeLoop(steps: number, everyMs: number, log: string[] = []): PlayRunne
       message,
       durationMs: 0,
       goalCheck: { kind: "free", known: false, progress: "" },
-      plan: [{ text: "g", kind: "free", by: "builtin", status: "stopped", ok: false, message: "", ms: 0 }],
+      plan: [{ text: "g", kind: "free", status: "stopped", ok: false, message: "", ms: 0 }],
       orders: {},
-      stats: { decisions: trace.length, kills: 0, killed: {}, swings: 0, hits: 0, misses: 0, crits: 0, hitsTaken: 0, damageTaken: 0, blocked: 0, deaths: 0 },
+      stats: { decisions: trace.length, kills: 0, killed: {}, otherDeaths: {}, swings: 0, hits: 0, misses: 0, crits: 0, hitsTaken: 0, damageTaken: 0, blocked: 0, deaths: 0 },
       trace,
     };
   };

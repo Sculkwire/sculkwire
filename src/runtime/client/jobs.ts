@@ -27,7 +27,7 @@ export interface PlayJobInfo {
   progress: PlayProgress;
   /**
    * Why the job ended, present once it has: the outside reason when it was stopped (player_job stop, a new play job,
-   * game_stop, shutdown), else the play loop's own `stoppedBy` (`goal_done`, `timeout`, `died`, `error`, `goal_unknown`), and `error`
+   * game_stop, shutdown), else the play loop's own `stoppedBy` (`goal_done`, `timeout`, `died`, `error`, `goal_unknown`, `targets_gone`), and `error`
    * when the run threw.
    */
   stopReason?: string;

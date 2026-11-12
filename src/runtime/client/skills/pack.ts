@@ -23,6 +23,7 @@
 import { angleDiff } from "../player.ts";
 import { escapeYaw } from "./flee.ts";
 import { BACKPEDAL_SPEED, openHeading, SHIELD_RAISE_MS } from "./defense.ts";
+import { SPEAR_HIT_DIST } from "./mobs.ts";
 
 /** How the fight uses the shield: `auto` (`kite`, plus the shield boxed in), `kite` (never: footwork only), `guard` (always near mobs). */
 export const STANCES = ["auto", "kite", "guard"] as const;
@@ -63,6 +64,8 @@ export interface PackMob {
   strikeNow?: boolean;
   /** It swings an axe: a hit on the raised shield disables the shield. */
   axe?: boolean;
+  /** It holds a spear (`holdsSpear`): it charges, hurts only while closing fast, then backs off and comes again. */
+  spear?: boolean;
 }
 
 export interface PackInput {
@@ -96,6 +99,8 @@ export interface PackMove {
   /** World yaw to walk toward (undefined: stand). */
   heading?: number;
   sprint: boolean;
+  /** Fraction of the walking speed (undefined: full): giving ground to a spear just fast enough. */
+  speed?: number;
   /** Turn the view to this world yaw instead of onto a mob: the pack is beside the player and must get in front. */
   face?: number;
   /** Free run (blocks) along the retreat heading. */
@@ -273,11 +278,80 @@ export function bearingArc(bearings: readonly number[]): { width: number; middle
   return { width, middle: start + width / 2 };
 }
 
+/**
+ * Against a spear: the feet give ground once a spear mob charging is this close (centre to centre): its hit lands from
+ * 3.35 (`SPEAR_HIT_DIST`; live round 2), plus the distance it charges in the input latency and a tick.
+ */
+export const SPEAR_GIVE_DIST = 3.8;
+/**
+ * Giving ground, the two still close at this much (blocks a second), under the spear's 0.92 (`SPEAR_MIN_CLOSING`): it
+ * comes on slowly without its charge hurting.
+ */
+export const SPEAR_SAFE_CLOSING = 0.3;
+/**
+ * The feet never move faster than this (blocks a second) with a spear mob within `SPEAR_GIVE_DIST`: live (round 2),
+ * all 8 spear hits came with the husk at 3.0 to 3.35 and the player at 4.1 to 5.7 (sprinting after it, or backing off
+ * at full speed); none with the player standing or walking slowly there.
+ */
+export const SPEAR_SAFE_SPEED = 3.0;
+/** A spear mob backing off is chased at a sprint only beyond this; nearer, at its retreat speed plus `SPEAR_CHASE_GAIN`. */
+export const SPEAR_SPRINT_DIST = 5;
+export const SPEAR_CHASE_GAIN = 0.8;
+/** A spear mob charging within this is waited for standing, not walked up to. */
+export const SPEAR_WAIT_DIST = 7;
+/** A spear mob backing off (opening faster than `WALKING_IN`) is struck from this reading: it lags behind the mob. */
+export const SPEAR_OPENING_STRIKE = 2.8;
+
+/**
+ * The feet against spear mobs, or undefined when none is near enough to decide them:
+ * - One within `SPEAR_GIVE_DIST` the hand can strike now (swing ready, view on it): step in to the strike distance at
+ *   `SPEAR_SAFE_SPEED` (or stand once there: the swing goes this tick); the strike is short.
+ * - Else one charging within `SPEAR_GIVE_DIST`: give ground at its speed less `SPEAR_SAFE_CLOSING`.
+ * - Else one standing within its reach plus 0.15: back off at `SPEAR_SAFE_SPEED` (never linger at 3.0 to 3.35).
+ * - The target backing off: after it, sprinting beyond `SPEAR_SPRINT_DIST`, nearer at its retreat speed plus
+ *   `SPEAR_CHASE_GAIN`, never toward another one charging within 2 blocks of `SPEAR_GIVE_DIST`.
+ */
+function spearFootwork(near: readonly PackMob[], i: PackInput): Omit<PackMove, "room"> | undefined {
+  const spears = near.filter((m) => m.spear);
+  if (spears.length === 0) return undefined;
+  const safe = SPEAR_SAFE_SPEED / BACKPEDAL_SPEED;
+  const close = spears.filter((m) => m.dist <= SPEAR_GIVE_DIST);
+  const target = spears.find((m) => m.id === i.targetId);
+  const away = (from: readonly PackMob[], speed: number, reason: string): Omit<PackMove, "room"> => ({ foot: "retreat", shield: false, heading: retreatHeading(from, i.room), sprint: false, speed, reason });
+  // One charging: give ground at its speed less `SPEAR_SAFE_CLOSING`, struck or not, the hand striking it on the way
+  // when it reads in the strike distance. Standing, its contact hit lands before the knockback of a swing at 2.9 does
+  // (it lands 3 ticks after the hit); faster, the spear lands from 3.35.
+  const charging = close.filter((m) => m.closing > 0);
+  if (charging.length > 0) {
+    const fastest = charging.reduce((a, b) => (b.closing > a.closing ? b : a));
+    return away(charging, Math.max(0.15, Math.min(safe, (fastest.closing - SPEAR_SAFE_CLOSING) / BACKPEDAL_SPEED)), `giving ground to ${fastest.id}'s spear`);
+  }
+  // One charging farther out: wait for it standing (walking in on top of its charge runs onto the spear).
+  const coming = spears.find((m) => m.closing > 0 && m.dist <= SPEAR_WAIT_DIST);
+  if (coming) return { foot: "hold", shield: false, sprint: false, reason: `waiting for ${coming.id}'s charge` };
+  // Not charging: step in to the strike distance only with the swing ready and the view on it, and strike.
+  if (target && target.dist <= SPEAR_GIVE_DIST && target.strikeNow === true && target.hittableMs === 0) {
+    if (target.dist <= (target.closing < -WALKING_IN ? SPEAR_OPENING_STRIKE : strikeDistance(target.closing))) return { foot: "hold", shield: false, sprint: false, reason: `striking ${target.id} inside its spear's reach` };
+    return { foot: "advance", shield: false, heading: target.bearing, sprint: false, speed: safe, reason: `stepping in to strike ${target.id}` };
+  }
+  const inReach = close.filter((m) => m.dist <= SPEAR_HIT_DIST + 0.15);
+  if (inReach.length > 0) return away(inReach, safe, `out of ${inReach[0]?.id}'s spear reach`);
+  if (target && target.closing < 0 && target.dist > SPEAR_GIVE_DIST) {
+    const charges = spears.some((m) => m.id !== target.id && m.closing > 0 && m.dist <= SPEAR_GIVE_DIST + 2);
+    if (charges) return undefined;
+    if (target.dist > SPEAR_SPRINT_DIST) return { foot: "advance", shield: false, heading: target.bearing, sprint: Math.abs(angleDiff(i.view, target.bearing)) < 30, reason: `after ${target.id}, backing off with its spear` };
+    const speed = Math.max(0.15, Math.min(safe, (-target.closing + SPEAR_CHASE_GAIN) / BACKPEDAL_SPEED));
+    return { foot: "advance", shield: false, heading: target.bearing, sprint: false, speed, reason: `closing on ${target.id}, backing off with its spear` };
+  }
+  return undefined;
+}
+
 /** What the player does about the melee mobs around this tick. */
 export function packMove(i: PackInput): PackMove {
   const lead = raiseLeadMs(i.latencyMs);
-  const shieldOk = i.hasShield && i.stance !== "kite";
   const near = i.mobs.filter((m) => m.dist < 12);
+  // No shield with a spear mob near: live, 19 spear hits of 34 came through a raised shield.
+  const shieldOk = i.hasShield && i.stance !== "kite" && !near.some((m) => m.spear);
   if (near.length === 0) return { foot: "hold", shield: false, sprint: false, room: i.room(i.view + 180), reason: "no melee mob near" };
   const timed = near.map((m) => ({ m, at: attackInMs(m) })).sort((a, b) => a.at - b.at);
   const retreatYaw = retreatHeading(near, i.room);
@@ -285,6 +359,10 @@ export function packMove(i: PackInput): PackMove {
   const move = (m: Omit<PackMove, "room">): PackMove => ({ ...m, room });
   const retreat = (reason: string): PackMove => move({ foot: "retreat", shield: false, heading: retreatYaw, sprint: false, reason });
   const guard = (reason: string): PackMove => move({ foot: "guard", shield: true, sprint: false, reason });
+
+  // Spear mobs (live, `combat/spears3`): never stand in reach of one that cannot be struck, never move fast near one.
+  const spearMove = spearFootwork(near, i);
+  if (spearMove) return move(spearMove);
 
   // Mobs beside or behind, about to have the player in reach: the shield does not cover them.
   const window = lead + RAISE_SLACK_MS;

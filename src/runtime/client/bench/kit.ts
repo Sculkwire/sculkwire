@@ -73,6 +73,8 @@ export function combat(
         skeletonDmg: by(/skeleton|arrow/),
         spiderDmg: by(/spider/),
         exploded: o.exploded,
+        // Spawned or not, mobs near that died by something other than the player (spear husks hit each other).
+        otherDeaths: Object.values(o.play?.stats.otherDeaths ?? {}).reduce((n, k) => n + k, 0),
       };
       if (o.frames) {
         const { hits: _traceHits, aimErrAtSwing, ...trace } = traceMetrics(o.frames);

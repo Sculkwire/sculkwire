@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { attackers, bearingArc, ENGINE_LATENCY_MS, feetClear, nextAttackMs, packMove, raiseLeadMs, shieldSwingOk, strikeTarget, SWING_OPENS_SHIELD_MS, type PackInput, type PackMob } from "./pack.ts";
+import { attackers, bearingArc, ENGINE_LATENCY_MS, feetClear, nextAttackMs, packMove, raiseLeadMs, shieldSwingOk, SPEAR_SAFE_CLOSING, strikeTarget, SWING_OPENS_SHIELD_MS, type PackInput, type PackMob } from "./pack.ts";
 
 /** A zombie `dist` blocks away, `off` degrees off the view (the view looks at yaw 0), straight on its axis by default. */
 const zombie = (id: string, dist: number, off = 0, extra: Partial<PackMob> = {}): PackMob => ({
@@ -153,6 +153,26 @@ describe("pack hand and attack clocks", () => {
     expect(packMove(input([zombie("a", 2.6, 38, { strikeInMs: 450 })]))).toMatchObject({ foot: "retreat" });
     // Within the 2.5 the readings show hits from, coming in, the hand not ready: back.
     expect(packMove(input([zombie("a", 2.45, 0, { strikeInMs: 150 })]))).toMatchObject({ foot: "retreat" });
+  });
+
+  it("gives ground to a charging spear just fast enough, steps in only to strike, and chases one backing off no faster than it can stand", () => {
+    const spear = (dist: number, closing: number, extra: Partial<PackMob> = {}) => zombie("s", dist, 0, { spear: true, closing, speed: 2.2, strikeNow: true, ...extra });
+    // Charging at 2.2 inside 3.8: back at 2.2 less 0.3 (about 0.44 of the walk), struck or not.
+    const give = packMove(input([spear(3.6, 2.2)]));
+    expect(give).toMatchObject({ foot: "retreat" });
+    expect(give.speed).toBeCloseTo((2.2 - SPEAR_SAFE_CLOSING) / 4.32, 2);
+    expect(packMove(input([spear(2.85, 2.2, { hittableMs: 400 })])).speed).toBeCloseTo((2.2 - SPEAR_SAFE_CLOSING) / 4.32, 2);
+    // Charging farther out: waited for standing, not walked up to.
+    expect(packMove(input([spear(5, 2.2)]))).toMatchObject({ foot: "hold" });
+    // Standing at 3.5 with the swing ready and the view on it: a short step in at 3.0 blocks a second; once in, strike.
+    expect(packMove({ ...input([spear(3.5, 0)]), targetId: "s" })).toMatchObject({ foot: "advance", speed: 3 / 4.32 });
+    expect(packMove({ ...input([spear(2.9, 0)]), targetId: "s" })).toMatchObject({ foot: "hold" });
+    // Standing in its reach without the swing ready: out of it.
+    expect(packMove({ ...input([spear(3.2, 0, { hittableMs: 300 })]), targetId: "s" })).toMatchObject({ foot: "retreat", speed: 3 / 4.32 });
+    // Backing off: sprinting after it beyond 5, nearer at its 2.2 plus 0.8.
+    expect(packMove({ ...input([spear(6, -2.2)]), targetId: "s" })).toMatchObject({ foot: "advance" });
+    expect(packMove({ ...input([spear(6, -2.2)]), targetId: "s" }).speed).toBeUndefined();
+    expect(packMove({ ...input([spear(4.5, -2.2)]), targetId: "s" }).speed).toBeCloseTo(3 / 4.32, 2);
   });
 
   it("holds only while the hand can strike this tick every mob coming in inside the strike range", () => {

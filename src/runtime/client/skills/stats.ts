@@ -25,7 +25,7 @@ export interface TraceMob {
 }
 
 /** What happened in one fight tick (`block`: the raised shield took a hit, seen as the off-hand item's durability). */
-export type TraceEvent = "swing" | "hit" | "crit" | "miss" | "hurt" | "block" | "jump";
+export type TraceEvent = "swing" | "hit" | "crit" | "miss" | "hurt" | "block" | "jump" | "spear: learned";
 
 /** One fight tick (25 ms of the hands' clock, longer when a step blocks). */
 export interface TraceFrame {
@@ -88,6 +88,11 @@ export interface CombatStats {
   /** The mob the running fight is on now (`play` reads it for its burning-creeper rule). */
   fighting?: string;
   /**
+   * Melee mobs taken to hold a spear because one hurt the player from `SPEAR_LEARN_DIST` or more (the helper's `held`
+   * may be missing): fought as spear mobs from then on.
+   */
+  spears: Set<string>;
+  /**
    * Creeper id -> the last reading within its fuse start range since the player last struck it, and when its fuse
    * was taken as lit (the hands' clock). Kept across duels, so a fight that turns to a creeper knows it lit.
    */
@@ -108,7 +113,7 @@ const TRACING = new WeakSet<PlayerController>();
 const TRACE_SINCE = new WeakMap<CombatStats, number>();
 
 export function newStats(): CombatStats {
-  return { swings: 0, hits: 0, misses: 0, crits: 0, hitsTaken: 0, damageTaken: 0, blocked: 0, struck: new Map(), usedOn: new Map(), events: [], nextAttack: new Map(), struckAt: new Map(), creepers: new Map() };
+  return { swings: 0, hits: 0, misses: 0, crits: 0, hitsTaken: 0, damageTaken: 0, blocked: 0, struck: new Map(), usedOn: new Map(), events: [], nextAttack: new Map(), struckAt: new Map(), creepers: new Map(), spears: new Set() };
 }
 
 /** Append lines to the event log, dropping the oldest past `MAX_EVENTS`. */

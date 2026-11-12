@@ -11,7 +11,7 @@ import { realClock, type ActionResult, type Clock, type EntityInfo, type Loadout
 import { runTaskStep } from "../tasks/steps.ts";
 import type { TaskEnv, TaskFailure, TaskStep, TaskStepResult } from "../tasks/types.ts";
 import type { Stance } from "./pack.ts";
-import { checkGoal, type Goal, type GoalCheck } from "./goal.ts";
+import { checkGoal, GOAL_RADIUS, type Goal, type GoalCheck } from "./goal.ts";
 import { shortType } from "./mobs.ts";
 import { compileGoal, isTaskStep, stepLabel, UNDERSTOOD_FORMS, type PlanKind, type PlanStep } from "./plan.ts";
 import { fightText, logEvent, resetStats, type CombatStats } from "./stats.ts";
@@ -76,7 +76,13 @@ export const MAX_TASK_RETRIES = 2;
  * `goal_unknown`: a part of the goal was not understood (a `free` step) and there was nothing to do for
  * `UNKNOWN_QUIET_MS`, so the run stopped instead of idling to the time limit.
  */
-export type PlayStop = "goal_done" | "timeout" | "died" | "error" | "goal_unknown";
+export type PlayStop = "goal_done" | "timeout" | "died" | "error" | "goal_unknown" | "targets_gone";
+
+/**
+ * `targets_gone` (in the type above): a kill step with a count has none of its targets left alive within the goal
+ * radius after some were there, and the count is not reached: they left the area. The run stops this long after.
+ */
+const TARGETS_GONE_MS = 1000;
 
 /** A goal part nobody understood ends the run after this long with nothing to do (only idle, no hostile near). */
 export const UNKNOWN_QUIET_MS = 5000;
@@ -100,6 +106,8 @@ export interface PlayStats {
   decisions: number;
   kills: number;
   killed: Record<string, number>;
+  /** Short mob type -> deaths not by the player of mobs seen within the goal radius (another mob's attack, a fall). */
+  otherDeaths: Record<string, number>;
   swings: number;
   hits: number;
   /** Swings that struck nothing. */
@@ -201,10 +209,20 @@ interface RunningTask {
   done: boolean;
 }
 
-/** Kills: the helper's death log when there is one, else struck mobs that vanished (a creeper that blew up at full health is not a kill). */
-function countKills(kills: Map<string, string>, map: ThreatMap, stats: CombatStats, deaths: Death[] | undefined): void {
+/** A death not by the player: the dead mob's type and its killer's. */
+type OtherDeath = { typeId: string; killer?: string };
+
+/**
+ * Kills: the helper's death log when there is one, else struck mobs that vanished (a creeper that blew up at full
+ * health is not a kill). With the log, the deaths not by the player of mobs seen within the goal radius (`near`) go
+ * to `others`: a kill step's target that another mob killed is gone too.
+ */
+function countKills(kills: Map<string, string>, others: Map<string, OtherDeath>, near: ReadonlySet<string>, map: ThreatMap, stats: CombatStats, deaths: Death[] | undefined): void {
   if (deaths) {
-    for (const d of deaths) if (d.killer === "minecraft:player") kills.set(d.id, d.typeId);
+    for (const d of deaths) {
+      if (d.killer === "minecraft:player") kills.set(d.id, d.typeId);
+      else if (near.has(d.id) && d.typeId !== "minecraft:player") others.set(d.id, { typeId: d.typeId, ...(d.killer ? { killer: d.killer } : {}) });
+    }
     return;
   }
   for (const v of map.vanished) {
@@ -257,6 +275,9 @@ export async function play(
   const stats = resetStats(c);
   const tracker = new ThreatTracker();
   const kills = new Map<string, string>();
+  const otherDeaths = new Map<string, OtherDeath>();
+  /** Every mob seen within the goal radius during the run, so a death in the log can be placed. */
+  const seenNear = new Set<string>();
   const trace: PlayStep[] = [];
   let steps = 0;
   let decisions = 0;
@@ -276,6 +297,10 @@ export async function play(
   let idx = 0;
   let stepStart = Date.now();
   let killsBefore = new Set<string>();
+  let othersBefore = new Set<string>();
+  /** The current kill step has seen a target alive within its radius, and since when none is. */
+  let targetsSeen = false;
+  let targetsGoneSince: number | undefined;
   let usedBefore = new Set<string>();
   let task: RunningTask | undefined;
   /** On a not-understood step: since when there has been nothing to do. */
@@ -294,7 +319,8 @@ export async function play(
       return { known: true, done: false, progress: task ? `${stepLabel(step)}: running${retries ? ` (attempt ${retries + 1})` : ""}` : (r?.message ?? stepLabel(step)) };
     }
     if (step.kind === "free") return checkGoal({ kind: "free" }, { map, kills, usedOn: stats.usedOn });
-    return checkGoal(step, { map, kills: since(kills, killsBefore), usedOn: since(stats.usedOn, usedBefore) });
+    const others = new Map([...otherDeaths].filter(([id]) => !othersBefore.has(id)));
+    return checkGoal(step, { map, kills: since(kills, killsBefore), usedOn: since(stats.usedOn, usedBefore), otherDeaths: others });
   };
   const planText = (): string => {
     const step = planSteps[idx];
@@ -319,6 +345,9 @@ export async function play(
     idx++;
     stepStart = Date.now();
     killsBefore = new Set(kills.keys());
+    othersBefore = new Set(otherDeaths.keys());
+    targetsSeen = false;
+    targetsGoneSince = undefined;
     usedBefore = new Set(stats.usedOn.keys());
     doneStreak = 0;
     retries = 0;
@@ -421,7 +450,8 @@ export async function play(
           deathTick = Math.max(deathTick, ...d.deaths.map((x) => x.tick));
         }
       }
-      countKills(kills, map, stats, newDeaths);
+      for (const e of map.entities) if (e.distance <= GOAL_RADIUS) seenNear.add(e.id);
+      countKills(kills, otherDeaths, seenNear, map, stats, newDeaths);
       const step = planSteps[idx];
 
       if (step && isTaskStep(step)) {
@@ -490,6 +520,24 @@ export async function play(
             break;
           }
           continue;
+        }
+        // A kill step with a count whose targets all left the area (none alive within its radius after some were):
+        // nothing is left to kill, so stop instead of waiting for the time limit.
+        if (step?.kind === "kill" && step.count !== undefined) {
+          const left = map.entities.some((e) => (step.type ? e.typeId === step.type : e.hostile) && e.distance <= step.radius);
+          if (left) {
+            targetsSeen = true;
+            targetsGoneSince = undefined;
+          } else if (targetsSeen) {
+            targetsGoneSince ??= tickStarted;
+            if (tickStarted - targetsGoneSince >= TARGETS_GONE_MS) {
+              stoppedBy = "targets_gone";
+              message = `${check.progress}, none left within ${step.radius} blocks`;
+              const rep = reports[idx];
+              if (rep) Object.assign(rep, { status: "failed", ok: false, message, ms: Date.now() - stepStart });
+              break;
+            }
+          }
         }
       }
 
@@ -578,6 +626,8 @@ export async function play(
   const state = await c.world.state(1000).catch(() => undefined);
   const killed: Record<string, number> = {};
   for (const t of kills.values()) killed[shortType(t)] = (killed[shortType(t)] ?? 0) + 1;
+  const otherDead: Record<string, number> = {};
+  for (const d of otherDeaths.values()) otherDead[shortType(d.typeId)] = (otherDead[shortType(d.typeId)] ?? 0) + 1;
   const last = planSteps[Math.min(idx, planSteps.length - 1)] as PlanStep;
   return {
     goal: spec.goal,
@@ -592,6 +642,7 @@ export async function play(
       decisions,
       kills: kills.size,
       killed,
+      otherDeaths: otherDead,
       swings: stats.swings,
       hits: stats.hits,
       misses: stats.misses,

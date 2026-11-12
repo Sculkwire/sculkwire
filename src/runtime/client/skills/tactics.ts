@@ -140,6 +140,12 @@ export function scoreTactics(map: ThreatMap, goal: Goal, ctx: ScoreContext = {})
     }
   }
 
+  // A kill goal whose target is alive within the goal's radius is never idled at: when nothing else is offered (it
+  // keeps away, walks off, or the player is recovering and it is not at hand), go after the nearest one anyway.
+  if (goal.kind === "kill" && !out.some((t) => t.kind !== "idle") && (!ctx.allowed || ctx.allowed.has("fight"))) {
+    const target = map.entities.find((t) => (goal.type ? t.typeId === goal.type : t.hostile) && t.distance <= goal.radius && !(t.fuse?.lit && t.distance < CREEPER_RUN_DISTANCE));
+    if (target) out.push({ kind: "fight", target, score: 0.3, reason: `goal target ${target.key} at ${target.distance.toFixed(1)} blocks keeps away: go after it` });
+  }
   add({ kind: "idle", score: 0.05, reason: "nothing better to do" });
   return out.sort((a, b) => b.score - a.score);
 }

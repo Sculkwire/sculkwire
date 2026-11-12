@@ -65,6 +65,40 @@ export function meleeReach(info: MobInfo, dx: number, dz: number): number {
   return r / Math.max(Math.abs(dx), Math.abs(dz)) * d;
 }
 
+/**
+ * A mob holding a spear (`*_spear` in its main hand, the helper's `held`) fights with it, by the game's own files
+ * (behavior pack 1.26.60.5, `husk.json` and `items/iron_spear.json`): `minecraft:behavior.use_kinetic_weapon` charges
+ * from 6 to 7 blocks with the spear lowered and backs off to 9 to 11 after the hit, the spear's `kinetic_weapon` reach
+ * is 2.0 to 4.5 times the mob's `weapon_reach_multiplier` 0.5 (up to 2.25), plus its `hitbox_margin` 0.25, to the
+ * player's box: 2.25 + 0.25 + 0.3 (half the player's 0.6 width) = 2.8 centre to centre, about 2.75 as the readings
+ * show it (live, `combat/spears3`: hurt at 2.4 to 2.6 standing, readings a tick or two old). It hurts only while the
+ * two close faster than the spear's `min_relative_speed` 4.6 times the mob's `weapon_min_speed_multiplier` 0.2. With the
+ * player moving fast it also lands from 3.0 to 3.35 (live round 2: 8 hurts there, the player at 4.1 to 5.7 blocks a
+ * second), so the reach the footwork keeps out of is 3.35.
+ */
+export const SPEAR_HIT_DIST = 3.35;
+export const SPEAR_MIN_CLOSING = 0.92;
+/** The distance a spear mob charges from, and the one it backs off to after a hit (`reposition`, `cooldown_distance`). */
+export const SPEAR_CHARGE_FROM = 7;
+export const SPEAR_BACK_OFF = [9, 11] as const;
+/** Mob types the vanilla files can give a spear (behavior pack 1.26.60.5, entity equipment tables). */
+export const SPEAR_CARRIERS: ReadonlySet<string> = new Set([
+  "minecraft:zombie",
+  "minecraft:husk",
+  "minecraft:drowned",
+  "minecraft:zombie_pigman",
+  "minecraft:piglin",
+  "minecraft:zombie_villager_v2",
+  "minecraft:skeleton",
+  "minecraft:stray",
+  "minecraft:bogged",
+  "minecraft:parched",
+]);
+/** The mob holds a spear in its main hand. */
+export function holdsSpear(e: { held?: string }): boolean {
+  return e.held?.endsWith("_spear") === true;
+}
+
 /** A melee mob; with `width`, a box attack whose `range` is its diagonal reach. */
 const melee = (speed: number, damage: number, extra: Partial<MobInfo> = {}): MobInfo => ({
   kind: "melee",

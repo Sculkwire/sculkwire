@@ -405,8 +405,14 @@ describe("recovery", () => {
     expect(chooseTactic(scoreTactics(far, killHostiles)).kind).toBe("fight");
     const away = chooseTactic(scoreTactics(far, killHostiles, { recovering: true }));
     expect([away.kind, away.recover]).toEqual(["flee", true]);
+    // Past the flee range a kill goal's target is still gone after, at a low score any flee or meal beats (a goal
+    // target that keeps away must not leave the run idle); without a kill goal the player rests.
     const gone = scoreTactics(mapOf([mob("z", "zombie", 0, 15)], { health: 9 }), killHostiles, { recovering: true });
-    expect(gone.map((t) => t.kind)).toEqual(["idle"]);
+    expect(gone.map((t) => [t.kind, t.score])).toEqual([
+      ["fight", 0.3],
+      ["idle", 0.05],
+    ]);
+    expect(scoreTactics(mapOf([mob("z", "zombie", 0, 15)], { health: 9 }), { kind: "free" }, { recovering: true }).map((t) => t.kind)).toEqual(["idle"]);
     expect(chooseTactic(scoreTactics(mapOf([mob("z", "zombie", 0, 10)], { health: 13 }), killHostiles, { recovering: true })).kind).toBe("fight");
   });
 });

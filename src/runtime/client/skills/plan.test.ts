@@ -172,8 +172,8 @@ function me(): PlayerState {
 const zombie = (id: string, z = 2.5): EntityInfo => ({ id, typeId: "minecraft:zombie", location: { x: 0, y: 0, z }, health: { current: 20, max: 20 } });
 
 /** A game where nothing moves: the crosshair is on the first entity and a click kills it (as the play-loop tests' fake). */
-function arena(entities: EntityInfo[]) {
-  const state = me();
+function arena(entities: EntityInfo[], over: Partial<PlayerState> = {}) {
+  const state = { ...me(), ...over };
   const deaths: Death[] = [];
   let tick = 0;
   const aim = () => {
@@ -215,7 +215,14 @@ function arena(entities: EntityInfo[]) {
     deaths: async (since: number) => ({ tick, deaths: deaths.filter((d) => d.tick > since) }),
     clock: fakeClock,
   };
-  return { env, entities };
+  /** A death the helper logged now, not by the player (another mob's attack): the mob is gone from the world. */
+  const otherKill = (id: string, killer: string) => {
+    const e = entities.find((x) => x.id === id);
+    if (!e) return;
+    entities.splice(entities.indexOf(e), 1);
+    deaths.push({ tick: ++tick, id, typeId: e.typeId, cause: "entityAttack", killer });
+  };
+  return { env, entities, otherKill };
 }
 
 const RECIPES = [
@@ -266,6 +273,57 @@ describe("a goal that was not understood", () => {
     expect(r.plan).toMatchObject([{ kind: "survive", status: "done" }]);
     expect(r.stoppedBy).toBe("goal_done");
     expect(r.durationMs).toBeGreaterThanOrEqual(10_000);
+  });
+});
+
+describe("a kill step with its target keeping away", () => {
+  const husk = { ...zombie("-9", 10), typeId: "minecraft:husk" };
+  it("fights a goal target that stands 10 blocks away and never comes, instead of idling", async () => {
+    const r = await drive(play({ action: "play", goal: "kill the husk", durationMs: 20_000 }, arena([husk]).env), 50, 30_000);
+    expect(r.trace.filter((t) => t.action === "idle")).toEqual([]);
+    expect(r.trace[0]).toMatchObject({ action: "fight", target: { id: "-9" } });
+  });
+
+  it("goes after it also while low on health, when no flee or fight at hand is offered (the live spears3 idle)", async () => {
+    // Health 7 is at or below the recovery line: no seeking out fights, and a husk at 10 blocks is past the 8 blocks a
+    // flee needs, so before the fix nothing but idle was offered for the whole run.
+    const r = await drive(play({ action: "play", goal: "kill the husk", durationMs: 10_000 }, arena([husk], { health: 7 }).env), 50, 20_000);
+    expect(r.trace.filter((t) => t.action === "idle")).toEqual([]);
+    expect(r.trace[0]).toMatchObject({ action: "fight", target: { id: "-9" }, reason: expect.stringMatching(/keeps away: go after it/) });
+  });
+});
+
+describe("a kill step whose targets die or leave", () => {
+  const husk = (id: string, z: number): EntityInfo => ({ ...zombie(id, z), typeId: "minecraft:husk" });
+
+  it("counts a target another mob killed: the step ends ok with both numbers apart", async () => {
+    const a = arena([husk("-1", 2.5), husk("-2", 20)]);
+    // The far husk is run through by another husk's spear charge.
+    setTimeout(() => a.otherKill("-2", "minecraft:husk"), 200);
+    const r = await drive(play({ action: "play", goal: "kill 2 husks", durationMs: 30_000 }, a.env), 50, 40_000);
+    expect(r.stoppedBy).toBe("goal_done");
+    expect(r.message).toBe("goal done: 2 of 2 husk dead (1 killed by the player, 1 by another husk)");
+    expect(r.stats).toMatchObject({ kills: 1, killed: { husk: 1 }, otherDeaths: { husk: 1 } });
+    expect(r.durationMs).toBeLessThan(10_000);
+  });
+
+  it("stops at once when none of its targets is left within the radius and the count is not reached", async () => {
+    const a = arena([husk("-1", 2.5), husk("-2", 20)]);
+    // The far husk walks out of the area: gone without a death.
+    setTimeout(() => a.entities.splice(a.entities.findIndex((e) => e.id === "-2"), 1), 100);
+    const r = await drive(play({ action: "play", goal: "kill 3 husks", durationMs: 60_000 }, a.env), 50, 70_000);
+    expect(r.stoppedBy).toBe("targets_gone");
+    expect(r.message).toBe("1 of 3 husk killed, none left within 24 blocks");
+    expect(r.plan).toMatchObject([{ kind: "kill", status: "failed", ok: false }]);
+    expect(r.durationMs).toBeLessThan(10_000);
+  });
+
+  it("does not stop before any target was there (mobs summoned after the run started)", async () => {
+    const a = arena([]);
+    setTimeout(() => a.entities.push(husk("-3", 2.5)), 3000);
+    const r = await drive(play({ action: "play", goal: "kill 1 husk", durationMs: 20_000 }, a.env), 50, 30_000);
+    expect(r.stoppedBy).toBe("goal_done");
+    expect(r.stats.kills).toBe(1);
   });
 });
 

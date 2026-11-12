@@ -32,7 +32,7 @@
  */
 import type { PlayerInput } from "../runtime/client/launcher.ts";
 import { seededRandom } from "./faketime.ts";
-import { angleDiff, STILL, yawTo, type EngineInput, type EntityInfo, type MoveVector, type PlayerState, type PlayerWorld } from "../runtime/client/player.ts";
+import { angleDiff, STILL, yawTo, type EngineInput, type EntityInfo, type HurtLog, type MoveVector, type PlayerState, type PlayerWorld } from "../runtime/client/player.ts";
 
 export interface SimMob {
   id: string;
@@ -66,6 +66,10 @@ export interface SimMob {
   diedAt?: number;
   /** The tick it is summoned (absent from the world before). */
   appearTick?: number;
+  /** The main-hand item the helper reports (`*_spear`: it fights as `spearMob` says). */
+  held?: string;
+  /** A spear mob: charging the player, or backing off to `backTo` blocks after a hit. */
+  spear?: { phase: "charge" | "back"; backTo: number; lastDist?: number; jabAt?: number };
 }
 
 /** Measured walking (any direction), sprinting, sneaking and in-air speeds, blocks per second. */
@@ -236,6 +240,8 @@ export interface SimOptions {
   start?: { x: number; z: number; yaw?: number };
   /** Delay of the engine's answer to a move (default `ENGINE_CALL_MS`) and to an attack (`ENGINE_ATTACK_MS`). */
   callMs?: number;
+  /** Leave `held` out of the readings (a helper that cannot read it): the fight sees bare-handed mobs. */
+  hideHeld?: boolean;
   /** One look applied per this many milliseconds, first come first served (default `LOOK_FRAME_MS`). */
   lookFrameMs?: number;
   attackMs?: number;
@@ -288,6 +294,35 @@ export const simMob = (id: string, typeId: string, x: number, z: number, speed: 
   nextAttack: Number.NEGATIVE_INFINITY,
   ...(appearTick !== undefined ? { appearTick } : {}),
 });
+
+/**
+ * A husk holding a spear, as the game's files say (`minecraft:behavior.use_kinetic_weapon`, the spear's
+ * `kinetic_weapon`): it charges at its walk (2.2 blocks a second), hits on contact at `SPEAR_HIT` (2.25 reach plus the
+ * 0.25 hitbox margin plus half the player's box, centre to centre) only while the two close faster than
+ * `SPEAR_MIN_CLOSING`, then backs off to 9 to 11 blocks and comes again. No box attack.
+ */
+export const spearMob = (id: string, typeId: string, x: number, z: number, appearTick?: number): SimMob => ({
+  ...simMob(id, typeId, x, z, 2.2, appearTick),
+  held: "minecraft:iron_spear",
+  spear: { phase: "charge", backTo: 10 },
+});
+/**
+ * The centre distance the spear lands at. The files give up to 2.8 (2.25 + 0.25 + 0.3); live (`combat/spears3`, five
+ * runs) every hurt came with the nearest husk read at 2.4 to 2.6 and swings at it from 2.5 landing first, so the
+ * simulator takes 2.5: within that the player's strike and the spear meet as they did live.
+ */
+export const SPEAR_HIT = 2.5;
+export const SPEAR_MIN_CLOSING = 0.92;
+/**
+ * Its hit also lands from `SPEAR_JAB` when the player moves fast (live, round 2: all 8 hurts came with the husk read
+ * at 3.0 to 3.35 and the player at 4.1 to 5.7 blocks a second: sprinting after it, or backing off at full speed; none
+ * standing or walking slowly there), at most once per the item's `cooldown`, 0.95 s.
+ */
+export const SPEAR_JAB = 3.35;
+export const SPEAR_JAB_PLAYER_SPEED = 3.5;
+export const SPEAR_JAB_COOLDOWN_MS = 950;
+/** A spear hit on iron armor (live, `combat/spears3`: 2.5 a hurt). */
+export const SPEAR_DAMAGE = 2.5;
 
 function later(ms: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
@@ -374,6 +409,9 @@ export function sim(mobs: SimMob[], o: SimOptions = {}): Sim {
   const arrowRoll = seededRandom(o.arrowSeed ?? 13);
   const creeperRoll = seededRandom(o.creeperSeed ?? 17);
   const reachRoll = seededRandom((o.missSeed ?? 11) + 1000);
+  /** The helper's `hurts` log as the game would fill it: cause, damager type and id. */
+  const hurtRecords: HurtLog["hurts"] = [];
+  const spearRoll = seededRandom((o.missSeed ?? 11) + 2000);
   const log: SimLog = { drawnMisses: 0, blast: 0, meleeDamage: 0, hitsTaken: 0, arrowHits: 0, blocked: 0, exploded: 0, swings: 0, hits: 0, events: [] };
   /** Movement sent and the tick the server acts on it. */
   const inbox: { tick: number; move: MoveVector }[] = [];
@@ -459,7 +497,10 @@ export function sim(mobs: SimMob[], o: SimOptions = {}): Sim {
       // Its walk carries its motion as the player's does (`MOB_GROUND_KEEP`): a creeper that stops to swell drifts on a
       // few ticks. A skeleton keeps its distance (`SKELETON_RANGE`) and shoots.
       const archer = m.typeId === "minecraft:skeleton";
-      const walk = d > 0.8 && !(archer && d < SKELETON_STAND) ? sp / 20 : 0;
+      // A spear mob backing off walks away until it is `backTo` out, then charges again.
+      if (m.spear?.phase === "back" && d >= m.spear.backTo) m.spear.phase = "charge";
+      const away = m.spear?.phase === "back" ? -1 : 1;
+      const walk = (d > 0.8 || away < 0) && !(archer && d < SKELETON_STAND) ? (sp / 20) * away : 0;
       const mk = o.mobGroundKeep ?? MOB_GROUND_KEEP;
       m.wx = (m.wx ?? 0) * mk + (d > 1e-6 ? ((p.x - m.x) / d) * walk : 0) * (1 - mk);
       m.wz = (m.wz ?? 0) * mk + (d > 1e-6 ? ((p.z - m.z) / d) * walk : 0) * (1 - mk);
@@ -477,6 +518,7 @@ export function sim(mobs: SimMob[], o: SimOptions = {}): Sim {
             log.hitsTaken++;
             log.arrowHits++;
             log.events.push({ at: now, kind: "hurt", mob: m.id });
+            hurtRecords.push({ tick, damage: ARROW_HIT, cause: "projectile", damager: m.typeId, damagerId: m.id });
           }
         }
       }
@@ -535,8 +577,33 @@ export function sim(mobs: SimMob[], o: SimOptions = {}): Sim {
           if (dist < 6 && !(p.move.sneak && facingOff(m) < 60)) {
             const dmg = Math.round((1 - dist / 6) * 25 * 10) / 10;
             log.blast += dmg;
+            hurtRecords.push({ tick, damage: dmg, cause: "entityExplosion", damager: m.typeId, damagerId: m.id });
             p.health -= dmg;
           }
+        }
+      } else if (m.spear) {
+        // The spear: contact at `SPEAR_HIT` while the two close faster than `SPEAR_MIN_CLOSING` (from the last tick).
+        const closingNow = m.spear.lastDist !== undefined ? (m.spear.lastDist - dist) * 20 : 0;
+        m.spear.lastDist = dist;
+        const charge = m.spear.phase === "charge" && dist <= SPEAR_HIT && closingNow > SPEAR_MIN_CLOSING && now - (m.spear.jabAt ?? Number.NEGATIVE_INFINITY) >= SPEAR_JAB_COOLDOWN_MS;
+        const playerSpeed = Math.hypot(p.vx, p.vz) * 20;
+        const ready = now - (m.spear.jabAt ?? Number.NEGATIVE_INFINITY) >= SPEAR_JAB_COOLDOWN_MS;
+        const jab = !charge && ready && dist <= SPEAR_JAB && playerSpeed > SPEAR_JAB_PLAYER_SPEED;
+        if ((charge || jab) && p.y < MOB_HEIGHT) {
+          if (charge) {
+            m.spear.phase = "back";
+            m.spear.backTo = 9 + spearRoll() * 2;
+          }
+          m.spear.jabAt = now;
+          // The raised shield does not stop it (live, 19 of 34 spear hits came through one).
+          p.health -= SPEAR_DAMAGE;
+          const dd = Math.max(0.1, dist);
+          p.kx = ((p.x - m.x) / dd) * 0.4;
+          p.kz = ((p.z - m.z) / dd) * 0.4;
+          log.meleeDamage += SPEAR_DAMAGE;
+          log.hitsTaken++;
+          log.events.push({ at: now, kind: "hurt", mob: m.id });
+          hurtRecords.push({ tick, damage: SPEAR_DAMAGE, cause: "entityAttack", damager: m.typeId, damagerId: m.id });
         }
       } else if (m.typeId !== "minecraft:skeleton" && Math.max(Math.abs(p.x - m.x), Math.abs(p.z - m.z)) < 1.4 && p.y < MOB_HEIGHT && now >= m.nextAttack) {
         if (p.move.sneak && tick - p.sneakSince >= SHIELD_TICKS && tick - swingTick > (o.shieldOpenTicks ?? SWING_OPEN_TICKS) && facingOff(m) < SHIELD_ARC) {
@@ -560,6 +627,7 @@ export function sim(mobs: SimMob[], o: SimOptions = {}): Sim {
           log.meleeDamage += MOB_HIT;
           log.hitsTaken++;
           log.events.push({ at: now, kind: "hurt", mob: m.id });
+          hurtRecords.push({ tick, damage: MOB_HIT, cause: "entityAttack", damager: m.typeId, damagerId: m.id });
         }
       }
     }
@@ -601,6 +669,7 @@ export function sim(mobs: SimMob[], o: SimOptions = {}): Sim {
     health: { current: Math.max(0, m.health), max: 20 },
     tick: tick - Math.min(o.entityLagTicks ?? ENTITY_LAG_TICKS, (m.trail?.length ?? 1) - 1),
     velocity: { x: m.vx, y: 0, z: m.vz },
+    ...(m.held && !o.hideHeld ? { held: m.held } : {}),
     ...(o.reportFuse && m.typeId === "minecraft:creeper" ? { ignited: m.litAt !== undefined, ...(m.litAt !== undefined ? { fuseTicks: Math.floor((Date.now() - m.litAt) / 50) } : {}) } : {}),
   });
   const state = (): PlayerState => {
@@ -718,6 +787,7 @@ export function sim(mobs: SimMob[], o: SimOptions = {}): Sim {
       return m ? info(m) : null;
     },
     impacts: async () => ({ tick, impacts: [] }),
+    hurts: async (since) => ({ tick, hurts: hurtRecords.filter((h) => h.tick > since) }),
     entities: async () => present().map(info),
     loadout: async () => ({ hotbar: [{ typeId: "minecraft:iron_sword", amount: 1 }], hunger: 20, armor: [{ slot: "Offhand", typeId: "minecraft:shield" }] }),
     ...(o.pen

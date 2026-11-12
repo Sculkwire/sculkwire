@@ -56,6 +56,8 @@ export interface EntityInfo {
   ignited?: boolean;
   /** Game ticks a lit creeper's fuse has burned when it was read (30 ticks is the blast). */
   fuseTicks?: number;
+  /** The item id in its main hand, when the helper can read it (a spear changes how a husk or zombie fights). */
+  held?: string;
   /** Milliseconds the reading was old when handed out (streamed readings, already carried forward by it). */
   ageMs?: number;
 }
@@ -92,6 +94,14 @@ export interface PlayerWorld {
   loadout?(): Promise<Loadout>;
   /** Any helper-pack query (`grid` for navigation). */
   query?(kind: string, params?: Record<string, unknown>): Promise<unknown>;
+  /** The helper's player hurts after game tick `since` (the `hurts` query), for a world that has no `query`. */
+  hurts?(since: number): Promise<HurtLog>;
+}
+
+/** The helper's player hurt records (`hurts` query): who hurt the player and how. */
+export interface HurtLog {
+  tick: number;
+  hurts: { tick: number; damage: number; cause?: string; damager?: string; damagerId?: string }[];
 }
 
 /** Hotbar slots 1-9 (null when empty), the food level and worn armor (the helper's `loadout` query). */
@@ -1460,8 +1470,11 @@ export class PlayerController {
   }
 
   /** Walk toward world yaw `heading` with the view at `view` (stand still when undefined). */
-  async #walk(view: number, heading: number | undefined, sprint = false): Promise<void> {
-    await this.#setMove(heading === undefined ? { forward: 0, strafe: 0, sprint: false } : { ...walkVector(view, heading), sprint });
+  async #walk(view: number, heading: number | undefined, sprint = false, speed = 1): Promise<void> {
+    if (heading === undefined) return this.#setMove({ forward: 0, strafe: 0, sprint: false });
+    const v = walkVector(view, heading);
+    const k = Math.max(0, Math.min(1, speed));
+    await this.#setMove(k === 1 ? { ...v, sprint } : { forward: Math.round(v.forward * k * 1000) / 1000, strafe: Math.round(v.strafe * k * 1000) / 1000, sprint: false });
   }
 
   /** Jump for `ms` without blocking (a jump while walking). */
@@ -2009,7 +2022,7 @@ export class PlayerController {
     return {
       now: () => this.#clock.now(),
       sleep: (ms, signal) => this.#clock.sleep(ms, signal),
-      walk: async (heading, sprint = false) => this.#walk(await view(), heading, sprint),
+      walk: async (heading, sprint = false, speed = 1) => this.#walk(await view(), heading, sprint, speed),
       move: (change) => this.#setMove(change),
       movement: () => ({ ...this.#move }),
       jump: (ms = 120) => this.#jump(ms),
@@ -2040,8 +2053,11 @@ export class PlayerController {
 export interface Hands {
   now(): number;
   sleep(ms: number, signal?: AbortSignal): Promise<void>;
-  /** Walk toward world yaw `heading` with the camera's current view (stand still when undefined). */
-  walk(heading: number | undefined, sprint?: boolean): Promise<void>;
+  /**
+   * Walk toward world yaw `heading` with the camera's current view (stand still when undefined), at `speed` of the
+   * walking speed (0 to 1, default 1: the engine route's movement vector is analog; the keyboard's keys are full).
+   */
+  walk(heading: number | undefined, sprint?: boolean, speed?: number): Promise<void>;
   /** Change raw parts of the held movement. */
   move(change: Partial<MoveVector>): Promise<void>;
   movement(): MoveVector;
