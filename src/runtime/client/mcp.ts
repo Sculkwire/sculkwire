@@ -228,7 +228,7 @@ export function register(server: McpServer): void {
           .string()
           .optional()
           .describe("World name, prefixed with sculkwire-. Omit it unless a second world is really needed: the default bridge world is reused and replaced on each launch, so no new entry appears in the user's world list"),
-        keep: z.boolean().optional().describe("Continue in the existing test world as it is (blocks, inventory, settings) instead of replacing it; it is then never removed automatically"),
+        keep: z.boolean().optional().describe("Continue in the existing test world as it is (blocks, inventory, settings) instead of replacing it; it is then never removed automatically. game_stop ends the game without Save & Quit, so blocks changed in the last minute before it may be lost"),
         copyFrom: z
           .string()
           .optional()
