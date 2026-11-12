@@ -6,11 +6,14 @@ export interface RunOptions {
   /** The child's whole environment. Default: `process.env`. */
   env?: NodeJS.ProcessEnv;
   /**
-   * Kill the child after this long and resolve right away with `timedOut`, without waiting for its pipes to close (a
-   * grandchild may hold them open). Default: no limit.
+   * Kill the child after this long. With the default signal the result comes right away with `timedOut`, without
+   * waiting for the pipes to close (a grandchild may hold them open). Default: no limit.
    */
   timeoutMs?: number;
-  /** The signal a timeout sends. Default: SIGKILL. */
+  /**
+   * The signal a timeout sends. Default: SIGKILL. With any other signal the child gets to shut down, and the result
+   * comes once it has exited.
+   */
   killSignal?: NodeJS.Signals;
   /** Written to the child's stdin, which is then closed. Default: stdin closed right away. */
   input?: string;
@@ -75,7 +78,9 @@ export function run(command: string, args: readonly string[], options: RunOption
       ? undefined
       : setTimeout(() => {
           timedOut = true;
-          child.kill(options.killSignal ?? "SIGKILL");
+          const signal = options.killSignal ?? "SIGKILL";
+          child.kill(signal);
+          if (signal !== "SIGKILL") return;
           // Release the pipes: a grandchild that inherited them would otherwise keep this process waiting.
           child.stdout.destroy();
           child.stderr.destroy();

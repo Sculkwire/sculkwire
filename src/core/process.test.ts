@@ -42,6 +42,12 @@ describe("run", () => {
     }
   });
 
+  it.skipIf(process.platform === "win32")("lets a child shut down on a gentle timeout signal before it answers", async () => {
+    const script = "process.on('SIGTERM', () => { process.stdout.write('bye'); process.exit(0); }); setTimeout(() => {}, 60_000)";
+    const r = await run(node, ["-e", script], { timeoutMs: 300, killSignal: "SIGTERM" });
+    expect(r).toMatchObject({ code: 0, stdout: "bye", timedOut: true });
+  });
+
   it.skipIf(process.platform === "win32")("reports a signal-ended child as exit 1 when unattended", async () => {
     const r = await runUnattended(node, ["-e", "process.kill(process.pid, 'SIGKILL')"], { timeoutMs: 10_000 });
     expect(r.code).toBe(1);

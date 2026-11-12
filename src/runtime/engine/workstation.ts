@@ -37,7 +37,7 @@ import { err, type CliCommand } from "../../core/cli.ts";
 import { ExitCode } from "../../core/diagnostic.ts";
 import { isPlainObject } from "../../core/json.ts";
 import { ok, type ToolResult } from "../../core/mcp.ts";
-import { failed, oneShot, parseCommandLine, printJson, stringOption } from "./cliutil.ts";
+import { failed, oneShot, parseCommandLine, printJson, stringOption, type AgentOnly } from "./cliutil.ts";
 import { dimensionName, dimensionParam, dimensionSchema } from "./dimension.ts";
 import { engine, type EngineSession } from "./engine.ts";
 import { failureSchema, invalid, malformed, type EngineFailure, type EngineResult } from "./failure.ts";
@@ -951,7 +951,10 @@ export function registerWorkstationTools(server: McpServer): void {
 }
 
 /** These methods have no fallback: a missing agent is setup to fix. */
-const NEEDS_AGENT = "this needs the in-game agent: run sculk engine attach first";
+const NEEDS_AGENT: AgentOnly = {
+  notAttached: "this needs the in-game agent: run sculk engine attach first",
+  tooOld: "this agent has no screen methods: rebuild it with sculk engine attach",
+};
 
 const INTERACT_USAGE =
   "usage: sculk interact block <x> <y> <z> [--dimension overworld|nether|the_end] [--face up|down|north|south|east|west] | sculk interact entity <unique-id>";

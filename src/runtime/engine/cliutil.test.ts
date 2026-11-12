@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { parseCommandLine } from "./cliutil.ts";
+import { failed, parseCommandLine } from "./cliutil.ts";
 
 type Options = NonNullable<Parameters<typeof parseCommandLine>[1]>;
 
@@ -55,5 +55,28 @@ describe("parseCommandLine", () => {
     [["a:1", "b:2", "--count", "-1"], MOVE, { values: { count: "-1" }, positionals: ["a:1", "b:2"] }],
   ])("loose %j", (args, options, expected) => {
     expect(parsed(args, options, "loose")).toEqual(expected);
+  });
+});
+
+describe("failed", () => {
+  const older = { ok: false as const, code: -32601, reason: "unknown_method" as const, message: "no screen.state" };
+  const hints = { notAttached: "attach first", tooOld: "rebuild the agent" };
+  let stderr = "";
+
+  beforeEach(() => {
+    stderr = "";
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderr += String(chunk);
+      return true;
+    });
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("counts an agent too old for the method as a failure it reported, unless the command has no other route", () => {
+    expect(failed(older)).toBe(1);
+    expect(stderr).not.toContain("rebuild");
+    expect(failed(older, hints)).toBe(2);
+    expect(stderr).toContain("rebuild the agent");
   });
 });

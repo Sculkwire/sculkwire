@@ -13,19 +13,22 @@ export function printJson(value: unknown): void {
   out(JSON.stringify(value, null, 2));
 }
 
-/**
- * Prints the failure as JSON and maps it to an exit code. An agent that does not know the method is older than this
- * client: that is setup to fix, so it says how and exits 2. `notAttached` is the hint printed when no agent listens.
- */
-export function failed(failure: EngineFailure, notAttached?: string): number {
+/** The hints of a command that has no route but the agent: a missing agent and one too old for it are both setup to fix. */
+export interface AgentOnly {
+  notAttached: string;
+  tooOld: string;
+}
+
+/** Prints the failure as JSON and maps it to an exit code (2 for setup to fix, 1 for a failure the agent reported). */
+export function failed(failure: EngineFailure, agentOnly?: AgentOnly): number {
   printJson(failure);
   const anchor = failure.anchor ? ` (anchor ${failure.anchor})` : "";
   err(`${failure.reason}: ${failure.message}${anchor}`);
-  if (failure.reason === "unknown_method") {
-    err("this agent does not have this method: rebuild it with sculk engine attach");
+  if (agentOnly && failure.reason === "unknown_method") {
+    err(agentOnly.tooOld);
     return ExitCode.usage;
   }
-  if (failure.reason === "not_attached" && notAttached) err(notAttached);
+  if (agentOnly && failure.reason === "not_attached") err(agentOnly.notAttached);
   return isSetupFailure(failure) ? ExitCode.usage : ExitCode.findings;
 }
 
