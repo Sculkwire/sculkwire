@@ -23,11 +23,11 @@ Sculkwire gives your AI agent the Bedrock docs, a validator, a test server and t
 - **Validation.** Reports each problem with its file, line and rule.
 - **Test server.** Runs your packs and GameTests on a Bedrock Dedicated Server.
 - **Live game.** Starts the real game in a test world with your packs, reloads after edits, reads the log and takes screenshots. Works on Windows and Linux.
-- **Player control.** The agent walks, finds paths, fights mobs and works toward goals like a player.
+- **Player control.** The agent walks, finds paths, fights mobs, crafts, smelts, trades and works toward goals like a player.
 - **Game files.** Unpacks the vanilla packs from your installed game so you can search or compare them.
 - **In-game agent.** An optional helper inside the game. It lets the agent run commands as the player, take screenshots, read inventories, use menus and crafting stations, and pause or step game time. See [In-Game Agent](docs/engine.md).
 - **Extensions.** Add your own tools and commands. See [Extensions](docs/extensions.md).
-- **Benchmarks.** `sculk bench` measures the agent's combat and movement skills. See [Bench](docs/bench.md).
+- **Benchmarks.** `sculk bench` measures the agent's combat, movement, goal and task skills in the real game. See [Bench](docs/bench.md).
 
 ## MCP Tools
 
