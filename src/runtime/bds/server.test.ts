@@ -41,8 +41,8 @@ describe("serverCommand", () => {
   });
 
   it("runs bedrock_server.exe by absolute path on Windows, without stdbuf or LD_LIBRARY_PATH", () => {
-    expect(serverCommand("C:\\Users\\me\\AppData\\Local\\sculkwire\\bds-instances\\i1", "win32", "/usr/bin/stdbuf")).toEqual({
-      command: "C:\\Users\\me\\AppData\\Local\\sculkwire\\bds-instances\\i1\\bedrock_server.exe",
+    expect(serverCommand("C:\\Users\\me\\AppData\\Local\\sculkwire\\bds-instances\\slot-0", "win32", "/usr/bin/stdbuf")).toEqual({
+      command: "C:\\Users\\me\\AppData\\Local\\sculkwire\\bds-instances\\slot-0\\bedrock_server.exe",
       args: [],
       env: {},
     });

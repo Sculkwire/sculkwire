@@ -4,7 +4,7 @@
  */
 import { rm } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
-import type { Diagnostic } from "../../core/diagnostic.ts";
+import { compareDiagnostics, type Diagnostic } from "../../core/diagnostic.ts";
 import { PrerequisiteError } from "../../core/errors.ts";
 import { discoverProject, type PackInfo } from "../../core/project.ts";
 import { buildRegolith, regolithPlan } from "../../core/regolith.ts";
@@ -12,7 +12,7 @@ import type { Channel } from "../../core/version.ts";
 import { indexPack, projectPath, type IndexedPack } from "../gamelog/logparse.ts";
 import { indexBuiltPack } from "./built.ts";
 import { resolveBds, type BdsInstall } from "./install.ts";
-import { createInstance, disposeInstance, newInstanceId, type BdsInstance } from "./instance.ts";
+import { createInstance, disposeInstance, keepInstance, newInstanceId, type BdsInstance } from "./instance.ts";
 import { ensureTemplate } from "./template.ts";
 
 /** The Regolith build the loadable packs come from. */
@@ -169,27 +169,59 @@ export async function disposeBuild(project: ProjectPacks, keep: boolean | undefi
   if (project.build && !keep) await rm(project.build.workDir, { recursive: true, force: true });
 }
 
-/** Remove the instance (when there is one) and the Regolith build, unless `keep`. */
-export async function disposeRun(project: ProjectPacks, instance: BdsInstance | undefined, keep: boolean | undefined): Promise<void> {
+/** A kept instance after its run: the folder it ended in, and a warning when it could not leave its slot. */
+export interface KeptRun {
+  instanceDir: string;
+  diagnostics: Diagnostic[];
+}
+
+/**
+ * After the server has stopped: remove the instance (when there is one) and the Regolith build, unless `keep`. A kept
+ * instance moves out of its slot (`keepInstance`); the result says where it is.
+ */
+export async function disposeRun(project: ProjectPacks, instance: BdsInstance | undefined, keep: boolean | undefined): Promise<KeptRun | undefined> {
   try {
-    if (instance && !keep) await disposeInstance(instance);
+    if (!instance) return undefined;
+    if (!keep) {
+      await disposeInstance(instance);
+      return undefined;
+    }
+    const kept = await keepInstance(instance);
+    const diagnostics: Diagnostic[] = kept.note ? [{ severity: "warning", code: "bds.instance-kept-in-slot", message: kept.note, source: "bds" }] : [];
+    return { instanceDir: kept.dir, diagnostics };
   } finally {
     await disposeBuild(project, keep);
   }
 }
 
-/** Prepare an instance for `project`, run `body` on it, then dispose of the instance and the build unless `keep`. */
-export async function withInstance<T>(
+/** `result` with the kept instance's folder and warnings added. */
+export function withKept<T extends { diagnostics: Diagnostic[]; instanceDir?: string }>(result: T, kept: KeptRun | undefined): T {
+  if (!kept) return result;
+  return { ...result, instanceDir: kept.instanceDir, diagnostics: [...result.diagnostics, ...kept.diagnostics].sort(compareDiagnostics) };
+}
+
+/**
+ * Prepare an instance for `project`, run `body` on it, then dispose of the instance and the build unless `keep`. With
+ * `keep`, the result's `instanceDir` is where the kept instance ended up.
+ */
+export async function withInstance<T extends { diagnostics: Diagnostic[]; instanceDir?: string }>(
   project: ProjectPacks,
   opts: BdsRunOptions & { packMode?: "copy" | "symlink"; properties?: Record<string, string> },
   body: (run: PreparedRun) => Promise<T>,
 ): Promise<T> {
-  let instance: BdsInstance | undefined;
+  let run: PreparedRun;
   try {
-    const run = await prepareInstance(project, opts);
-    instance = run.instance;
-    return await body(run);
-  } finally {
-    await disposeRun(project, instance, opts.keep);
+    run = await prepareInstance(project, opts);
+  } catch (err) {
+    await disposeBuild(project, opts.keep);
+    throw err;
   }
+  let result: T;
+  let kept: KeptRun | undefined;
+  try {
+    result = await body(run);
+  } finally {
+    kept = await disposeRun(project, run.instance, opts.keep);
+  }
+  return withKept(result, kept);
 }

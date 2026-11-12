@@ -2,6 +2,13 @@
 
 Release notes for sculkwire. Each `## vX.Y.Z` section becomes the GitHub release text when its tag is pushed.
 
+## v0.1.3
+
+- Windows Firewall no longer asks for permission on every Bedrock Dedicated Server run. A server now runs from a stable slot folder, `bds-instances/slot-<n>` in the data folder (the lowest free slot), so `bedrock_server.exe` keeps its path and Windows asks at most once per slot. Before, every run used a new folder, which Windows treated as a new program. A kept instance folder is moved to `bds-instances/<id>`.
+- On Windows, `sculk setup` and `install.ps1` add inbound firewall rules named `sculkwire BDS` for the server in slots 0 to 3 (allowed on private and domain networks, blocked on public ones), with one elevation prompt. When the rules exist, setup asks nothing; a declined prompt leaves setup successful. `sculk setup --no-firewall` (`install.ps1 -NoFirewall`, `SCULKWIRE_NO_FIREWALL=1`) skips the step. See [Install and Update](docs/install.md#windows-firewall).
+- An update from v0.1.2 does not add the firewall rules, since an update never runs `sculk setup`: Windows asks one last time per slot folder, or run `sculk setup` once to add them. `sculk doctor` on Windows has a `firewall` line that says whether the rules are in place.
+- The free-port probe for a new server binds loopback instead of all interfaces.
+
 ## v0.1.2
 
 - `game_worlds` (and `sculk game worlds`) lists every world of the active game user, marking sculkwire's test worlds, kept ones and the loaded one, and deletes one test world. It refuses the user's own worlds and the world the game has loaded.

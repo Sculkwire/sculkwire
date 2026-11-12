@@ -14,7 +14,7 @@ import { summarizeProfile, type ProfileSummary } from "../debugger/profile.ts";
 import { DebuggerSession, connectTo } from "../debugger/session.ts";
 import { entriesToDiagnostics, mergeEntries, parseConsole, type IndexedPack } from "../gamelog/logparse.ts";
 import { freeTcpPort, type BdsInstance } from "./instance.ts";
-import { disposeBuild, disposeRun, indexProject, prepareInstance, projectPacks, type BdsRunOptions, type ProjectPacks } from "./project.ts";
+import { disposeBuild, disposeRun, indexProject, prepareInstance, projectPacks, withKept, type BdsRunOptions, type KeptRun, type ProjectPacks } from "./project.ts";
 import { finishRun, runLabel, serverVersionOf } from "./run.ts";
 import { BdsServer, START_TIMEOUT_MS, type ConsoleLine } from "./server.ts";
 
@@ -262,19 +262,24 @@ export interface StopResult {
   exitCode: number | null;
   rawLogPath: string;
   diagnostics: Diagnostic[];
+  /** Where the kept instance folder is, when the session was started with `keep`. */
+  instanceDir?: string;
 }
 
 export async function stopSession(id: string): Promise<StopResult> {
   const s = getSession(id);
   sessions.delete(id);
   s.debugger?.close();
+  let result: StopResult;
+  let kept: KeptRun | undefined;
   try {
     const exitCode = await s.server.stop();
     const { diagnostics, rawLogPath } = await finishRun(s, s.server);
-    return { exitCode, rawLogPath, diagnostics };
+    result = { exitCode, rawLogPath, diagnostics };
   } finally {
-    await disposeRun(s.project, s.instance, s.keep);
+    kept = await disposeRun(s.project, s.instance, s.keep);
   }
+  return withKept(result, kept);
 }
 
 /** Stop every running session (MCP server shutdown). */

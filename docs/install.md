@@ -15,7 +15,7 @@ Steps for an AI agent that was asked to install sculkwire. Work in the clone of 
 
 ## Installers
 
-`install.sh` (Linux and macOS) and `install.ps1` (Windows PowerShell 5.1 or PowerShell 7) take the same options, ask the same question and print the same lines.
+`install.sh` (Linux and macOS) and `install.ps1` (Windows PowerShell 5.1 or PowerShell 7) take the same options, ask the same question and print the same lines. Only `install.ps1` has `-NoFirewall`, because only Windows needs the firewall step (see [Windows Firewall](#windows-firewall)).
 
 1. Check for git, npm and a Node.js that runs TypeScript sources.
 2. Use the clone the script runs from, or clone the repository into a temporary folder when the script arrives through a pipe.
@@ -23,7 +23,7 @@ Steps for an AI agent that was asked to install sculkwire. Work in the clone of 
 4. Put `sculk` on PATH, after saying what it is about to change. `--no-path` (`-NoPath`) skips this step.
    - Linux and macOS: a symlink `sculk` in `SCULKWIRE_BIN_DIR`, default `~/.local/bin`. Your shell profile is never edited: when that folder is not on PATH, the installer prints the line to add.
    - Windows: the managed `bin` folder is added to the user PATH (new terminals pick it up) and to the PATH of the running session. With `SCULKWIRE_BIN_DIR` set, a `sculk.cmd` that calls the launcher is written there instead, and that folder is added. Windows cannot create a symlink without admin rights.
-5. Ask which MCP clients to register with unless `--yes` or `--register` is given or there is no terminal to ask in (`install.sh` reads `/dev/tty`, `install.ps1` needs an interactive console with stdin not redirected), then run `sculk setup --yes` with the answer.
+5. Ask which MCP clients to register with unless `--yes` or `--register` is given or there is no terminal to ask in (`install.sh` reads `/dev/tty`, `install.ps1` needs an interactive console with stdin not redirected), then run `sculk setup --yes` with the answer. On Windows, setup also adds the firewall rules for the Bedrock Dedicated Server unless `-NoFirewall` is given.
 
 | `install.sh` | `install.ps1` | Environment | Meaning |
 |---|---|---|---|
@@ -32,6 +32,7 @@ Steps for an AI agent that was asked to install sculkwire. Work in the clone of 
 | `--channel <channel>` | `-Channel <channel>` | `SCULKWIRE_CHANNEL` | `release` (default), `main` or `off` |
 | `--repo <url>` | `-Repo <url>` | `SCULKWIRE_REPO` | Repository to install from, a git URL or a local path. Default `https://github.com/Sculkwire/sculkwire.git` |
 | `--no-path` | `-NoPath` | `SCULKWIRE_NO_PATH=1` | Leave PATH alone |
+| | `-NoFirewall` | `SCULKWIRE_NO_FIREWALL=1` | Windows only: do not add the firewall rules for the Bedrock Dedicated Server (`sculk setup --no-firewall`) |
 | `--help` | `-Help` | | Print the options |
 
 A flag wins over its environment variable. The variables exist for piped runs, which cannot take flags. Both scripts exit 0 on success and 2 on a failure, with the reason on stderr.
@@ -74,6 +75,26 @@ A version folder is never changed after it is installed. A new version is cloned
 - Any other client: `sculk setup` prints the JSON entry on stdout.
 
 On Windows the entry runs `cmd /c <data>\bin\sculk.cmd mcp`, because MCP clients start servers without a shell.
+
+## Windows Firewall
+
+The Bedrock Dedicated Server binds its UDP ports on all network interfaces, and no `server.properties` option makes it listen on loopback only. Windows Firewall asks for permission the first time a program at a new path listens, and keys its rules on that path. Earlier versions ran every server from a new folder, so Windows asked on every run. A server now runs from a numbered slot folder, `bds-instances\slot-<n>` in the data folder, so the path stays the same from run to run. sculkwire itself talks to the server only through stdin and loopback, which the firewall does not filter.
+
+On Windows, `sculk setup` (which `install.ps1` runs) adds the rules once, so Windows does not ask during a run:
+
+- All rules are named `sculkwire BDS`.
+- They cover `bedrock_server.exe` in slots 0 to 3: `%LOCALAPPDATA%\sculkwire\data\bds-instances\slot-0\bedrock_server.exe` to `slot-3`, or the same under `SCULKWIRE_DATA`. A fifth server running at the same time uses slot 4, for which Windows asks once.
+- Inbound connections are allowed on private and domain networks and blocked on public ones. A rule has to exist for every profile or Windows asks again, and the test server runs in offline mode with cheats on, so it is not opened on public networks.
+
+Adding rules needs administrator rights, so Windows shows one elevation (UAC) prompt. When the rules are already there, setup asks nothing. When the prompt is declined or cannot be shown (no desktop, CI), setup goes on and exits 0; Windows then asks when a server first starts in each slot. To add the rules later, run `sculk setup` again. `sculk setup --no-firewall` (`install.ps1 -NoFirewall`, `SCULKWIRE_NO_FIREWALL=1`) skips the step.
+
+An update from v0.1.2 or older (automatic or `sculk update`) does not add the rules, because an update never runs `sculk setup`. After it, Windows asks one last time when a server first runs from a slot folder. Answer it once and it stays answered, because the folder no longer changes. Or run `sculk setup` once to add the rules for all four slots. `sculk doctor` shows whether the rules are in place (the `firewall` line, on Windows only).
+
+To remove the rules, run this in an elevated prompt:
+
+```
+netsh advfirewall firewall delete rule name="sculkwire BDS"
+```
 
 ## Updates
 

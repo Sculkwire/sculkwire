@@ -1,6 +1,6 @@
 /**
- * `sculk setup` (checks the machine, registers sculkwire with MCP clients, prints the registration for any other)
- * and `sculk doctor` (the same checks, one line per problem with its fix).
+ * `sculk setup` (checks the machine, adds the Windows Firewall rules for the Bedrock Dedicated Server on Windows,
+ * registers sculkwire with MCP clients, prints the registration for any other) and `sculk doctor` (the same checks, one line per problem with its fix).
  */
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
@@ -10,6 +10,7 @@ import { errorMessage } from "../core/errors.ts";
 import { cacheDir } from "../core/paths.ts";
 import { findRgl } from "../core/regolith.ts";
 import { findInstalls } from "../gamefiles/install.ts";
+import { ensureFirewallRules, FIREWALL_RULE, type FirewallResult, firewallRulesPresent } from "../runtime/bds/firewall.ts";
 import { listInstalled } from "../runtime/bds/install.ts";
 import { describeVersion, versionInfo } from "../update/auto.ts";
 import { CLIENTS, type McpClient, parseClients, serverEntry, snippet } from "./register.ts";
@@ -64,6 +65,23 @@ export interface Check {
   fix?: string;
 }
 
+/**
+ * The `firewall` check from the result of `firewallRulesPresent`: none off Windows or when detection could not run.
+ * An install updated from an older version has no rules until `sculk setup` runs, since an update never runs setup.
+ */
+export function firewallCheck(present: boolean | undefined): Check | undefined {
+  if (present === undefined) return undefined;
+  return {
+    name: "firewall",
+    level: "optional",
+    ok: present,
+    detail: present
+      ? "Windows Firewall rules for the Bedrock Dedicated Server are in place"
+      : "no Windows Firewall rules for the Bedrock Dedicated Server, Windows asks once for each server folder (bds-instances\\slot-0 and up)",
+    fix: "sculk setup",
+  };
+}
+
 export async function runChecks(): Promise<Check[]> {
   const checks: Check[] = [];
   const version = await versionInfo().catch(() => undefined);
@@ -104,6 +122,9 @@ export async function runChecks(): Promise<Check[]> {
     detail: rgl ? `rgl ${rgl}` : "rgl not found in ~/.local/bin, ~/.rgl/bin or PATH, Regolith projects with filters cannot be built",
     fix: fixFor("rgl"),
   });
+
+  const firewall = firewallCheck(await firewallRulesPresent());
+  if (firewall) checks.push(firewall);
   return checks;
 }
 
@@ -114,7 +135,7 @@ export function formatCheck(c: Check): string {
 
 const doctor: CliCommand = {
   name: "doctor",
-  summary: "Check the machine: Node, game client, BDS and rgl",
+  summary: "Check the machine: Node, game client, BDS, rgl and, on Windows, the firewall rules",
   async run(args) {
     if (args.length) {
       err("usage: sculk doctor");
@@ -141,22 +162,25 @@ async function ask(question: string, fallback: string): Promise<string> {
 }
 
 const SETUP_USAGE = [
-  `usage: sculk setup [--yes] [--register ${CLIENTS.map((c) => c.name).join(",")}]`,
+  `usage: sculk setup [--yes] [--register ${CLIENTS.map((c) => c.name).join(",")}] [--no-firewall]`,
   "",
-  "  --yes       ask nothing (no client registration unless --register)",
-  `  --register  register sculkwire with these MCP clients (${CLIENTS.map((c) => c.name).join(", ")}); the JSON for any other client is printed`,
+  "  --yes          ask nothing (no client registration unless --register)",
+  `  --register     register sculkwire with these MCP clients (${CLIENTS.map((c) => c.name).join(", ")}); the JSON for any other client is printed`,
+  "  --no-firewall  on Windows, do not add the firewall rules for the Bedrock Dedicated Server (they need one elevation prompt)",
 ].join("\n");
 
 interface SetupArgs {
   yes: boolean;
+  noFirewall: boolean;
   register?: McpClient[];
 }
 
 function parseSetup(args: string[]): SetupArgs | string {
-  const parsed: SetupArgs = { yes: false };
+  const parsed: SetupArgs = { yes: false, noFirewall: false };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--yes" || arg === "-y") parsed.yes = true;
+    else if (arg === "--no-firewall") parsed.noFirewall = true;
     else if (arg === "--register") {
       const clients = parseClients(args[++i] ?? "");
       if (typeof clients === "string") return clients;
@@ -164,6 +188,35 @@ function parseSetup(args: string[]): SetupArgs | string {
     } else return `unknown argument ${arg}`;
   }
   return parsed;
+}
+
+/** The one stderr line for a firewall outcome. */
+function firewallLine(result: Exclude<FirewallResult, { status: "skipped" }>): string {
+  const later = "Windows asks when a server first starts in each instance slot; run sculk setup again to add the rules";
+  switch (result.status) {
+    case "present":
+      return `Windows Firewall rules "${FIREWALL_RULE}" for the Bedrock Dedicated Server are in place`;
+    case "added":
+      return `Added Windows Firewall rules "${FIREWALL_RULE}" for the Bedrock Dedicated Server, so Windows does not ask during a run`;
+    case "declined":
+      return `Windows Firewall rules not added, ${result.message}. ${later}`;
+    case "failed":
+      return `Windows Firewall rules not added: ${result.message}. ${later}`;
+  }
+}
+
+/** On Windows, the firewall rules for the server slots. Fails open: setup goes on whatever happens here. */
+async function firewall(skip: boolean): Promise<void> {
+  if (process.platform !== "win32") return;
+  if (skip) {
+    err("Skipped the Windows Firewall rules (--no-firewall): Windows asks when a server first starts in each instance slot");
+    return;
+  }
+  const result = await ensureFirewallRules({
+    onElevate: () =>
+      err("Windows will ask once for permission to add firewall rules for the Bedrock Dedicated Server, so it never asks during a run (--no-firewall skips this)"),
+  });
+  if (result.status !== "skipped") err(firewallLine(result));
 }
 
 async function register(clients: readonly McpClient[]): Promise<void> {
@@ -179,7 +232,7 @@ async function register(clients: readonly McpClient[]): Promise<void> {
 
 const setup: CliCommand = {
   name: "setup",
-  summary: "Set up: check the machine, register sculkwire with MCP clients",
+  summary: "Set up: check the machine, add the Windows Firewall rules, register sculkwire with MCP clients",
   async run(args) {
     const opts = parseSetup(args);
     if (typeof opts === "string") {
@@ -188,6 +241,7 @@ const setup: CliCommand = {
     }
     err("Checking this machine...");
     for (const c of await runChecks()) err(formatCheck(c));
+    await firewall(opts.noFirewall);
     let clients = opts.register;
     if (!opts.yes && !clients) {
       const names = CLIENTS.map((c) => c.name);

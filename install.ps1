@@ -1,7 +1,9 @@
 <#
 .SYNOPSIS
 Install sculkwire on Windows: the newest release into a managed folder (updated automatically), `sculk` on the user
-PATH, then `sculk setup`. install.sh is the Linux and macOS twin: same options, prompts and output.
+PATH, then `sculk setup`, which on Windows adds the firewall rules for the Bedrock Dedicated Server (one elevation
+prompt). install.sh is the Linux and macOS twin: same options, prompts and output, except -NoFirewall, which only
+Windows has.
 
 .DESCRIPTION
 Run it from a clone (.\install.ps1 -Yes) or piped (irm <raw url>/install.ps1 | iex). A piped script takes no
@@ -15,6 +17,7 @@ param(
   [string]$Channel = "",
   [string]$Repo = "",
   [switch]$NoPath,
+  [switch]$NoFirewall,
   [switch]$Help
 )
 
@@ -31,17 +34,19 @@ $sculkwireInstallExit = & {
   function Fail([string]$Message) { throw "sculkwire install: $Message" }
   function Usage {
     Say @"
-Usage: install.ps1 [-Yes] [-Register omp,claude] [-Channel release|main|off] [-Repo URL] [-NoPath]
+Usage: install.ps1 [-Yes] [-Register omp,claude] [-Channel release|main|off] [-Repo URL] [-NoPath] [-NoFirewall]
 
-  -Yes       ask nothing (no client registration unless -Register)
-  -Register  MCP clients to register sculkwire with (omp, claude). The JSON for any other client is printed
-  -Channel   update channel: release (default), main, or off for no automatic updates
-  -Repo      git URL or local path to install from (default https://github.com/Sculkwire/sculkwire.git)
-  -NoPath    do not put sculk on PATH (default: add `$env:SCULKWIRE_BIN_DIR with a sculk.cmd, else the managed
-             bin folder, to the user PATH)
+  -Yes         ask nothing (no client registration unless -Register)
+  -Register    MCP clients to register sculkwire with (omp, claude). The JSON for any other client is printed
+  -Channel     update channel: release (default), main, or off for no automatic updates
+  -Repo        git URL or local path to install from (default https://github.com/Sculkwire/sculkwire.git)
+  -NoPath      do not put sculk on PATH (default: add `$env:SCULKWIRE_BIN_DIR with a sculk.cmd, else the managed
+               bin folder, to the user PATH)
+  -NoFirewall  do not add the Windows Firewall rules for the Bedrock Dedicated Server (default: add them, which
+               asks once for elevation, so Windows does not ask when a server starts)
 
 Every option can also come from the environment, which works when the script is piped: SCULKWIRE_YES=1,
-SCULKWIRE_REGISTER, SCULKWIRE_CHANNEL, SCULKWIRE_REPO, SCULKWIRE_NO_PATH=1.
+SCULKWIRE_REGISTER, SCULKWIRE_CHANNEL, SCULKWIRE_REPO, SCULKWIRE_NO_PATH=1, SCULKWIRE_NO_FIREWALL=1.
 "@
   }
 
@@ -51,6 +56,7 @@ SCULKWIRE_REGISTER, SCULKWIRE_CHANNEL, SCULKWIRE_REPO, SCULKWIRE_NO_PATH=1.
     # Parameters win over the environment variables a piped run uses instead.
     $yesOpt = $Yes.IsPresent -or ($env:SCULKWIRE_YES -eq "1")
     $noPathOpt = $NoPath.IsPresent -or ($env:SCULKWIRE_NO_PATH -eq "1")
+    $noFirewallOpt = $NoFirewall.IsPresent -or ($env:SCULKWIRE_NO_FIREWALL -eq "1")
     $registerOpt = if ($Register.Count) { $Register -join "," } else { "$env:SCULKWIRE_REGISTER" }
     $registerGiven = $registerOpt -ne ""
     $channelOpt = if ($Channel) { $Channel } else { "$env:SCULKWIRE_CHANNEL" }
@@ -129,6 +135,7 @@ SCULKWIRE_REGISTER, SCULKWIRE_CHANNEL, SCULKWIRE_REPO, SCULKWIRE_NO_PATH=1.
 
     $setupArgs = @("setup", "--yes")
     if ($registerOpt) { $setupArgs += @("--register", $registerOpt) }
+    if ($noFirewallOpt) { $setupArgs += "--no-firewall" }
     # The registration JSON goes to the console, not into this block's result.
     & $launcher @setupArgs | Out-Host
     if ($LASTEXITCODE -ne 0) { Fail "sculk setup failed" }
@@ -146,4 +153,4 @@ $sculkwireInstallExit = @($sculkwireInstallExit)[-1]
 if ($sculkwireInstallFile) { exit $sculkwireInstallExit }
 $global:LASTEXITCODE = $sculkwireInstallExit
 # A piped run defined the parameters in the caller's session too.
-Remove-Variable sculkwireInstallFile, sculkwireInstallExit, Yes, Register, Channel, Repo, NoPath, Help -ErrorAction SilentlyContinue
+Remove-Variable sculkwireInstallFile, sculkwireInstallExit, Yes, Register, Channel, Repo, NoPath, NoFirewall, Help -ErrorAction SilentlyContinue

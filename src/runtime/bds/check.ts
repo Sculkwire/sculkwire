@@ -30,7 +30,7 @@ export interface CheckResult {
   rawLogPath?: string;
   /** `build-failed`: the Regolith build failed, so BDS did not start. */
   status: "started" | "exited" | "timeout" | "build-failed";
-  /** Instance dir when `keep` was set. */
+  /** Where the kept instance folder is, when `keep` was set. */
   instanceDir?: string;
   exitCode: number;
 }
@@ -96,7 +96,6 @@ export async function bdsCheck(path: string, opts: CheckOptions = {}): Promise<C
       status: run.status,
       exitCode: exitCodeFor(diagnostics),
     };
-    if (opts.keep) result.instanceDir = instance.dir;
     return result;
   });
 }

@@ -30,6 +30,11 @@ function intOf(value: unknown, name: string): number | undefined {
   return n;
 }
 
+/** `; kept <folder>` for a run whose instance was kept, else empty. */
+function keptText(r: { instanceDir?: string }): string {
+  return r.instanceDir ? `; kept ${r.instanceDir}` : "";
+}
+
 /** Shared error → exit code mapping: usage and prerequisite errors are 2. */
 async function guarded(usage: string, run: () => Promise<number>): Promise<number> {
   try {
@@ -101,7 +106,7 @@ export const commands: CliCommand[] = [
         const { exitCode, ...result } = r;
         if (values.json) out(JSON.stringify({ ...result, summary: summarize(r.diagnostics) }, null, 2));
         else for (const d of r.diagnostics) out(formatDiagnostic(d));
-        log(r.status === "build-failed" ? describeCheck(r) : `${describeCheck(r)}; log ${r.rawLogPath}`);
+        log(r.status === "build-failed" ? describeCheck(r) : `${describeCheck(r)}; log ${r.rawLogPath}${keptText(r)}`);
         return exitCode;
       }),
   },
@@ -138,7 +143,7 @@ export const commands: CliCommand[] = [
           for (const d of r.diagnostics) out(formatDiagnostic(d));
         }
         const head = describeGameTest(r, [`${r.durationMs} ms`]);
-        log(head ? `${head}; log ${r.rawLogPath}` : "GameTest not run: the Regolith build failed");
+        log(head ? `${head}; log ${r.rawLogPath}${keptText(r)}` : "GameTest not run: the Regolith build failed");
         return r.exitCode;
       }),
   },
@@ -180,7 +185,7 @@ export const commands: CliCommand[] = [
         rl.close();
         const r = await stopSession(info.id);
         for (const d of r.diagnostics) log(formatDiagnostic(d));
-        log(`stopped (exit ${r.exitCode}); log ${r.rawLogPath}`);
+        log(`stopped (exit ${r.exitCode}); log ${r.rawLogPath}${keptText(r)}`);
         return exitCodeFor(r.diagnostics);
       }),
   },

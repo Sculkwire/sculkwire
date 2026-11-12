@@ -146,6 +146,8 @@ export interface GameTestRunResult extends GameTestSummary {
   diagnostics: Diagnostic[];
   /** Absent when no server ran. */
   rawLogPath?: string;
+  /** Where the kept instance folder is, when `keep` was set. */
+  instanceDir?: string;
   exitCode: number;
 }
 

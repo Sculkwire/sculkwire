@@ -161,6 +161,8 @@ Checks one file in the context of its pack and the sibling packs, and returns on
 
 These tools download Bedrock Dedicated Server on first use. It runs on Linux and Windows x64. Pass `acceptEula: true` once to record that the user accepted the [Minecraft EULA](https://www.minecraft.net/eula), which is needed before the first download. `channel` picks the server build, `stable` (default) or `preview`.
 
+Each server runs in an instance folder in sculkwire's data folder: the lowest free numbered slot, `bds-instances/slot-<n>`, so the server program keeps the same path from run to run (Windows Firewall keys its rules on that path). Servers that run at the same time, from one MCP server or several, get different slots. When a run ends the folder is removed, unless it is kept: then it moves to `bds-instances/<id>` once the server has stopped, and the slot is free again. If the move fails (for example because Windows still locks the server program), the folder stays in its slot, a `bds.instance-kept-in-slot` warning says so, and that slot stays taken until the folder is deleted.
+
 ### bds_check
 
 Loads your packs into a throwaway server, waits for `Server started`, lets it run, then stops it. Returns every content log, console and script error (with the script's file and line) as diagnostics mapped back to your files, plus `summary`, `exitCode`, `serverVersion`, `durationMs` and `rawLogPath`.
@@ -171,7 +173,7 @@ A Regolith project whose profile runs filters is built with rgl first, and the s
 |---|---|
 | `path` | Project or pack folder (required) |
 | `settleMs` | How long to run after `Server started`, 0 to 120000 (default 8000) |
-| `keep` | Keep the server instance folder |
+| `keep` | Keep the server instance folder; `instanceDir` in the result says where it is |
 | `channel`, `acceptEula` | As above |
 
 ### gametest_run
