@@ -42,6 +42,8 @@ sculk bench all --list                   # every scenario, its default runs and 
 
 The exit code is 0 when every run of every scenario succeeded and 1 otherwise. A bad option (a `--stance` other than `auto`, `kite` or `guard`, for one) prints the usage and exits with 2. `--view` needs the in-game agent: when none answers after the input setup (`--input keyboard` attaches none), the bench says so, stops the game and exits with 2. The bench launches its own game, so it fails when the game of the same install is already running or a sculkwire bridge already runs in the process.
 
+On the engine route the bench holds the input provider's input lock while each run's action plays, the same lock `player_act` holds, so your own keyboard and mouse stay out of the game during a measured run. F9 takes control back: the running action stops, a `play` run waits until you give control back, and the run still ends at its time limit. Setup between runs (teleports, arena blocks, spawns) runs unlocked.
+
 On Windows the keyboard route uses the system keyboard and mouse: the bench brings the game window to the foreground once at the start, and it has to stay there. When you switch away, every key and button is let go, the running action fails with `the game window is not in the foreground`, and each run after it fails at once with the same message until the game window is in front again. On Linux the input stays inside gamescope and you can use your desktop meanwhile. Bench results so far come from Linux.
 
 ## Table

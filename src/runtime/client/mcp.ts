@@ -9,7 +9,7 @@ import { diagnosticSchema, diagText, fail, ok, summarySchema } from "../../core/
 import { dataDir } from "../../core/paths.ts";
 import { onShutdown } from "../../core/shutdown.ts";
 import { bridge, WORLD_WAIT_MAX_S, WORLD_WAIT_MS, type BridgeStatus, type CommandOutput } from "./bridge.ts";
-import { inputProvider } from "./inputprovider.ts";
+import { inputProvider, withInputLock } from "./inputprovider.ts";
 import { engine } from "../engine/engine.ts";
 import type { EngineResult } from "../engine/failure.ts";
 import type { EntityInfo, Loadout, PlayerAction } from "./types.ts";
@@ -747,14 +747,9 @@ export function register(server: McpServer): void {
               paused: () => provider?.pausedReason() !== undefined,
               tasks: () => liveTaskEnv({ controller }),
             };
-            job = await playJobs.start(spec.goal, async ({ signal, onStep, onPlan }) => {
-              const unholdJob = await locking?.hold();
-              try {
-                return await play(spec, pauseOnTakeover(env, locking?.input.takeover ?? gate, signal), { signal, onStep, onPlan });
-              } finally {
-                await unholdJob?.();
-              }
-            });
+            job = await playJobs.start(spec.goal, ({ signal, onStep, onPlan }) =>
+              withInputLock(locking, () => play(spec, pauseOnTakeover(env, locking?.input.takeover ?? gate, signal), { signal, onStep, onPlan })),
+            );
             results.push({ action: "play", ok: true, message: `started job ${job.id}`, durationMs: 0 });
             lines.push(`play job ${job.id} running: "${spec.goal}". Follow it with player_job (status, wait, stop)`);
           } else if (spec) lines.push("play not started because an earlier action failed");

@@ -142,5 +142,18 @@ export function inputProvider(): InputProvider | undefined {
   return extended ?? builtin;
 }
 
+/**
+ * Runs `body` while `locking` holds its input lock, so the user's keyboard and mouse stay out of the game, and
+ * releases it either way. Pass undefined off the engine route: the body then runs unlocked.
+ */
+export async function withInputLock<T>(locking: InputProvider | undefined, body: () => Promise<T>): Promise<T> {
+  const unhold = await locking?.hold();
+  try {
+    return await body();
+  } finally {
+    await unhold?.();
+  }
+}
+
 /** Why `input: "engine"` cannot be used when no provider is installed. */
 export const NO_INPUT_PROVIDER = "no in-process input provider is installed, so only the keyboard route exists";

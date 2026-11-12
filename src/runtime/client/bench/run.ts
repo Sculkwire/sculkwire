@@ -16,7 +16,8 @@ import { writeFileAtomic } from "../../../core/fs.ts";
 import { cacheDir } from "../../../core/paths.ts";
 import { engine, type GameSetting, type SettingValue } from "../../engine/engine.ts";
 import { getSetting, setSetting } from "../../engine/settings.ts";
-import { inputProvider } from "../inputprovider.ts";
+import { inputProvider, withInputLock, type InputProvider } from "../inputprovider.ts";
+import { pauseOnTakeover } from "../jobs.ts";
 import { bridge, type BridgeStatus, type WorldEntry } from "../bridge.ts";
 import type { LaunchMode } from "../launcher.ts";
 import { FOREGROUND_MESSAGE } from "../windows.ts";
@@ -209,6 +210,8 @@ export function withPhrasing(spec: PlayerAction | PlayAction, goals: readonly st
 interface RunOptions {
   stance?: BenchStance | undefined;
   plan: Pick<PlayEnvironment, "tasks">;
+  /** The provider whose input lock is held while the run's action plays (engine route only). */
+  locking?: InputProvider | undefined;
 }
 
 async function runOnce(s: Scenario, index: number, run: number, controller: PlayerController, log: (l: string) => void, opts: RunOptions): Promise<{ record: RunRecord; frames?: TraceFrame[] }> {
@@ -303,11 +306,15 @@ async function runOnce(s: Scenario, index: number, run: number, controller: Play
             ctrl.abort();
           });
   try {
-    if (spec.action === "play") {
-      played = await play({ ...(spec as PlayAction), durationMs: (spec as PlayAction).durationMs ?? s.timeoutMs }, playEnv(controller, opts.plan), { signal: ctrl.signal });
-    } else {
-      action = await controller.run(spec as PlayerAction, ctrl.signal);
-    }
+    // The user's own input stays out of the game while the action plays; after a takeover (F9) `play` waits for control.
+    await withInputLock(opts.locking, async () => {
+      if (spec.action === "play") {
+        const env = pauseOnTakeover(playEnv(controller, opts.plan), opts.locking?.input.takeover, ctrl.signal);
+        played = await play({ ...(spec as PlayAction), durationMs: (spec as PlayAction).durationMs ?? s.timeoutMs }, env, { signal: ctrl.signal });
+      } else {
+        action = await controller.run(spec as PlayerAction, ctrl.signal);
+      }
+    });
   } finally {
     clearTimeout(limit);
     const trace = combatStats(controller).trace;
@@ -479,6 +486,8 @@ export async function runBench(opts: BenchOptions): Promise<BenchReport> {
     const plan: Pick<PlayEnvironment, "tasks"> = { tasks: () => liveTaskEnv({ controller }) };
     const input = await controller.selectInput(opts.input);
     log(`input: ${input}`);
+    const locking = input === "engine" ? inputProvider() : undefined;
+    if (locking) log("input lock: held while each run plays (F9 takes control back)");
     agentCommands = input === "engine" && (await engine.reachable());
     if (agentCommands) log("commands: through the in-game agent");
     if (opts.views?.length) {
@@ -508,7 +517,7 @@ export async function runBench(opts: BenchOptions): Promise<BenchReport> {
           for (let run = 1; run <= n; run++) {
             try {
               if (gate?.userHasControl) throw new Error(`${FOREGROUND_MESSAGE}; bring it back to the front for the remaining runs`);
-              const done = await runOnce(s, index, run, controller, log, { stance, plan });
+              const done = await runOnce(s, index, run, controller, log, { stance, plan, locking });
               runs.push(done.record);
               if (done.frames) traces.push({ scenario: s.name, ...(view ? { view } : {}), ...(stance ? { stance } : {}), run, frames: done.frames });
             } catch (err) {

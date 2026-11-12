@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { runShutdown } from "../../core/shutdown.ts";
-import { inputProvider, registerInputProvider, setBuiltinInputProvider, type InputProvider } from "./inputprovider.ts";
+import { inputProvider, registerInputProvider, setBuiltinInputProvider, withInputLock, type InputProvider } from "./inputprovider.ts";
 
 function fakeProvider(name: string): InputProvider & { closed: number } {
   const provider = {
@@ -76,5 +76,40 @@ describe("input provider registry", () => {
     await runShutdown();
     expect(mine.closed).toBe(1);
     expect(agent.closed).toBe(1);
+  });
+});
+
+describe("withInputLock", () => {
+  function counting(): { provider: InputProvider; held: () => number; holds: () => number } {
+    let held = 0;
+    let holds = 0;
+    const provider: InputProvider = {
+      ...fakeProvider("locking"),
+      hold: async () => {
+        held++;
+        holds++;
+        return async () => {
+          held--;
+        };
+      },
+    };
+    return { provider, held: () => held, holds: () => holds };
+  }
+
+  it("holds the lock while the body runs and releases it when the body ends", async () => {
+    const lock = counting();
+    const seen = await withInputLock(lock.provider, async () => lock.held());
+    expect(seen).toBe(1);
+    expect([lock.holds(), lock.held()]).toEqual([1, 0]);
+  });
+
+  it("releases the lock when the body throws", async () => {
+    const lock = counting();
+    await expect(withInputLock(lock.provider, async () => Promise.reject(new Error("the run failed")))).rejects.toThrow("the run failed");
+    expect([lock.holds(), lock.held()]).toEqual([1, 0]);
+  });
+
+  it("runs the body unlocked when no provider is given (the keyboard route)", async () => {
+    expect(await withInputLock(undefined, async () => "played")).toBe("played");
   });
 });
