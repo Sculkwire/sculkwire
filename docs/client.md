@@ -87,6 +87,10 @@ If the launch command starts the game but cannot open the world (it ignores `{ur
 
 `game_launch` creates a world named `sculkwire-<name>` and installs a small helper behavior pack. The world is flat and creative, has cheats on, and keeps daylight, weather and mob spawning frozen. It is a single-player world with LAN, Xbox Live and platform broadcast off, so nobody can join a test session. sculkwire also changes a few `options.txt` settings (script debugger and WebSockets) so it can connect. `game_stop` restores them.
 
+### Worlds
+
+sculkwire writes and deletes only worlds whose folder and level name both start with `sculkwire-`. Every launch reuses `sculkwire-bridge` (or the world `game_launch` names) and replaces it. A test world nobody played for 3 days is removed by the next launch, unless it carries the kept marker (`sculkwire-world.json` in its folder), which `keep: true` and `copyFrom` set. `keep: true` enters an existing test world as it is and adds the project's packs to its pack lists. `copyFrom` copies one of your worlds, by its name or level id and only when you chose it, into a `sculkwire-` world; it reads the original and never writes it, and turns multiplayer and every broadcast off and cheats on in the copy only. Your own worlds are never renamed, moved, changed or deleted. `game_worlds` and `sculk game worlds` list every world and delete a test world.
+
 ### One Folder per Pack UUID
 
 When two folders in `development_behavior_packs` or `development_resource_packs` share a header uuid, the game loads either of them, so a stale copy can win over your latest build. `game_launch` and `game_reload` therefore leave exactly one folder of your project per deployed uuid:

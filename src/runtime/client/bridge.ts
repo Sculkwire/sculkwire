@@ -71,7 +71,8 @@ import { inputProvider } from "./inputprovider.ts";
 import { HELPER_MARK, isReplyTo, parseReply, queryCommand } from "./helperprotocol.ts";
 import { pngSize, readShot } from "./png.ts";
 import { unavailableInput, type InputRoute, type PlayerInput } from "./input.ts";
-import { createWorld, writeWorldIcon, type CreatedWorld, type PackRef } from "./world.ts";
+import { createWorld, type CreatedWorld, type PackRef } from "./world.ts";
+import { pruneWorlds, writeWorldIcon } from "./worldstore.ts";
 import type { Difficulty } from "../../gamefiles/worlds.ts";
 import {
   currentScreen,
@@ -222,6 +223,10 @@ export interface BridgeStartOptions {
   /** Silence the game's audio (Linux and Windows). Default: on in headless mode only. */
   mute?: boolean;
   world?: string;
+  /** Continue in the existing test world instead of replacing it (see `WorldOptions.keep`). */
+  keep?: boolean;
+  /** Start from a copy of this world, a level name or level id (see `WorldOptions.copyFrom`). */
+  copyFrom?: string;
   /** Turn on the Beta APIs experiment in the test world. */
   betaApis?: boolean;
   /** The test world's difficulty (default normal). */
@@ -276,6 +281,10 @@ export interface BridgeStatus {
   deployDiagnostics?: Diagnostic[];
   /** World joins that raced Microsoft sign-in and were recovered without the user (present once one happened). */
   joinRecovery?: { attempts: number; recovered: boolean; via?: string; log?: string; screenshot?: string };
+  /** Launch result only: test worlds this launch removed because nobody played them for `STALE_WORLD_DAYS`. */
+  prunedWorlds?: string[];
+  /** Launch result only: why `difficulty` or `betaApis` did not apply (a kept or copied world keeps its settings). */
+  worldNote?: string;
 }
 
 /** How long `reload` waits at each step (ms); tests shorten them. */
@@ -426,6 +435,9 @@ export class ClientBridge {
   #frame?: { width: number; height: number };
   /** The game's own failure messages for the debugger route's `ok`, read once per install. */
   #failures?: { install: ClientInstall | undefined; matcher: Promise<FailureMatcher> };
+  /** What the newest `start` did to the worlds, for its result. */
+  #prunedWorlds: string[] = [];
+  #worldNote?: string;
   /** Owned by the newest `start`, aborted by `stop`: ends that start's waits for the game and the world, background ones included. */
   #startAbort?: AbortController;
 
@@ -472,6 +484,11 @@ export class ClientBridge {
   }
 
   async start(opts: BridgeStartOptions = {}): Promise<BridgeStatus> {
+    const status = await this.#start(opts);
+    return { ...status, prunedWorlds: this.#prunedWorlds, ...(this.#worldNote ? { worldNote: this.#worldNote } : {}) };
+  }
+
+  async #start(opts: BridgeStartOptions): Promise<BridgeStatus> {
     if (this.launchState) {
       if (this.running) throw new Error("the client bridge is already running; game_stop first");
       // The game exited (crash) without game_stop: clean that launch up (listeners, options, deployed packs) first.
@@ -524,13 +541,26 @@ export class ClientBridge {
     await this.#connect.start();
     await setOptions(optionsFiles(install), bridgeOptions(debuggerPort));
 
-    this.world = await createWorld(install, {
-      name: opts.world ?? "bridge",
-      packs: packRefs,
-      ...(opts.betaApis ? { experiments: ["gametest"] } : {}),
-      ...(opts.difficulty ? { difficulty: opts.difficulty } : {}),
-      ...(install.version ? { gameVersion: install.version } : {}),
-    });
+    try {
+      this.world = await createWorld(install, {
+        name: opts.world ?? "bridge",
+        packs: packRefs,
+        ...(opts.betaApis ? { experiments: ["gametest"] } : {}),
+        ...(opts.difficulty ? { difficulty: opts.difficulty } : {}),
+        ...(install.version ? { gameVersion: install.version } : {}),
+        ...(opts.keep ? { keep: true } : {}),
+        ...(opts.copyFrom !== undefined ? { copyFrom: opts.copyFrom } : {}),
+      });
+    } catch (e) {
+      await this.stop();
+      throw e;
+    }
+    const ignored = [...(opts.difficulty ? [`difficulty ${opts.difficulty}`] : []), ...(opts.betaApis ? ["betaApis"] : [])];
+    this.#worldNote =
+      this.world.how !== "created" && ignored.length > 0
+        ? `${this.world.name} ${this.world.how === "kept" ? "was entered as it is" : `is a copy of ${opts.copyFrom}`} and keeps its own difficulty and experiments: ${ignored.join(" and ")} not applied`
+        : undefined;
+    this.#prunedWorlds = await pruneWorlds(install, { except: this.world.levelId });
     this.#logCursor = await contentEnd(install.logsDir);
     this.#printCursor = this.#printSeq;
     this.#joinCursor = await debugLogEnd(install.logsDir);

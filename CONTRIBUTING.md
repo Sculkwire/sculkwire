@@ -85,7 +85,7 @@ Docs state what the code does now. A status table names the game version it was 
 
 These hold for anything that drives a real client, by hand or from a test:
 
-- **Only `sculkwire-*` worlds.** Create them through sculkwire (`game_launch`, `createWorld`): single player, multiplayer and every broadcast off. Never open, change or delete another world.
+- **Only `sculkwire-*` worlds.** Create them through sculkwire (`game_launch`, `createWorld`): single player, multiplayer and every broadcast off. Never open, change or delete another world. A user's world may be read to copy it into a `sculkwire-` world (`copyFrom`), and only when the user chose it.
 - **Never the store.** Never click or confirm anything on a store, Minecoins, Marketplace, Realms, Dressing Room or profile/persona editor screen. The agent refuses UI input on store, Marketplace, Minecoins, Dressing Room and persona screens except `Escape`; do not work around it.
 - **Restore every option you change.** `game_settings` records the original value and `game_stop` puts it back. Something changed by hand gets put back by hand.
 - **One driver at a time.** Only one agent or process sends input or commands to the game.

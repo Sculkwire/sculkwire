@@ -15,7 +15,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { writeFileAtomic } from "../../core/fs.ts";
 import { findInstall, type ClientInstall } from "../../gamefiles/install.ts";
-import { readLevelDat, writeLevelDat, TAG, type LevelDat, type NbtTag } from "../../gamefiles/nbt.ts";
+import { readLevelDat, tagNumber, writeLevelDat, TAG, type LevelDat, type NbtTag } from "../../gamefiles/nbt.ts";
 import { DIFFICULTIES, GAME_TYPES, GAMERULES, WORLD_PREFIX, difficultyOf, gameTypeOf, worldName } from "../../gamefiles/worlds.ts";
 import type { ScriptRoute } from "./deps.ts";
 import { engine, type EngineSession, type WorldChange, type WorldState } from "./engine.ts";
@@ -41,13 +41,6 @@ export interface WorldDeps {
 
 /** How long a weather change set in level.dat holds: five in-game days, well past a test session. */
 const WEATHER_HOLD_TICKS = 24_000 * 5;
-
-function tagNumber(tag: NbtTag | undefined): number | undefined {
-  if (!tag) return undefined;
-  if (typeof tag.value === "number") return tag.value;
-  if (typeof tag.value === "bigint") return Number(tag.value);
-  return undefined;
-}
 
 function tagBool(tag: NbtTag | undefined): boolean | undefined {
   const n = tagNumber(tag);

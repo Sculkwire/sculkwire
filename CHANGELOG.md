@@ -4,6 +4,9 @@ Release notes for sculkwire. Each `## vX.Y.Z` section becomes the GitHub release
 
 ## v0.1.2
 
+- `game_worlds` (and `sculk game worlds`) lists every world of the active game user, marking sculkwire's test worlds, kept ones and the loaded one, and deletes one test world. It refuses the user's own worlds and the world the game has loaded.
+- `game_launch` takes `keep`, to continue in the existing test world instead of replacing it, and `copyFrom`, to start from a copy of one of the user's worlds. The original is never changed; the copy is single player with cheats on.
+- `game_launch` removes test worlds nobody played for 3 days (never kept or copied ones, never the one it launches) and lists them in `prunedWorlds`. Before, every world name left a `sculkwire-` world behind for good.
 - `sculk bench` holds the input lock on the engine route while each run plays, as `player_act` does, so the user's keyboard and mouse cannot disturb a measured run. F9 takes control back; a `play` run then waits until control returns. The keyboard route is unchanged.
 - `sculk bench` with an unknown option prints the reason and the usage and exits 2; before, it printed a stack trace.
 - `game_builds`, `game_vanilla_packs` and `game_extract_pack` look for the mcbe-gdk-installer game folder under `SCULKWIRE_GDK_ROOT`, else `$XDG_DATA_HOME/mcbe-gdk-linux`, as `game_launch` already did. Before, they searched only `~/.local/share/mcbe-gdk-linux`.

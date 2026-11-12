@@ -1,4 +1,5 @@
 /** The `sculkwire-` worlds sculkwire creates and the level.dat values they set. */
+import { TAG, type NbtCompound } from "./nbt.ts";
 
 export const WORLD_PREFIX = "sculkwire-";
 
@@ -9,6 +10,23 @@ export function worldName(name: string): string {
 /** Folder-safe level id derived from the world name (stable, so a re-create replaces the same world). */
 export function levelIdFor(name: string): string {
   return worldName(name).replace(/[^A-Za-z0-9_-]+/g, "_");
+}
+
+/** Cheats and commands on in a level.dat root: the bridge's commands need them. */
+export function setCheats(root: NbtCompound): void {
+  root.set("commandsEnabled", { type: TAG.Byte, value: 1 });
+  root.set("cheatsEnabled", { type: TAG.Byte, value: 1 });
+}
+
+/** Single player in a level.dat root: multiplayer and every broadcast off (no LAN, Xbox Live or platform), so nobody can join. */
+export function setSinglePlayer(root: NbtCompound): void {
+  root.set("MultiplayerGame", { type: TAG.Byte, value: 0 });
+  root.set("MultiplayerGameIntent", { type: TAG.Byte, value: 0 });
+  root.set("LANBroadcast", { type: TAG.Byte, value: 0 });
+  root.set("LANBroadcastIntent", { type: TAG.Byte, value: 0 });
+  // Broadcast setting 0 is "no multiplayer" (1 invite only, 2 friends, 3 friends of friends, 4 public).
+  root.set("XBLBroadcastIntent", { type: TAG.Int, value: 0 });
+  root.set("PlatformBroadcastIntent", { type: TAG.Int, value: 0 });
 }
 
 /** Level.dat `Difficulty` values. */

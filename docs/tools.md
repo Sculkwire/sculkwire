@@ -262,13 +262,19 @@ If the world join races Microsoft sign-in (the game stops on "You need to authen
 | `deploy` | Copy the project's packs into `development_*_packs` (default true). Copies go to folders named `sculkwire_<project folder>_<pack folder>`, so projects with the same `packs/BP` layout do not overwrite each other; such a folder left by an earlier launch is copied over with the current packs, and `game_stop` removes the folders this launch copied. With `false`, a pack is only used when a folder already serves its uuid. Each deployed uuid ends up in one folder of the project, see [One Folder per Pack UUID](client.md#one-folder-per-pack-uuid) |
 | `display` | `window` (Linux: a visible gamescope window; Windows: the game's own window), `headless` (Linux: no window, muted) or `desktop` (the launcher's own window; on Windows the same as `window`). The default is `window` on Windows. On Linux it is `window` when gamescope can run the install and there is a desktop, `headless` with no desktop, and `desktop` otherwise. A mode that cannot run falls back with a note: to `desktop` on Linux, to `window` for `headless` on Windows |
 | `mute` | Silence the game's audio (default on in `headless` mode only). Linux: a silent PipeWire or PulseAudio sink. Windows: the game's audio sessions, unmuted again by `game_stop`; without an audio device or session the result has a note instead |
-| `world` | World name, prefixed with `sculkwire-` (default `bridge`, replaced on each launch) |
+| `world` | World name, prefixed with `sculkwire-` (default `bridge`, replaced on each launch). Leave it out unless a second world is really needed |
+| `keep` | Continue in the existing test world as it is instead of replacing it (default false). It is created when missing, and is never removed automatically |
+| `copyFrom` | Start from a copy of one of the user's worlds, by level name or level id (see [Worlds](#worlds)). Only for a world the user named or picked |
 | `difficulty` | `peaceful`, `easy`, `normal` (default) or `hard`. Peaceful removes hostile mobs such as zombies |
 | `betaApis` | Turn on the Beta APIs experiment |
 | `width`, `height` | Game resolution in `window` and `headless` mode on Linux, 320 to 3840 by 240 to 2160 (default 1280 by 720). Windows sizes the game window itself |
 | `fps` | Frame rate in `window` and `headless` mode on Linux, 10 to 240 (default 60) |
 | `worldWaitSeconds` | Seconds to wait for the game to start, and then for the world to load, 10 to 1800 (default 180). `sculk game check` takes it as `--world-wait` |
 | `keepOnTimeout` | When the wait runs out, keep the game running and keep waiting in the background instead of stopping it (default false) |
+
+#### Worlds
+
+Without `world`, every launch reuses the test world `sculkwire-bridge` and replaces it, so the user's world list gains no new entry. Each launch also removes the test worlds nobody played for 3 days, never the one it launches and never a kept or copied one; the result lists them in `prunedWorlds` (`removed N old test world(s): ...` in the text). `keep: true` enters the existing test world as it is: its blocks, inventory, difficulty, experiments and game mode stay, its pack lists get the helper and the project's packs added (other packs stay), and `difficulty` or `betaApis` given with it are not applied, which `worldNote` says. `copyFrom` starts from a copy of one of the user's worlds named `sculkwire-<world>`: the original is never changed, the copy is single player with cheats on and keeps everything else (game mode, seed, inventory, experiments), and a world over 4 GiB is refused. A name shared by two worlds is refused with their level ids. List the worlds with `game_worlds` and ask the user which one to copy; never choose one yourself. Each launch with `copyFrom` copies again, unless `keep: true` finds the copy already there.
 
 ### game_status
 
@@ -435,6 +441,17 @@ Reads or changes a test world: game rules, difficulty, game type, time and weath
 | `weather` | `set`: `{ "rain": true, "lightning": false }`. In `level.dat` it is written as rain and lightning levels with a five-day timer |
 
 The result has `source` (`engine` or `level.dat`), the `world` (`name`, and for a file read `levelId` and `dir`), and `settings`: `name`, `seed` (as text, because it is a 64-bit integer), `gameType`, `difficulty`, `cheats`, `education`, `experiments`, `gamerules`, `time`, `dayCycle`, `weather`, `spawn` and `dimension`. A field the engine cannot read is `null`, never a guess. In `level.dat` mode only the game rules the file stores by name are reported and settable.
+
+### game_worlds
+
+Lists every world of the active game user, sculkwire's test worlds and the user's own, or deletes one test world. It reads the world folders and needs no running game. The user's own worlds are only listed: sculkwire never changes or deletes them. A world whose `level.dat` or `levelname.txt` cannot be read is left out.
+
+| Input | Description |
+|---|---|
+| `action` | `list` (default) or `delete` |
+| `world` | `delete`: the test world's name, with or without the `sculkwire-` prefix (required) |
+
+`list` returns `worlds`, played last first, each with `name`, `levelId` (the folder), `sculkwire` (both the folder and the name start with `sculkwire-`: the only worlds sculkwire writes or deletes), `kept` (launched with `keep` or copied: never removed automatically), `copiedFrom`, `lastPlayed` (ISO time from `level.dat`, else the folder's time), `gameMode`, `sizeBytes` and `loaded` (the world the launched game has open). The text has one line per world. `delete` returns `deleted` with `world`, `existed` and the removed `levelIds`. It refuses a world that is not sculkwire's and the world the game has loaded (stop the game first). `sculk game worlds [--json]` lists, `sculk game worlds --delete <name>` deletes (exit 1 when there is no such world, 2 when it is refused).
 
 ### game_stop
 

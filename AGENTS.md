@@ -41,7 +41,7 @@ Layering (directory imports, checked with an import graph): `core/` imports noth
 ## Live game rules
 The full list is in [CONTRIBUTING.md](CONTRIBUTING.md#live-game-rules). In short:
 - Only one agent or process drives the game at a time.
-- Only create or change worlds named `sculkwire-*`, only through `createWorld` (single player: multiplayer and every broadcast off). Never touch the user's other worlds or settings; restore any option changed.
+- Only create or change worlds named `sculkwire-*`, only through `createWorld` (single player: multiplayer and every broadcast off). Never touch the user's other worlds or settings; restore any option changed. A user's world may be read to copy it (`copyFrom`), and only when the user chose it.
 - Stop the game with `game_stop` / `bridge.stop()` or `mcbe-gdk-linux stop`, never by killing the launcher's process group, and confirm `~/.local/share/mcbe-gdk-linux/profile/.gpu-launch-in-progress.json` is gone.
 - Never click or confirm anything on a store, Minecoins, Marketplace, Realms, Dressing Room or profile/persona editor screen.
 - An input provider's input lock fails open: a missing or bad signal must never block the user's own input.

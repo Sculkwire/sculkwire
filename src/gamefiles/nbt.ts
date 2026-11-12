@@ -192,6 +192,14 @@ class Writer {
   }
 }
 
+/** A numeric tag's value as a number (a long too), or undefined for a missing or non-numeric tag. */
+export function tagNumber(tag: NbtTag | undefined): number | undefined {
+  if (!tag) return undefined;
+  if (typeof tag.value === "number") return tag.value;
+  if (typeof tag.value === "bigint") return Number(tag.value);
+  return undefined;
+}
+
 export function readLevelDat(data: Uint8Array): LevelDat {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const storageVersion = view.getInt32(0, true);

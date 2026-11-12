@@ -8,9 +8,10 @@ import { fileURLToPath } from "node:url";
 import { TAG, writeLevelDat } from "../../gamefiles/nbt.ts";
 import type { NbtCompound, NbtTag } from "../../gamefiles/nbt.ts";
 import { parseGameVersion } from "../../core/version.ts";
-import { ICON_FILE, worldIcon } from "./icon.ts";
 import type { ClientInstall } from "../../gamefiles/install.ts";
-import { DIFFICULTIES, levelIdFor, WORLD_PREFIX, worldName, type Difficulty } from "../../gamefiles/worlds.ts";
+import { DIFFICULTIES, levelIdFor, setCheats, setSinglePlayer, WORLD_PREFIX, worldName, type Difficulty } from "../../gamefiles/worlds.ts";
+import { readJsonOr } from "../../core/fs.ts";
+import { copyWorld, readMarker, testWorldAt, writeMarker, writeWorldIcon } from "./worldstore.ts";
 
 export const HELPER_PACK_DIR = join(dirname(fileURLToPath(import.meta.url)), "helper-pack");
 export const HELPER_PACK_FOLDER = "sculkwire_helper";
@@ -35,6 +36,13 @@ export interface WorldOptions {
   gameVersion?: string;
   /** Default `normal`, so hostile mobs exist (peaceful removes them). */
   difficulty?: Difficulty;
+  /**
+   * Enter the existing test world as it is (its settings stay; the pack lists are merged) instead of replacing it, and
+   * mark it kept so it is never removed automatically. A missing world is created.
+   */
+  keep?: boolean;
+  /** Start from a copy of this world (level name or level id); the original is only read. The copy is kept. */
+  copyFrom?: string;
 }
 
 export interface CreatedWorld {
@@ -42,6 +50,8 @@ export interface CreatedWorld {
   levelId: string;
   name: string;
   dir: string;
+  /** `created` fresh, `kept`: an existing test world entered as it is, `copied` from `copyFrom`. */
+  how: "created" | "kept" | "copied";
 }
 
 const byte = (v: number): NbtTag => ({ type: TAG.Byte, value: v });
@@ -69,8 +79,7 @@ export function levelDatRoot(name: string, opts: Pick<WorldOptions, "experiments
   root.set("SpawnY", int(32767));
   root.set("SpawnZ", int(0));
   root.set("StorageVersion", int(10));
-  root.set("commandsEnabled", byte(1));
-  root.set("cheatsEnabled", byte(1));
+  setCheats(root);
   root.set("hasBeenLoadedInCreative", byte(1));
   root.set("commandblockoutput", byte(0));
   root.set("sendcommandfeedback", byte(1));
@@ -79,13 +88,7 @@ export function levelDatRoot(name: string, opts: Pick<WorldOptions, "experiments
   root.set("domobspawning", byte(0));
   root.set("Time", long(6000n));
   root.set("showcoordinates", byte(1));
-  root.set("MultiplayerGame", byte(0));
-  root.set("MultiplayerGameIntent", byte(0));
-  root.set("LANBroadcast", byte(0));
-  root.set("LANBroadcastIntent", byte(0));
-  // Broadcast setting 0 is "no multiplayer" (1 invite only, 2 friends, 3 friends of friends, 4 public).
-  root.set("XBLBroadcastIntent", int(0));
-  root.set("PlatformBroadcastIntent", int(0));
+  setSinglePlayer(root);
   root.set("LastPlayed", long(BigInt(Math.floor(Date.now() / 1000))));
   const v = opts.gameVersion ? parseGameVersion(opts.gameVersion) : undefined;
   if (v) root.set("lastOpenedWithVersion", intList([v.major, v.minor, v.patch, v.build ?? 0, 0]));
@@ -113,31 +116,57 @@ export async function installHelperPack(install: ClientInstall): Promise<PackRef
   return { uuid: m.header.uuid, version: m.header.version, kind: "behavior" };
 }
 
+type PackEntry = { pack_id: string; version: number[] };
+
+/** Put `entries` first in a world's pack list (helper first); other packs stay, a same `pack_id` is replaced. */
+async function mergePackList(file: string, entries: PackEntry[]): Promise<void> {
+  const current = await readJsonOr<unknown>(file);
+  const ids = new Set(entries.map((e) => e.pack_id));
+  const others = (Array.isArray(current) ? current : []).filter(
+    (e: unknown) => typeof e === "object" && e !== null && !ids.has((e as { pack_id?: unknown }).pack_id as string),
+  );
+  await writeFile(file, `${JSON.stringify([...entries, ...others], null, 2)}\n`);
+}
+
 /**
  * Create (or replace) a `sculkwire-` world in the active user's minecraftWorlds. Never touches other worlds. The world
  * gets sculkwire's icon for its level id (icon.ts), which is how the join recovery knows its tile on the Play screen.
+ * With `keep` an existing test world is entered as it is; with `copyFrom` the world starts as a copy of that one.
  */
 export async function createWorld(install: ClientInstall, opts: WorldOptions): Promise<CreatedWorld> {
   const name = worldName(opts.name);
   const levelId = levelIdFor(name);
   const dir = join(install.userComMojang, "minecraftWorlds", levelId);
   if (!levelId.startsWith(WORLD_PREFIX)) throw new Error(`refusing to write world folder ${levelId}`);
-  await rm(dir, { recursive: true, force: true });
-  await mkdir(join(dir, "db"), { recursive: true });
-  const root = levelDatRoot(name, opts);
-  await writeFile(join(dir, "level.dat"), writeLevelDat({ storageVersion: 10, rootName: "", root }));
-  await writeFile(join(dir, "levelname.txt"), name);
-  await writeWorldIcon({ levelId, name, dir });
+  let how: CreatedWorld["how"];
+  if (opts.keep && (await testWorldAt(install, levelId))) how = "kept";
+  else if (opts.copyFrom !== undefined) {
+    await copyWorld(install, { from: opts.copyFrom, name });
+    how = "copied";
+  } else {
+    await rm(dir, { recursive: true, force: true });
+    await mkdir(join(dir, "db"), { recursive: true });
+    const root = levelDatRoot(name, opts);
+    await writeFile(join(dir, "level.dat"), writeLevelDat({ storageVersion: 10, rootName: "", root }));
+    await writeFile(join(dir, "levelname.txt"), name);
+    how = "created";
+  }
+  const world: CreatedWorld = { levelId, name, dir, how };
+  await writeWorldIcon(world);
   const packs = [...(opts.packs ?? [])];
   if (opts.helper !== false) packs.unshift(await installHelperPack(install));
-  const entries = (kind: PackRef["kind"]) => packs.filter((p) => p.kind === kind).map((p) => ({ pack_id: p.uuid, version: p.version }));
-  await writeFile(join(dir, "world_behavior_packs.json"), `${JSON.stringify(entries("behavior"), null, 2)}\n`);
-  await writeFile(join(dir, "world_resource_packs.json"), `${JSON.stringify(entries("resource"), null, 2)}\n`);
-  return { levelId, name, dir };
+  const entries = (kind: PackRef["kind"]): PackEntry[] => packs.filter((p) => p.kind === kind).map((p) => ({ pack_id: p.uuid, version: p.version }));
+  for (const kind of ["behavior", "resource"] as const) {
+    const file = join(dir, `world_${kind}_packs.json`);
+    if (how === "created") await writeFile(file, `${JSON.stringify(entries(kind), null, 2)}\n`);
+    else await mergePackList(file, entries(kind));
+  }
+  if (opts.keep || how !== "created") await writeMarker(world, { ...(await readMarker(dir)), keep: true });
+  return world;
 }
 
 /** `sculkwire-` worlds in the active user's folder. */
-export async function listWorlds(install: ClientInstall): Promise<CreatedWorld[]> {
+export async function listWorlds(install: ClientInstall): Promise<{ levelId: string; name: string; dir: string }[]> {
   const base = join(install.userComMojang, "minecraftWorlds");
   let names: string[];
   try {
@@ -145,7 +174,7 @@ export async function listWorlds(install: ClientInstall): Promise<CreatedWorld[]
   } catch {
     return [];
   }
-  const out: CreatedWorld[] = [];
+  const out: { levelId: string; name: string; dir: string }[] = [];
   for (const levelId of names) {
     let name: string;
     try {
@@ -156,13 +185,4 @@ export async function listWorlds(install: ClientInstall): Promise<CreatedWorld[]
     if (name.startsWith(WORLD_PREFIX)) out.push({ levelId, name, dir: join(base, levelId) });
   }
   return out;
-}
-
-/**
- * Write sculkwire's icon into a `sculkwire-` world (createWorld does). The game replaces `world_icon.jpeg` with a
- * picture of the world when it saves and quits it, so the join recovery writes the icon again before it looks for it.
- */
-export async function writeWorldIcon(world: CreatedWorld): Promise<void> {
-  if (!world.levelId.startsWith(WORLD_PREFIX)) throw new Error(`refusing to write into world folder ${world.levelId}`);
-  await writeFile(join(world.dir, ICON_FILE), worldIcon(world.levelId));
 }

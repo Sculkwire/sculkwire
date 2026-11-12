@@ -9,6 +9,7 @@ import { clientDiagnostics, indexProjectPacks, readSince } from "./contentlog.ts
 import { findInstall, findInstalls, pickInstall, type ClientInstall } from "../../gamefiles/install.ts";
 import { gamePids, readLaunchState } from "./launcher.ts";
 import { listWorlds } from "./world.ts";
+import { deleteWorld, listAllWorlds, WorldRefused, worldLine } from "./worldstore.ts";
 
 function print(json: boolean, value: unknown, text: string): void {
   out(json ? JSON.stringify(value, null, 2) : text);
@@ -109,6 +110,32 @@ const check: CliCommand = {
   },
 };
 
+const worlds: CliCommand = {
+  name: "game worlds",
+  summary: "Every world of the active game user, or delete one sculkwire test world: game worlds [--json] | game worlds --delete <name>",
+  async run(args) {
+    const { values } = parseArgs({ args, options: { json: { type: "boolean" }, delete: { type: "string" } } });
+    const install = await findInstall();
+    const state = await readLaunchState();
+    const loaded = state?.world !== undefined && (await gamePids(install)).length > 0 ? state.world : undefined;
+    if (values.delete !== undefined) {
+      try {
+        const deleted = await deleteWorld(install, values.delete, loaded !== undefined ? { loaded } : {});
+        print(!!values.json, { deleted }, deleted.existed ? `deleted ${deleted.world} (${deleted.levelIds.join(", ")})` : `no world ${deleted.world}`);
+        return deleted.existed ? ExitCode.ok : ExitCode.findings;
+      } catch (e) {
+        if (!(e instanceof WorldRefused)) throw e;
+        err(e.message);
+        return ExitCode.usage;
+      }
+    }
+    const all = await listAllWorlds(install);
+    const value = all.map((w) => ({ ...w, lastPlayed: w.lastPlayed.toISOString(), loaded: w.levelId === loaded }));
+    print(!!values.json, { worlds: value }, all.map((w) => worldLine(w, loaded)).join("\n") || `no worlds in ${install.label}`);
+    return ExitCode.ok;
+  },
+};
+
 const stop: CliCommand = {
   name: "game stop",
   summary: "Stop the client and restore the options.txt keys sculkwire changed",
@@ -119,4 +146,4 @@ const stop: CliCommand = {
   },
 };
 
-export const commands: CliCommand[] = [status, log, check, stop, bench];
+export const commands: CliCommand[] = [status, log, check, worlds, stop, bench];

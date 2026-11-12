@@ -1,4 +1,7 @@
 /** The client tools' results: `game_input` reports the route its input took, and the result fits its output schema. */
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -6,6 +9,8 @@ import { engine } from "../engine/engine.ts";
 import type { EngineResult } from "../engine/failure.ts";
 import { bridge } from "./bridge.ts";
 import { register } from "./mcp.ts";
+import { createWorld } from "./world.ts";
+import type { ClientInstall } from "../../gamefiles/install.ts";
 
 type Handler = (args: Record<string, unknown>) => Promise<{ structuredContent?: Record<string, unknown>; isError?: boolean }>;
 interface Tool {
@@ -67,5 +72,35 @@ describe("game_registry", () => {
   it("returns the source with the entries", async () => {
     vi.spyOn(bridge, "registry").mockResolvedValue({ kind: "mob", source: "script", entries: ["minecraft:pig"], note: "no /connect client attached" });
     expect(await call("game_registry", { kind: "mob" })).toEqual({ kind: "mob", source: "script", entries: ["minecraft:pig"], note: "no /connect client attached" });
+  });
+});
+
+describe("game_worlds", () => {
+  it("marks the world the bridge has loaded and refuses to delete it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sculkwire-mcp-worlds-"));
+    const install = { label: "fake", userComMojang: dir, sharedComMojang: dir } as ClientInstall;
+    try {
+      const loaded = await createWorld(install, { name: "bridge", helper: false });
+      await createWorld(install, { name: "other", helper: false });
+      bridge.install = install;
+      bridge.world = loaded;
+      vi.spyOn(bridge, "running", "get").mockReturnValue(true);
+      const listed = (await call("game_worlds", {})).worlds as { name: string; loaded: boolean; sculkwire: boolean }[];
+      expect(listed.map((w) => [w.name, w.sculkwire, w.loaded]).sort()).toEqual([
+        ["sculkwire-bridge", true, true],
+        ["sculkwire-other", true, false],
+      ]);
+      const refused = await tools().get("game_worlds")?.handler({ action: "delete", world: "bridge" });
+      expect(refused?.isError).toBe(true);
+      expect(JSON.stringify(refused)).toContain("loaded by the running game");
+      expect(await call("game_worlds", { action: "delete", world: "other" })).toEqual({
+        deleted: { world: "sculkwire-other", existed: true, levelIds: ["sculkwire-other"] },
+      });
+      expect((await call("game_worlds", {})).worlds).toHaveLength(1);
+    } finally {
+      bridge.install = undefined;
+      bridge.world = undefined;
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -20,6 +20,8 @@ import type { FightStats } from "./skills/types.ts";
 import { liveTaskEnv } from "./tasks/live.ts";
 import { pauseOnTakeover, playJobs, runActions, stepText, type PlayJobInfo } from "./jobs.ts";
 import { DIFFICULTIES, type Difficulty } from "../../gamefiles/worlds.ts";
+import { findInstall } from "../../gamefiles/install.ts";
+import { deleteWorld, listAllWorlds, STALE_WORLD_DAYS, worldLine } from "./worldstore.ts";
 import { FOREGROUND_MESSAGE } from "./windows.ts";
 import type { InputRoute } from "./input.ts";
 
@@ -55,6 +57,8 @@ const statusSchema = {
       screenshot: z.string().optional(),
     })
     .optional(),
+  prunedWorlds: z.array(z.string()).optional(),
+  worldNote: z.string().optional(),
 };
 const commandSchema = {
   command: z.string(),
@@ -127,6 +131,8 @@ function statusText(s: BridgeStatus): string {
         : `sign-in join race not recovered after ${r.attempts} attempt(s)`,
     );
   }
+  if (s.worldNote) parts.push(s.worldNote);
+  if (s.prunedWorlds?.length) parts.push(`removed ${s.prunedWorlds.length} old test world(s): ${s.prunedWorlds.join(", ")}`);
   return parts.join("; ");
 }
 
@@ -218,7 +224,15 @@ export function register(server: McpServer): void {
           .optional()
           .describe("window: a visible gamescope window on Linux, the game's own window on Windows (default). headless: no window and muted on Linux; Windows runs the window instead. desktop: the launcher's own window (on Windows the same as window)"),
         mute: z.boolean().optional().describe("Silence the game's audio (Linux: a silent sink; Windows: the game's audio sessions, unmuted again by game_stop). Defaults to on in headless mode only"),
-        world: z.string().optional().describe("World name, prefixed with sculkwire- (default bridge, replaced each launch)"),
+        world: z
+          .string()
+          .optional()
+          .describe("World name, prefixed with sculkwire-. Omit it unless a second world is really needed: the default bridge world is reused and replaced on each launch, so no new entry appears in the user's world list"),
+        keep: z.boolean().optional().describe("Continue in the existing test world as it is (blocks, inventory, settings) instead of replacing it; it is then never removed automatically"),
+        copyFrom: z
+          .string()
+          .optional()
+          .describe("Start from a copy of one of the user's worlds (level name or level id); the original is never changed. ONLY for a world the user named or picked: list them with game_worlds and ask the user which one, never choose one yourself"),
         difficulty: z
           .enum(Object.keys(DIFFICULTIES) as [Difficulty, ...Difficulty[]])
           .optional()
@@ -250,6 +264,8 @@ export function register(server: McpServer): void {
           ...(a.display ? { mode: a.display } : {}),
           ...(a.mute !== undefined ? { mute: a.mute } : {}),
           ...(a.world ? { world: a.world } : {}),
+          ...(a.keep ? { keep: true } : {}),
+          ...(a.copyFrom ? { copyFrom: a.copyFrom } : {}),
           ...(a.difficulty ? { difficulty: a.difficulty } : {}),
           ...(a.betaApis ? { betaApis: true } : {}),
           ...(a.width ? { width: a.width } : {}),
@@ -276,6 +292,66 @@ export function register(server: McpServer): void {
     async () => {
       const s = bridge.status();
       return ok(statusText(s), s);
+    },
+  );
+
+  server.registerTool(
+    "game_worlds",
+    {
+      title: "List or delete worlds",
+      description:
+        "List every world of the active game user (sculkwire's test worlds and the user's own), or delete one sculkwire " +
+        "test world. Needs no running game and never starts one. The user's own worlds are never changed or deleted; " +
+        "list them to ask the user which one game_launch copyFrom should copy. Test worlds not played for " +
+        `${STALE_WORLD_DAYS} days are removed by the next game_launch unless kept.`,
+      inputSchema: {
+        action: z.enum(["list", "delete"]).optional().describe("list (default) or delete"),
+        world: z.string().optional().describe("delete: the sculkwire world's name, with or without the sculkwire- prefix"),
+      },
+      outputSchema: {
+        worlds: z
+          .array(
+            z.object({
+              name: z.string(),
+              levelId: z.string(),
+              sculkwire: z.boolean(),
+              kept: z.boolean(),
+              copiedFrom: z.string().optional(),
+              lastPlayed: z.string(),
+              gameMode: z.string().optional(),
+              sizeBytes: z.number(),
+              loaded: z.boolean(),
+            }),
+          )
+          .optional(),
+        deleted: z.object({ world: z.string(), existed: z.boolean(), levelIds: z.array(z.string()) }).optional(),
+      },
+    },
+    async ({ action, world }) => {
+      try {
+        const install = bridge.install ?? (await findInstall());
+        const loaded = bridge.running ? bridge.world?.levelId : undefined;
+        if (action === "delete") {
+          if (!world) throw new Error("delete needs world: the sculkwire world's name");
+          const deleted = await deleteWorld(install, world, loaded !== undefined ? { loaded } : {});
+          return ok(deleted.existed ? `deleted ${deleted.world} (${deleted.levelIds.join(", ")})` : `no world ${deleted.world}`, { deleted });
+        }
+        const all = await listAllWorlds(install);
+        const worlds = all.map((w) => ({
+          name: w.name,
+          levelId: w.levelId,
+          sculkwire: w.sculkwire,
+          kept: w.kept,
+          ...(w.copiedFrom ? { copiedFrom: w.copiedFrom } : {}),
+          lastPlayed: w.lastPlayed.toISOString(),
+          ...(w.gameMode ? { gameMode: w.gameMode } : {}),
+          sizeBytes: w.sizeBytes ?? 0,
+          loaded: w.levelId === loaded,
+        }));
+        return ok(all.map((w) => worldLine(w, loaded)).join("\n") || `no worlds in ${install.label}`, { worlds });
+      } catch (err) {
+        return fail(err);
+      }
     },
   );
 

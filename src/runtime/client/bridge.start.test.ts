@@ -3,7 +3,7 @@
  * `start` on an install sculkwire launches: `stop` during the wait ends it with "the game stopped".
  * The launcher is replaced so no game process is looked up, started or stopped.
  */
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -15,6 +15,9 @@ import type * as ContentLog from "./contentlog.ts";
 import { readDebugLogSince } from "./contentlog.ts";
 import type * as Launcher from "./launcher.ts";
 import type { LaunchState } from "./launcher.ts";
+import { readLevelDat, TAG, writeLevelDat } from "../../gamefiles/nbt.ts";
+import { createWorld } from "./world.ts";
+import { listAllWorlds } from "./worldstore.ts";
 
 const state: LaunchState = { mode: "desktop", startedAt: 0, pid: 0, argv: [], launchLog: "", notes: ["start Minecraft yourself"] };
 let install: ClientInstall;
@@ -94,5 +97,22 @@ describe("client bridge start", () => {
     await bridge.stop();
     await failed;
     expect(stopGame).toHaveBeenCalledTimes(1);
+  });
+
+  it("removes stale test worlds but not the one it launches, and says a kept world keeps its own settings", async () => {
+    const old = await createWorld(install, { name: "old", helper: false });
+    const bridgeWorld = await createWorld(install, { name: "bridge", helper: false });
+    const longAgo = BigInt(Math.floor(Date.now() / 1000) - 10 * 86_400);
+    for (const world of [old, bridgeWorld]) {
+      const level = readLevelDat(new Uint8Array(await readFile(join(world.dir, "level.dat"))));
+      level.root.set("LastPlayed", { type: TAG.Long, value: longAgo });
+      await writeFile(join(world.dir, "level.dat"), writeLevelDat(level));
+    }
+    const bridge = new ClientBridge();
+    const status = await bridge.start({ mode: "desktop", debuggerPort: 0, connectPort: 0, keep: true, difficulty: "hard" });
+    await bridge.stop();
+    expect(status.prunedWorlds).toEqual(["sculkwire-old"]);
+    expect(status.worldNote).toBe("sculkwire-bridge was entered as it is and keeps its own difficulty and experiments: difficulty hard not applied");
+    expect((await listAllWorlds(install)).map((w) => w.name)).toEqual(["sculkwire-bridge"]);
   });
 });
