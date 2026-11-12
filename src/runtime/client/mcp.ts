@@ -21,7 +21,7 @@ import { liveTaskEnv } from "./tasks/live.ts";
 import { pauseOnTakeover, playJobs, runActions, stepText, type PlayJobInfo } from "./jobs.ts";
 import { DIFFICULTIES, type Difficulty } from "../../gamefiles/worlds.ts";
 import { findInstall } from "../../gamefiles/install.ts";
-import { deleteWorld, listAllWorlds, STALE_WORLD_DAYS, worldLine } from "./worldstore.ts";
+import { deleteWorld, listAllWorlds, readMarker, STALE_WORLD_DAYS, worldLine } from "./worldstore.ts";
 import { FOREGROUND_MESSAGE } from "./windows.ts";
 import type { InputRoute } from "./input.ts";
 
@@ -933,8 +933,12 @@ export function register(server: McpServer): void {
     async () => {
       try {
         await playJobs.stopAll("game_stop");
+        const world = bridge.world;
+        const kept = world !== undefined && (await readMarker(world.dir))?.keep === true;
         const r = await bridge.stop();
-        return ok(r.stopped ? r.message : `not stopped: ${r.message}`, r);
+        // The stop ends the game without Save & Quit, and the game writes chunks on its own schedule.
+        const note = kept && r.stopped ? `; ${world.name} is a kept world: blocks changed in the last minute before this stop may be missing on the next launch` : "";
+        return ok(r.stopped ? `${r.message}${note}` : `not stopped: ${r.message}`, r);
       } catch (err) {
         return fail(err);
       }
