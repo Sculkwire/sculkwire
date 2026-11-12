@@ -7,6 +7,8 @@ Release notes for sculkwire. Each `## vX.Y.Z` section becomes the GitHub release
 - `game_builds`, `game_vanilla_packs` and `game_extract_pack` look for the mcbe-gdk-installer game folder under `SCULKWIRE_GDK_ROOT`, else `$XDG_DATA_HOME/mcbe-gdk-linux`, as `game_launch` already did. Before, they searched only `~/.local/share/mcbe-gdk-linux`.
 - `sculk bds run`: a `reload` or `reload all` typed on stdin rebuilds a Regolith project first, as `bds_session_command` does, so the reload loads the edited sources.
 - The helper pack deployed into test worlds holds only what the game loads (`manifest.json`, `scripts/main.js`); before, its unit test files were copied too.
+- An empty `XDG_DATA_HOME`, `XDG_CACHE_HOME` or `XDG_CONFIG_HOME` counts as unset, as the XDG spec says, so the default folder under the home directory is used. Before, an empty value put sculkwire's data, cache and config folders (and the mcbe-gdk-installer folder) relative to the working directory.
+- The validator's `reference.function-missing` for a `function` on line 1 of an `.mcfunction` file that starts with a byte order mark points at the right column; before, it was one column too far right.
 
 ### Internal
 
