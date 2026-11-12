@@ -5,6 +5,7 @@ Release notes for sculkwire. Each `## vX.Y.Z` section becomes the GitHub release
 ## v0.1.2
 
 - `sculk bench` holds the input lock on the engine route while each run plays, as `player_act` does, so the user's keyboard and mouse cannot disturb a measured run. F9 takes control back; a `play` run then waits until control returns. The keyboard route is unchanged.
+- `sculk bench` with an unknown option prints the reason and the usage and exits 2; before, it printed a stack trace.
 - `game_builds`, `game_vanilla_packs` and `game_extract_pack` look for the mcbe-gdk-installer game folder under `SCULKWIRE_GDK_ROOT`, else `$XDG_DATA_HOME/mcbe-gdk-linux`, as `game_launch` already did. Before, they searched only `~/.local/share/mcbe-gdk-linux`.
 - `sculk bds run`: a `reload` or `reload all` typed on stdin rebuilds a Regolith project first, as `bds_session_command` does, so the reload loads the edited sources.
 - The helper pack deployed into test worlds holds only what the game loads (`manifest.json`, `scripts/main.js`); before, its unit test files were copied too.

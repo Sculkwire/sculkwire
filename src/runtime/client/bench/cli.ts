@@ -1,6 +1,7 @@
 import { parseArgs } from "node:util";
 import { err, out, type CliCommand } from "../../../core/cli.ts";
 import { ExitCode } from "../../../core/diagnostic.ts";
+import { errorMessage } from "../../../core/errors.ts";
 import type { LaunchMode } from "../launcher.ts";
 import type { InputMode } from "../input.ts";
 import { DEFAULT_WAIT_S, loadScenarios, runBench } from "./run.ts";
@@ -10,26 +11,38 @@ import { parseViews } from "./view.ts";
 const USAGE =
   "bench <suite|all> [--scenario name] [--runs N] [--input auto|engine|keyboard] [--display window|headless] [--view first|third|first,third] [--stance auto|kite|guard[,...]] [--wait seconds] [--keep] [--json] [--list]";
 
+function parseOptions(args: string[]) {
+  return parseArgs({
+    args,
+    allowPositionals: true,
+    options: {
+      scenario: { type: "string" },
+      runs: { type: "string" },
+      input: { type: "string" },
+      display: { type: "string" },
+      view: { type: "string" },
+      stance: { type: "string" },
+      wait: { type: "string" },
+      keep: { type: "boolean" },
+      json: { type: "boolean" },
+      list: { type: "boolean" },
+    },
+  });
+}
+
 export const bench: CliCommand = {
   name: "bench",
   summary: `Measure the player skills in built arenas in the real client: ${USAGE}`,
   async run(args) {
-    const { values, positionals } = parseArgs({
-      args,
-      allowPositionals: true,
-      options: {
-        scenario: { type: "string" },
-        runs: { type: "string" },
-        input: { type: "string" },
-        display: { type: "string" },
-        view: { type: "string" },
-        stance: { type: "string" },
-        wait: { type: "string" },
-        keep: { type: "boolean" },
-        json: { type: "boolean" },
-        list: { type: "boolean" },
-      },
-    });
+    let parsed: ReturnType<typeof parseOptions>;
+    try {
+      parsed = parseOptions(args);
+    } catch (e) {
+      err(errorMessage(e));
+      err(`usage: sculk ${USAGE}`);
+      return ExitCode.usage;
+    }
+    const { values, positionals } = parsed;
     if (values.list) {
       for (const s of await loadScenarios()) out(`${s.suite}/${s.name} (${s.runs} runs): ${s.summary}`);
       return ExitCode.ok;
