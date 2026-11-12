@@ -217,7 +217,7 @@ Before the fight rework the same scenarios, N=10 per camera, gave: `zombies3` 9/
 
 On the keyboard route the last full run is older: combat 3 runs each, all 3/3, with 3.7 (`zombies3`), 5.5 (`skeleton2`) and 8.0 (`mixed`) average damage (`combat-2026-11-09T04-57-52-777Z.json`).
 
-Navigation, 2 runs each, succeeded in every run with no damage (`nav-2026-11-09T00-09-37-139Z.json`).
+Navigation on the engine route after the camera change, 3 runs each of the 12 courses: 36 of 36 with no damage (the newest `nav-2026-11-11T*.json`). On the keyboard route the last run is older: 2 runs each, all succeeded (`nav-2026-11-09T00-09-37-139Z.json`).
 
 Navigation recovery, 5 runs each (`nav-detour+sealed-*.json`, the two newest of 2026-11-11): `detour` reached the goal 0 of 5 times before (it answered `no way to reach ...` in 0.2 s) and 5 of 5 after, in 13.2 to 14.3 s with 64 blocks planned. `sealed` answers with the closest spot in 0.2 to 0.6 s before and after; after, the answer also names the window tried and the legs walked.
 
