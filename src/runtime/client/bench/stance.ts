@@ -4,17 +4,11 @@
  */
 import type { PlayerAction } from "../types.ts";
 import type { PlayAction } from "../skills/play.ts";
+import { parseEnumList } from "./args.ts";
 
 export type BenchStance = NonNullable<PlayAction["stance"]>;
 
 const STANCES: readonly BenchStance[] = ["auto", "kite", "guard"];
-
-/** One of `allowed` or a comma list of them (any order, any case, spaces allowed, repeats dropped). Undefined for anything else. */
-export function parseEnumList<T extends string>(text: string, allowed: readonly T[]): T[] | undefined {
-  const parts = text.split(",").map((p) => p.trim().toLowerCase());
-  if (parts.some((p) => !(allowed as readonly string[]).includes(p))) return undefined;
-  return [...new Set(parts as T[])];
-}
 
 export function parseStances(text: string): BenchStance[] | undefined {
   return parseEnumList(text, STANCES);

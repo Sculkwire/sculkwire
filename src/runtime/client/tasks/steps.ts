@@ -8,7 +8,7 @@ import { errorMessage } from "../../../core/errors.ts";
 import type { PlayerInventory } from "../../engine/inventory.ts";
 import { resolveName } from "./names.ts";
 import { blockCenter, distance, xyz } from "../geometry.ts";
-import { bareId, namespaced } from "./ids.ts";
+import { armorSlotOf, bareId, namespaced } from "./ids.ts";
 import { nothingFound, Run, StepFail, STATION_RADIUS } from "./run.ts";
 import { findEntities } from "./search.ts";
 import { carriedStacks, countsOf, gainedBetween } from "./stock.ts";
@@ -182,16 +182,6 @@ async function fetch(run: Run, step: Extract<TaskStep, { kind: "fetch" }>): Prom
 }
 
 /** The armor slot an item is worn in (0 head, 1 chest, 2 legs, 3 feet), "offhand" for a shield, else held. */
-/** The armor slot an item is worn in (0 head, 1 chest, 2 legs, 3 feet); undefined for an item that is not worn. */
-export function armorSlotOf(item: string): number | undefined {
-  const id = bareId(item);
-  if (/_helmet$|^carved_pumpkin$|_skull$|_head$/.test(id)) return 0;
-  if (/_chestplate$|^elytra$/.test(id)) return 1;
-  if (/_leggings$/.test(id)) return 2;
-  if (/_boots$/.test(id)) return 3;
-  return undefined;
-}
-
 function wornAt(item: string): number | "offhand" | "hand" {
   if (bareId(item) === "shield") return "offhand";
   return armorSlotOf(item) ?? "hand";

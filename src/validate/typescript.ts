@@ -213,7 +213,7 @@ async function checkPack(ctx: Context, pack: Pack, opts: TypeScriptOptions, tsc:
     };
     const cfgPath = join(tmp, "tsconfig.json");
     await writeFile(cfgPath, JSON.stringify(config, null, 2));
-    const { code, stdout, stderr } = await run(tsc.command, [...tsc.args, "-p", cfgPath, "--pretty", "false"], { cwd: tmp, timeoutMs: 600_000 });
+    const { code, stdout, stderr } = await run(tsc.command, [...tsc.args, "-p", cfgPath, "--pretty", "false"], { cwd: tmp, timeoutMs: 600_000, killSignal: "SIGTERM" });
     const output = stdout + stderr;
     const diags = parseTscOutput(output);
     await report(ctx, [pack], tmp, diags);
@@ -241,7 +241,7 @@ async function checkProject(ctx: Context, tsconfig: string, tsc: { command: stri
     });
     return;
   }
-  const { code, stdout, stderr } = await run(tsc.command, [...tsc.args, "-p", tsconfig, "--noEmit", "--pretty", "false"], { cwd: root, timeoutMs: 600_000 });
+  const { code, stdout, stderr } = await run(tsc.command, [...tsc.args, "-p", tsconfig, "--noEmit", "--pretty", "false"], { cwd: root, timeoutMs: 600_000, killSignal: "SIGTERM" });
   const output = stdout + stderr;
   const diags = parseTscOutput(output);
   await report(ctx, ctx.packs, root, diags);

@@ -21,30 +21,12 @@ import { gridFor, type GridCache } from "../nav/grid.ts";
 import { bestWeaponSlot, bowSlot, hasShield } from "./items.ts";
 import { HIT_COOLDOWN_MS, meleePlan, type PendingSwing, swingOutcome } from "./melee.ts";
 import { aimHeightOf, closingSpeed, holdsSpear, isHostile, SPEAR_CARRIERS, MELEE_COOLDOWN_MS, meleeReach, mobInfo, shortType, type MobInfo } from "./mobs.ts";
-import { STRIKE_AIM_DEG, AFTER_BLOCK_MS, attackInMs, attackers, ENGINE_LATENCY_MS, GUARD_STEP_OUT_MS, ROOM_NEEDED, KEYBOARD_LATENCY_MS, nextAttackMs, NO_WINDOW_MS, packMove, shieldSwingOk, type PackMob, type Stance, SPEAR_OPENING_STRIKE, strikeDistance, strikeTarget, STRIKE_DIST, STRIKE_REACH, WALKING_IN } from "./pack.ts";
+import { STRIKE_AIM_DEG, AFTER_BLOCK_MS, attackInMs, attackers, ENGINE_LATENCY_MS, GUARD_STEP_OUT_MS, ROOM_NEEDED, KEYBOARD_LATENCY_MS, nextAttackMs, NO_WINDOW_MS, packMove, shieldSwingOk, type PackMob, SPEAR_OPENING_STRIKE, strikeDistance, strikeTarget, STRIKE_DIST, STRIKE_REACH, WALKING_IN } from "./pack.ts";
 import { combatStats, fightText, logEvent, traceFrame, type CombatStats, type TraceEvent, type TraceMob } from "./stats.ts";
 import type { Death } from "./play.ts";
 import { isEntityId, typeIdOf } from "./target.ts";
 import { clearRun, findCover, openHeading } from "./steer.ts";
-import type { Counters, FightStats, SkillResult } from "./types.ts";
-
-export interface FightArgs {
-  /** Entity id, or a type (`zombie`, `minecraft:zombie`). Default: the nearest hostile mob. */
-  target?: string;
-  /** Keep fighting the next hostile (of the type) after this one dies. Default true unless `target` is an id. */
-  all?: boolean;
-  /** Only targets within this many blocks (default 16). */
-  radius?: number;
-  /** Jump for critical hits (default true). */
-  crits?: boolean;
-  /**
-   * The shield against melee mobs: `auto` (default: `kite`'s footwork, the shield only boxed in), `kite` (never,
-   * footwork only), `guard` (up whenever a melee mob is within about 3.6 blocks: block, strike in the cooldown,
-   * block). The creeper rule holds in all.
-   */
-  stance?: Stance;
-  timeoutMs?: number;
-}
+import type { Counters, FightArgs, FightStats, SkillResult, Stance } from "./types.ts";
 
 /** Shortest time between two clicks, so a missed swing is not repeated every frame. */
 const MIN_SWING_GAP_MS = 150;

@@ -97,10 +97,12 @@ export const commands: CliCommand[] = [
           acceptEula: values["accept-eula"],
           log,
         });
-        if (values.json) out(JSON.stringify({ ...r, summary: summarize(r.diagnostics) }, null, 2));
+        // The CLI's exit code is the process's own; the JSON keeps the keys it always had.
+        const { exitCode, ...result } = r;
+        if (values.json) out(JSON.stringify({ ...result, summary: summarize(r.diagnostics) }, null, 2));
         else for (const d of r.diagnostics) out(formatDiagnostic(d));
         log(r.status === "build-failed" ? describeCheck(r) : `${describeCheck(r)}; log ${r.rawLogPath}`);
-        return r.exitCode;
+        return exitCode;
       }),
   },
   {

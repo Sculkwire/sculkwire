@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { formatDiagnostic } from "../core/diagnostic.ts";
-import { ok, summarySchema } from "../core/mcp.ts";
+import { channelSchema, ok, summarySchema } from "../core/mcp.ts";
 import { CHECKS, toOptions, type ValidationResult, validateProject, validateText } from "./index.ts";
 
 const position = z.object({ line: z.number().int(), column: z.number().int() });
@@ -19,7 +19,7 @@ const diagnostic = z.object({
 
 const output = {
   root: z.string(),
-  target: z.object({ channel: z.enum(["stable", "preview"]), version: z.string().optional() }),
+  target: z.object({ channel: channelSchema, version: z.string().optional() }),
   ok: z.boolean().describe("true when no diagnostic reaches fail_on"),
   packs: z.array(z.object({ kind: z.string(), relDir: z.string(), name: z.string().optional(), uuid: z.string().optional(), version: z.string().optional(), files: z.number() })),
   filesChecked: z.number(),
@@ -43,7 +43,7 @@ const output = {
 };
 
 const common = {
-  channel: z.enum(["stable", "preview"]).optional().describe("target release channel (default stable)"),
+  channel: channelSchema.optional().describe("target release channel (default stable)"),
   fail_on: z.enum(["error", "warning"]).optional().describe("severity that makes ok=false (default error)"),
   max_diagnostics: z.number().int().positive().optional().describe("cap on returned diagnostics, errors first (default 200)"),
   samples_root: z.string().optional().describe("bedrock-samples checkout: vanilla names, script modules, commands, engine schemas"),

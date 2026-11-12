@@ -231,6 +231,18 @@ describe("game_reload over the script debugger", () => {
     expect(bridge.status().manualSteps).toEqual([]);
   });
 
+  it("reads a command's output from the session that replaced the one it was sent on", async () => {
+    game.onCommand = (command, socket) => {
+      if (command !== "say hi") return false;
+      // After the echo the game drops the debugger socket and dials in again; the output arrives on the new session.
+      game.helper = false;
+      socket.end(() => void game.dial().then((next) => game.print(next, "[Server] hi")));
+      return true;
+    };
+    const r = await bridge.command("say hi", "debugger");
+    expect(r).toMatchObject({ via: "debugger", output: ["[Server] hi"] });
+  });
+
   it("keeps plain /reload quick when the helper prints ready again", async () => {
     const r = await bridge.reload(false, fast);
     expect(r.command).toMatchObject({ via: "debugger", ok: true, output: ["Function and script files have been reloaded."] });

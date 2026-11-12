@@ -8,7 +8,10 @@ import type { ScriptRoute } from "./deps.ts";
 import { EngineSession } from "./engine.ts";
 import type { EngineResult } from "./failure.ts";
 import {
+  containerArgs,
+  craftMatchArgs,
   craftMatchParams,
+  craftRunArgs,
   parseAttributes,
   parseContainer,
   parseCraftGrid,
@@ -282,5 +285,61 @@ describe("routes", () => {
       const result = await readContainer({ x: 1, y: 64, z: -2, dimension }, query, detached());
       expect(!result.ok && result.reason).toBe("invalid_params");
     }
+  });
+});
+
+describe("CLI arguments, read as before the shared parser", () => {
+  const usage = expect.stringMatching(/^usage: /);
+
+  it.each([
+    [["-12", "64", "-3"], { x: -12, y: 64, z: -3 }],
+    [["1", "2", "3", "--dimension", "nether"], { x: 1, y: 2, z: 3, dimension: "nether" }],
+    [["1", "2", "3", "--dimension", "nether", "junk"], { x: 1, y: 2, z: 3, dimension: "nether" }],
+    [["1", "2", "3", "--dimension", "nether", "--dimension", "the_end"], { x: 1, y: 2, z: 3, dimension: "nether" }],
+    [["1", "2", "3", "--dimension"], usage],
+    [["1", "2", "3", "--dimension", "moon"], usage],
+    [["1", "2", "3", "--dimension=nether"], usage],
+    [["--dimension", "nether", "1", "2", "3"], usage],
+    [["1", "2", "3", "4"], usage],
+    [["1", "2", "--help"], "x, y and z must be whole block coordinates"],
+    [["1", "2", "3.5"], "x, y and z must be whole block coordinates"],
+  ])("container get %j", (args, expected) => {
+    expect(containerArgs(args)).toEqual(expected);
+  });
+
+  it.each([
+    [["--grid", "-,-,stick"], { grid: parseCraftGrid("-,-,stick") }],
+    [["--grid=stone", "--table"], { grid: parseCraftGrid("stone"), table: true }],
+    [["--grid", "dirt", "--grid", "stone"], { grid: parseCraftGrid("stone") }],
+    [["--ingredients", "oak_log, oak_log,"], { ingredients: ["oak_log", "oak_log"] }],
+    [["--ingredients=a", "--ingredients", "b"], { ingredients: ["b"] }],
+    [[], {}],
+    [["--grid"], "--grid needs rows of item ids"],
+    [["--grid="], "--grid needs rows of item ids"],
+    [["--ingredients"], "--ingredients needs a comma-separated list of item ids"],
+    [["--grid", "a,b,c,d"], 'cannot read the grid "a,b,c,d": rows of up to 3 item ids, "-" for an empty cell'],
+    [["--table=yes"], usage],
+    [["--help"], usage],
+    [["stone"], usage],
+    [["--", "--table"], usage],
+  ])("craft match %j", (args, expected) => {
+    expect(craftMatchArgs(args)).toEqual(expected);
+  });
+
+  it.each([
+    [["bread"], { recipe: "bread" }],
+    [["bread", "--times", "3"], { recipe: "bread", times: 3 }],
+    [["bread", "--times", "-1"], { recipe: "bread", times: -1 }],
+    [["bread", "--times", "3", "--times", "3"], { recipe: "bread", times: 3 }],
+    [["--help"], { recipe: "--help" }],
+    [[], usage],
+    [["bread", "--times"], usage],
+    [["bread", "--times", "1.5"], usage],
+    [["bread", "--times", "3", "--times", "4"], usage],
+    [["bread", "--times=3"], usage],
+    [["bread", "extra"], usage],
+    [["--times", "3", "bread"], usage],
+  ])("craft run %j", (args, expected) => {
+    expect(craftRunArgs(args)).toEqual(expected);
   });
 });

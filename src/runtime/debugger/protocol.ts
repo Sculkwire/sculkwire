@@ -24,7 +24,6 @@ export interface ProtocolEventMessage {
   type: "ProtocolEvent";
   version: number;
   plugins?: PluginDetails[];
-  require_passcode?: boolean;
 }
 
 /** vscode-debugadapter LogLevel numbering used by Minecraft prints: 0 verbose, 1 log, 2 warn, 3 error, 4 stop. */

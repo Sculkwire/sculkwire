@@ -44,7 +44,7 @@ export interface Pack {
   manifest?: Record<string, unknown>;
 }
 
-export async function listFiles(dir: string): Promise<string[]> {
+export async function listPackFiles(dir: string): Promise<string[]> {
   const out: string[] = [];
   async function walk(abs: string, rel: string): Promise<void> {
     let entries;
@@ -77,7 +77,7 @@ export async function loadPack(
   opts: { dir?: string; displayDir?: string; sourceDir?: string } = {},
 ): Promise<Pack> {
   const dir = opts.dir ?? info.dir;
-  const files = await listFiles(dir);
+  const files = await listPackFiles(dir);
   const pack: Pack = {
     kind: info.kind,
     dir,

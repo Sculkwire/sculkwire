@@ -75,7 +75,7 @@ For a launcher sculkwire does not detect, set the following environment variable
 | Variable | Description |
 |---|---|
 | `SCULKWIRE_MINECRAFT_DIR` | Path to the game's `Minecraft Bedrock` data folder |
-| `SCULKWIRE_CLIENT_LAUNCH` | Command that starts the game. `{uri}` is replaced with the world link |
+| `SCULKWIRE_CLIENT_LAUNCH` | Command that starts the game. `{uri}` is replaced with the world link; an `{args}` part is dropped |
 | `SCULKWIRE_CLIENT_STOP` | Command that stops the game (optional) |
 | `SCULKWIRE_CLIENT` | Which install to use when several are found |
 

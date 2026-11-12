@@ -26,10 +26,10 @@ import { escapeYaw } from "./target.ts";
 import { BACKPEDAL_SPEED, SHIELD_RAISE_MS } from "./defense.ts";
 import { openHeading } from "./steer.ts";
 import { SPEAR_HIT_DIST } from "./mobs.ts";
+import type { Stance } from "./types.ts";
 
-/** How the fight uses the shield: `auto` (`kite`, plus the shield boxed in), `kite` (never: footwork only), `guard` (always near mobs). */
-export const STANCES = ["auto", "kite", "guard"] as const;
-export type Stance = (typeof STANCES)[number];
+/** Every `Stance`, in the order the tools list them. */
+export const STANCES = ["auto", "kite", "guard"] as const satisfies readonly Stance[];
 
 type PackFoot = "advance" | "hold" | "retreat" | "guard";
 

@@ -15,6 +15,10 @@ describe("launch arguments", () => {
     expect(launchArgv(["cmd", "/c", "start", '""', "{uri}"], undefined)).toEqual(["cmd", "/c", "start", '""']);
   });
 
+  it("drops an {args} part, which older launch commands still carry", () => {
+    expect(launchArgv(["launcher", "{args}", "{uri}"], worldUri("w", false))).toEqual(["launcher", "minecraft://connect?localLevelId=w"]);
+  });
+
   it("reads gamescope's displays from its log", () => {
     const log = "x\n[gamescope] [Info]  wlserver: Running compositor on wayland display 'gamescope-1'\n[gamescope] [Info]  wlserver: [xwayland/server.c:108] Starting Xwayland on :3\n";
     expect(parseGamescopeLog(log)).toEqual({ gamescopeDisplay: "gamescope-1", xDisplay: ":3" });

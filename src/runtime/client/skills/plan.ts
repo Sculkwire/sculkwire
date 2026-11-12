@@ -11,7 +11,7 @@
 import { bareId } from "../tasks/ids.ts";
 import type { TaskStep } from "../tasks/types.ts";
 import { findMob, GOAL_RADIUS, HOSTILE_WORDS, mobType, NUMBERS, parseGoal, type Goal } from "./goal.ts";
-import type { Stance } from "./pack.ts";
+import type { Stance } from "./types.ts";
 
 /** A goal the built-in checks verify (kill, reach coordinates, hit every X once). */
 type CheckedGoal = Exclude<Goal, { kind: "free" }>;

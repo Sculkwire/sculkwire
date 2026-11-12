@@ -1,14 +1,14 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { summarize } from "../../core/diagnostic.ts";
-import { diagnosticSchema, diagText, fail, ok, summarySchema } from "../../core/mcp.ts";
+import { channelSchema, diagnosticSchema, diagText, fail, ok, summarySchema } from "../../core/mcp.ts";
 import { onShutdown } from "../../core/shutdown.ts";
 import { bdsCheck, CHECK_SETTLE_MS, describeCheck } from "./check.ts";
 import { describeGameTest, runGameTests } from "./gametest.ts";
 import { COMMAND_MAX_MS } from "./server.ts";
 import { sessionCommand, sessionLogs, sessionProfile, startSession, stopAllSessions, stopSession } from "./session.ts";
 
-const channel = z.enum(["stable", "preview"]).optional().describe("BDS release channel (default stable)");
+const channel = channelSchema.optional().describe("BDS release channel (default stable)");
 const acceptEula = z
   .boolean()
   .optional()

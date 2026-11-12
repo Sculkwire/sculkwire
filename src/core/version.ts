@@ -1,7 +1,7 @@
 /** Game versions and release channels. Every knowledge artifact is tagged with both. */
 
 export type Channel = "stable" | "preview";
-export const CHANNELS: readonly Channel[] = ["stable", "preview"];
+export const CHANNELS = ["stable", "preview"] as const satisfies readonly Channel[];
 
 export function isChannel(value: string): value is Channel {
   return value === "stable" || value === "preview";
@@ -47,10 +47,4 @@ export function compareTuples(a: readonly number[], b: readonly number[]): numbe
 /** Dotted numeric versions (`1.21.60`, `0.1.4`) compared part by part. */
 export function compareDotted(a: string, b: string): number {
   return compareTuples(a.split(".").map(Number), b.split(".").map(Number));
-}
-
-/** A concrete, resolved target: which channel and exactly which build the data describes. */
-export interface VersionTag {
-  channel: Channel;
-  version: string;
 }

@@ -4,6 +4,7 @@
  * what the target game ships, capabilities, subpacks, BP <-> RP linkage.
  */
 import type { Severity } from "../core/diagnostic.ts";
+import { isPlainObject, type JsonObject } from "../core/json.ts";
 import { type Channel, compareDotted, compareTuples } from "../core/version.ts";
 import type { Context, Pack } from "./context.ts";
 
@@ -34,7 +35,6 @@ export const NPM_ONLY: Record<string, true> = {
   "@minecraft/core-build-tasks": true,
 };
 
-type Obj = Record<string, unknown>;
 
 export interface ManifestOptions {
   channel: Channel;
@@ -46,8 +46,8 @@ export interface ManifestOptions {
   scriptModules?: Map<string, Map<string, string | undefined>>;
 }
 
-function obj(v: unknown): Obj | undefined {
-  return v && typeof v === "object" && !Array.isArray(v) ? (v as Obj) : undefined;
+function obj(v: unknown): JsonObject | undefined {
+  return isPlainObject(v) ? v : undefined;
 }
 
 function versionOk(v: unknown, fmt: number): boolean {

@@ -119,7 +119,7 @@ export class ConnectServer extends EventEmitter {
   #receive(client: ConnectClient, data: string): void {
     const msg = parseMessage(data);
     if (!msg) return;
-    // Event messages (from subscriptions) answer no request.
+    // An event answers no request (this server subscribes to none, so one is unprompted): drop it.
     if (msg.header.messagePurpose === "event") return;
     client.queue.settle(msg.header.requestId, msg);
   }

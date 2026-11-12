@@ -1,6 +1,7 @@
 /** One server run, and the logs of a stopped server turned into Diagnostics and a raw log. */
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { Diagnostic } from "../../core/diagnostic.ts";
 import { dataDir } from "../../core/paths.ts";
 import { entriesToDiagnostics, mergeEntries, parseConsole, parseContentLog, type IndexedPack, type LogEntry } from "../gamelog/logparse.ts";
@@ -17,7 +18,7 @@ export async function runOnce(instance: BdsInstance, opts: { settleMs?: number; 
   let status: RunOutcome["status"] = "started";
   try {
     await server.started(opts.startTimeoutMs ?? START_TIMEOUT_MS);
-    await new Promise((r) => setTimeout(r, opts.settleMs ?? 0));
+    await sleep(opts.settleMs ?? 0);
   } catch {
     status = server.state === "exited" ? "exited" : "timeout";
   }
@@ -46,9 +47,14 @@ async function writeRawLog(id: string, server: BdsServer, contentLog: string): P
   return path;
 }
 
+/** The version a server's findings name: the one it printed, else the installed one. */
+export function serverVersionOf(server: BdsServer, instance: BdsInstance): string {
+  return server.serverVersion ?? instance.install.version;
+}
+
 /** `BDS <version>`: the prefix of every Diagnostic a server's logs give. */
-export function runLabel(server: BdsServer, instance: BdsInstance): string {
-  return `BDS ${server.serverVersion ?? instance.install.version}`;
+export function runLabel(serverVersion: string): string {
+  return `BDS ${serverVersion}`;
 }
 
 export interface FinishedRun {
@@ -62,8 +68,9 @@ export interface FinishedRun {
 /** After the server stopped: its logs as Diagnostics, and the raw log kept after the instance is removed. */
 export async function finishRun(run: { instance: BdsInstance; indexed: readonly IndexedPack[]; baseline: ReadonlySet<string> }, server: BdsServer): Promise<FinishedRun> {
   const { contentLog, entries } = await collectLogs(run.instance, server);
-  const label = runLabel(server, run.instance);
+  const serverVersion = serverVersionOf(server, run.instance);
+  const label = runLabel(serverVersion);
   const diagnostics = entriesToDiagnostics(entries, run.indexed, { baseline: run.baseline, label });
   const rawLogPath = await writeRawLog(run.instance.id, server, contentLog);
-  return { serverVersion: server.serverVersion ?? run.instance.install.version, label, diagnostics, rawLogPath };
+  return { serverVersion, label, diagnostics, rawLogPath };
 }

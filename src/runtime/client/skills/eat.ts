@@ -5,13 +5,7 @@
 import type { PlayerController } from "../player.ts";
 import { bestFoodSlot, FOOD } from "./items.ts";
 import { shortType } from "./mobs.ts";
-import type { SkillResult } from "./types.ts";
-
-export interface EatArgs {
-  /** Hotbar slot (1-9) to eat from. Default: the best food for the current hunger. */
-  slot?: number;
-  timeoutMs?: number;
-}
+import type { EatArgs, SkillResult } from "./types.ts";
 
 /** Eating takes 32 ticks; polls start a little before and give up well after. */
 const EAT_MS = 1600;

@@ -1,7 +1,7 @@
 /** MCP tools over the versioned knowledge layer. Every result names the `{channel, version}` it came from. */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { ok } from "../core/mcp.ts";
+import { channelSchema, ok } from "../core/mcp.ts";
 import { searchChangelogs } from "./changelog.ts";
 import { DOCS_ATTRIBUTION, searchDocs } from "./docs.ts";
 import { commandLookup, componentLookup, molangLookup, vanillaExample } from "./lookups.ts";
@@ -10,8 +10,7 @@ import { apiLookup } from "./scriptapi.ts";
 import { formatSources, sourceStatus } from "./store.ts";
 import { getPins, updatePins } from "./versions.ts";
 
-const channel = z
-  .enum(["stable", "preview"])
+const channel = channelSchema
   .default("stable")
   .describe("Release channel; results are tagged with the exact build they describe");
 const offline = z.boolean().default(false).describe("Answer from cache only, never fetch");
@@ -38,7 +37,7 @@ export function register(server: McpServer): void {
           .array(
             z.object({
               source: z.string(),
-              channel: z.enum(["stable", "preview"]).optional(),
+              channel: channelSchema.optional(),
               inUse: z.string().optional().describe("version in use (cached copy)"),
               latest: z.string().optional().describe("newest version seen upstream"),
               checkedAt: z.string().optional().describe("last upstream check"),

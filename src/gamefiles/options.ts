@@ -142,7 +142,3 @@ export async function restoreOptions(): Promise<Record<string, string[]>> {
   await rm(restorePath(), { force: true });
   return restored;
 }
-
-export async function hasPendingRestore(): Promise<boolean> {
-  return Object.keys((await readRecord()).files).length > 0;
-}

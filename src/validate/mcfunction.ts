@@ -3,6 +3,7 @@
  * the command after `execute ... run`, and `functions/tick.json` shape. Function references
  * (`function x`, tick.json values) are resolved by references.ts.
  */
+import { isPlainObject } from "../core/json.ts";
 import type { Context, Pack } from "./context.ts";
 
 export interface McfunctionOptions {
@@ -53,7 +54,7 @@ async function checkTickJson(ctx: Context, pack: Pack): Promise<void> {
   const rel = "functions/tick.json";
   const value = await ctx.value(pack, rel);
   if (value === undefined) return;
-  const values = value && typeof value === "object" && !Array.isArray(value) && "values" in value ? value.values : undefined;
+  const values = isPlainObject(value) && "values" in value ? value.values : undefined;
   if (!Array.isArray(values)) {
     await ctx.at(pack, rel, values === undefined ? "" : "/values", {
       severity: "error",

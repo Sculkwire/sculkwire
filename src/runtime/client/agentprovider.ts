@@ -9,11 +9,10 @@
  * nothing has to be registered for the agent to be the default route.
  */
 import { setTimeout as sleep } from "node:timers/promises";
-import { setBuiltinInputProvider, type InputProvider, type ProviderGame, type ProviderMotion } from "./inputprovider.ts";
-import type { EngineInput } from "./inputprovider.ts";
+import { setBuiltinInputProvider, type EngineInput, type InputProvider, type ProviderGame, type ProviderMotion } from "./inputprovider.ts";
 import { engine, type EngineSession, type EngineTick } from "../engine/engine.ts";
 import type { EngineResult } from "../engine/failure.ts";
-import { HostFocus, type FocusWatchState } from "../engine/focus.ts";
+import { HostFocus } from "../engine/focus.ts";
 import { KEYBOARD_LOCK_NOTE } from "../engine/lock.ts";
 
 /** A tick older than this no longer counts as a running stream (a missed tick is 50 ms). */
@@ -113,10 +112,10 @@ export class AgentInputProvider implements InputProvider {
    */
   async #watch(): Promise<void> {
     const pid = this.#gamePid;
-    if (pid === undefined || this.#session.focusWatcher || !this.#session.attached) return;
+    if (pid === undefined || this.#session.focusWatch() || !this.#session.attached) return;
     const session = this.#session;
     const focus = await HostFocus.start({ pid, platform: this.#platform, onChange: (focused) => void session.setHostFocus(focused) });
-    session.focusWatcher = focus;
+    session.setFocusWatcher(focus);
     if (focus.state().running) await session.setHostFocus(focus.focused);
   }
 
@@ -133,8 +132,7 @@ export class AgentInputProvider implements InputProvider {
 
   /** A new game has no agent and no pause: drop what the session remembered, and stop watching focus. */
   async stopped(): Promise<void> {
-    await this.#session.focusWatcher?.stop();
-    this.#session.focusWatcher = undefined;
+    await this.#session.stopFocusWatcher();
     this.#gamePid = undefined;
     await this.#session.setHostFocus(undefined);
     this.#session.close();
@@ -143,15 +141,9 @@ export class AgentInputProvider implements InputProvider {
   }
 
   close(): void {
-    void this.#session.focusWatcher?.stop();
-    this.#session.focusWatcher = undefined;
+    void this.#session.stopFocusWatcher();
     this.#gamePid = undefined;
     this.#session.close();
-  }
-
-  /** The desktop focus watcher's state; undefined when no window-mode game runs (Linux) or no game was launched. */
-  focusWatch(): FocusWatchState | undefined {
-    return this.#session.focusWatch();
   }
 }
 

@@ -1,5 +1,27 @@
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { LineSplitter, serverCommand } from "./server.ts";
+import { findStdbuf, LineSplitter, serverCommand } from "./server.ts";
+
+describe("findStdbuf", () => {
+  it("takes stdbuf on PATH first, then /usr/bin/stdbuf when that file exists, else none", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sculkwire-stdbuf-"));
+    try {
+      writeFileSync(join(dir, "stdbuf"), "");
+      chmodSync(join(dir, "stdbuf"), 0o755);
+      const seen: string[] = [];
+      const exists = (path: string): boolean => (seen.push(path), true);
+      expect(findStdbuf({ PATH: dir }, exists)).toBe(join(dir, "stdbuf"));
+      expect(seen).toEqual([]);
+      expect(findStdbuf({ PATH: "" }, exists)).toBe("/usr/bin/stdbuf");
+      expect(seen).toEqual(["/usr/bin/stdbuf"]);
+      expect(findStdbuf({}, () => false)).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("serverCommand", () => {
   it("line-buffers ./bedrock_server through stdbuf on Linux", () => {

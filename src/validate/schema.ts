@@ -16,6 +16,7 @@ import { Ajv, type ErrorObject, type ValidateFunction } from "ajv";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { errorMessage } from "../core/errors.ts";
 import { readJsonOr, writeFileAtomic } from "../core/fs.ts";
+import { isPlainObject, type JsonObject } from "../core/json.ts";
 import { memoAsync } from "../core/memo.ts";
 import { cacheDir } from "../core/paths.ts";
 import type { PackKind } from "../core/project.ts";
@@ -58,7 +59,6 @@ export function engineSchemasBase(opts: SchemaOptions): string | undefined {
 
 const MAX_ERRORS_PER_FILE = 20;
 const CALIBRATION_VERSION = 4;
-
 
 interface EngineRoot {
   kind: FileKind;
@@ -127,7 +127,6 @@ export function pickEngineCandidate(candidates: readonly EngineCandidate[], form
   for (const c of candidates) if (compareTuples(c.version, fv) <= 0) best = c;
   return best;
 }
-
 
 interface GlobRule {
   packKind: PackKind;
@@ -225,14 +224,11 @@ async function rockideChoice(packKind: PackKind, rel: string, opts: SchemaOption
 function subtreeExists(value: unknown, pointer: string): boolean {
   let v: unknown = value;
   for (const seg of parsePointer(pointer)) {
-    if (!v || typeof v !== "object" || Array.isArray(v) || !(seg in v)) return false;
+    if (!isPlainObject(v) || !(seg in v)) return false;
     v = (v as Record<string, unknown>)[seg];
   }
   return v !== undefined;
 }
-
-
-type Json = Record<string, unknown>;
 
 const basenameMaps = memoAsync<Map<string, string[]>>();
 
@@ -280,7 +276,7 @@ async function absolutizeRefs(node: unknown, fromFile: string, sourceRoot: strin
     return;
   }
   if (!node || typeof node !== "object") return;
-  const o = node as Json;
+  const o = node as JsonObject;
   const ref = o.$ref;
   if (typeof ref === "string" && !ref.startsWith("#")) {
     const hash = ref.indexOf("#");
@@ -308,13 +304,13 @@ async function vscodeMerge(node: unknown): Promise<void> {
     return;
   }
   if (!node || typeof node !== "object") return;
-  const o = node as Json;
+  const o = node as JsonObject;
   if (typeof o.$ref === "string" && (o.additionalProperties === false || o.unevaluatedProperties === false)) {
     const { props, patterns } = await declared(o.$ref, 0, new Set());
-    const own = (o.properties ??= {}) as Json;
+    const own = (o.properties ??= {}) as JsonObject;
     for (const p of props) if (!(p in own)) own[p] = true;
     if (patterns.size) {
-      const pp = (o.patternProperties ??= {}) as Json;
+      const pp = (o.patternProperties ??= {}) as JsonObject;
       for (const p of patterns) if (!(p in pp)) pp[p] = true;
     }
   }
@@ -328,7 +324,7 @@ async function refTarget(ref: string): Promise<unknown> {
   let node = await readSchemaJson(fileURLToPath(url)).catch(() => undefined);
   for (const seg of parsePointer(hash >= 0 ? decodeURIComponent(ref.slice(hash + 1)) : "")) {
     if (!node || typeof node !== "object") return undefined;
-    node = (node as Json)[seg];
+    node = (node as JsonObject)[seg];
   }
   return node;
 }
@@ -340,9 +336,9 @@ async function declared(ref: string, depth: number, seen: Set<string>): Promise<
   seen.add(ref);
   const visit = async (n: unknown, base: string): Promise<void> => {
     if (!n || typeof n !== "object" || Array.isArray(n)) return;
-    const o = n as Json;
-    for (const k of Object.keys((o.properties as Json) ?? {})) props.add(k);
-    for (const k of Object.keys((o.patternProperties as Json) ?? {})) patterns.add(k);
+    const o = n as JsonObject;
+    for (const k of Object.keys((o.properties as JsonObject) ?? {})) props.add(k);
+    for (const k of Object.keys((o.patternProperties as JsonObject) ?? {})) patterns.add(k);
     if (typeof o.$ref === "string") {
       const abs = o.$ref.startsWith("#") ? `${base.split("#")[0]}${o.$ref}` : o.$ref;
       const r = await declared(abs, depth + 1, seen);
@@ -361,11 +357,11 @@ async function declared(ref: string, depth: number, seen: Set<string>): Promise<
  * Engine dump of block `states` lists arrays of strings only (the dumper loses the variant); the game takes
  * boolean and integer state values too (`"ns:open": [false, true]`, documented block states).
  */
-function blockStateValues(schema: Json): void {
-  const ap = schema.additionalProperties as Json | undefined;
+function blockStateValues(schema: JsonObject): void {
+  const ap = schema.additionalProperties as JsonObject | undefined;
   const alts = ap?.oneOf ?? ap?.anyOf;
-  for (const alt of Array.isArray(alts) ? (alts as Json[]) : []) {
-    const items = alt.items as Json | undefined;
+  for (const alt of Array.isArray(alts) ? (alts as JsonObject[]) : []) {
+    const items = alt.items as JsonObject | undefined;
     if (alt.type === "array" && items?.type === "string") items.type = ["string", "boolean", "integer"];
   }
 }
@@ -381,7 +377,7 @@ function oneOfToAnyOf(node: unknown): void {
     return;
   }
   if (!node || typeof node !== "object") return;
-  const o = node as Json;
+  const o = node as JsonObject;
   if (Array.isArray(o.oneOf) && !("anyOf" in o)) {
     o.anyOf = o.oneOf;
     delete o.oneOf;
@@ -396,7 +392,7 @@ function tupleItems(node: unknown): void {
     return;
   }
   if (!node || typeof node !== "object") return;
-  const o = node as Json;
+  const o = node as JsonObject;
   if (Array.isArray(o.items)) {
     o.prefixItems = o.items;
     delete o.items;
@@ -411,26 +407,26 @@ function tupleItems(node: unknown): void {
 /** Loot `match_tool` conditions take their fields directly on the condition (Mojang docs; BDS loads it);
  * Rockide only accepts them nested under a `match_tool` key. Its `count`, `durability` and enchantment `levels`
  * also take a number or `{range_min, range_max}` (Mojang docs, LootTableConditions), not only `{min, max}`. */
-function flatMatchTool(schema: Json): void {
-  const defs = (schema.$defs as Json | undefined) ?? {};
+function flatMatchTool(schema: JsonObject): void {
+  const defs = (schema.$defs as JsonObject | undefined) ?? {};
   const range = { type: "object", additionalProperties: false, properties: { range_min: { type: "number" }, range_max: { type: "number" } } };
   for (const [owner, key] of [
     ["match_tool", "count"],
     ["match_tool", "durability"],
     ["enchantment_spec", "levels"],
   ] as const) {
-    const props = (defs[owner] as Json | undefined)?.properties as Json | undefined;
-    const prop = props?.[key] as Json | undefined;
+    const props = (defs[owner] as JsonObject | undefined)?.properties as JsonObject | undefined;
+    const prop = props?.[key] as JsonObject | undefined;
     if (!props || !prop) continue;
     const { description, ...shape } = prop;
     props[key] = { description, anyOf: [shape, { type: "number" }, range] };
   }
-  const fields = ((defs.match_tool as Json)?.properties as Json) ?? {};
-  for (const branch of (schema.allOf as Json[]) ?? []) {
-    const cond = ((branch.if as Json)?.properties as Json)?.condition as Json | undefined;
-    const then = branch.then as Json | undefined;
+  const fields = ((defs.match_tool as JsonObject)?.properties as JsonObject) ?? {};
+  for (const branch of (schema.allOf as JsonObject[]) ?? []) {
+    const cond = ((branch.if as JsonObject)?.properties as JsonObject)?.condition as JsonObject | undefined;
+    const then = branch.then as JsonObject | undefined;
     if (cond?.const === "match_tool" && then && typeof then === "object") {
-      const props = (then.properties ??= {}) as Json;
+      const props = (then.properties ??= {}) as JsonObject;
       for (const k of Object.keys(fields)) if (!(k in props)) props[k] = { $ref: `#/$defs/match_tool/properties/${k}` };
       then.required = ["condition"];
     }
@@ -484,10 +480,10 @@ class SchemaRuntime {
     return r;
   }
 
-  private async load(uri: string, rt: SourceRuntime): Promise<Json> {
+  private async load(uri: string, rt: SourceRuntime): Promise<JsonObject> {
     const path = fileURLToPath(uri);
     const raw = structuredClone(await readSchemaJson(path));
-    const schema: Json = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Json) : {};
+    const schema: JsonObject = isPlainObject(raw) ? raw : {};
     delete schema.$schema;
     schema.$id = uri;
     await absolutizeRefs(schema, path, rt.sourceRoot);
@@ -521,7 +517,6 @@ class SchemaRuntime {
 }
 
 const runtime = new SchemaRuntime();
-
 
 export interface SchemaIssue {
   keyword: string;
@@ -682,7 +677,7 @@ export function toIssue(e: ErrorObject, base: string, kindKey: string): SchemaIs
       };
     }
     case "deprecated": {
-      const msg = (e.parentSchema as Json | undefined)?.deprecationMessage;
+      const msg = (e.parentSchema as JsonObject | undefined)?.deprecationMessage;
       return {
         keyword: e.keyword,
         pointer,
@@ -715,7 +710,7 @@ export interface EvaluateResult {
 export async function evaluate(value: unknown, choice: SchemaChoice, kindKey: string, opts: SchemaOptions): Promise<EvaluateResult> {
   const validate = await runtime.validator(choice, opts);
   let instance: unknown = value;
-  for (const s of parsePointer(choice.pointer)) instance = (instance as Json)[s];
+  for (const s of parsePointer(choice.pointer)) instance = (instance as JsonObject)[s];
   const key = `${choice.source}:${kindKey}`;
   validate(instance);
   let reduced = reduceErrors(validate.errors ?? []);
@@ -731,7 +726,7 @@ export async function evaluate(value: unknown, choice: SchemaChoice, kindKey: st
     older.sort((a, b) => compareTuples(versionTuple(a), versionTuple(b)));
     const to = older[older.length - 1];
     if (to) {
-      validate({ ...(instance as Json), format_version: to });
+      validate({ ...(instance as JsonObject), format_version: to });
       reduced = reduceErrors(validate.errors ?? []);
       fallback = { from: fv, to };
     }
@@ -739,7 +734,6 @@ export async function evaluate(value: unknown, choice: SchemaChoice, kindKey: st
   const issues = reduced.map((e) => toIssue(e, choice.pointer, key));
   return fallback ? { issues, fallback } : { issues };
 }
-
 
 /** What vanilla content tells about the schemas: complaints it triggers (gaps). */
 export interface Calibration {
@@ -781,7 +775,6 @@ export function calibration(
   });
 }
 
-
 export interface SchemaFileResult {
   choice?: SchemaChoice;
   diagnostics: Omit<Finding, "file">[];
@@ -793,8 +786,8 @@ function gameRules(kind: FileKind, value: unknown, doc: JsonDocument): Omit<Find
   if (kind !== "item" && kind !== "block") return out;
   const fv = formatVersionOf(value);
   const root = kind === "item" ? "minecraft:item" : "minecraft:block";
-  const mc = ((value as Json)?.[root] as Json | undefined)?.description as Json | undefined;
-  const group = (mc?.menu_category as Json | undefined)?.group;
+  const mc = ((value as JsonObject)?.[root] as JsonObject | undefined)?.description as JsonObject | undefined;
+  const group = (mc?.menu_category as JsonObject | undefined)?.group;
   if (typeof group === "string" && !group.includes(":") && fv && compareTuples(versionTuple(fv), [1, 21, 60]) >= 0) {
     const pointer = `/${root}/description/menu_category/group`;
     out.push({

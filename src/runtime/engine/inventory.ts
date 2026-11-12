@@ -19,15 +19,16 @@ import { z } from "zod";
 import { err, type CliCommand } from "../../core/cli.ts";
 import { ExitCode } from "../../core/diagnostic.ts";
 import { errorMessage } from "../../core/errors.ts";
+import { isPlainObject } from "../../core/json.ts";
 import { ok } from "../../core/mcp.ts";
-import { failed, oneShot, parseCommandLine, printJson, stringOption } from "./cliutil.ts";
+import { failed, oneShot, printJson } from "./cliutil.ts";
 import type { ScriptRoute } from "./deps.ts";
 import { dimensionName, dimensionParam, dimensionSchema } from "./dimension.ts";
 import { engine, type EngineSession } from "./engine.ts";
 import { failureSchema, invalid, malformed, type EngineFailure, type EngineFailureReason, type EngineResult } from "./failure.ts";
 import { itemName, itemSlotSchema, parseSlot, parseSlots, type Slot } from "./slot.ts";
 import { failureResult, invalidParamsResult } from "./toolresult.ts";
-import { finiteOrUndefined, integerOrUndefined, isPlainObject } from "./wire.ts";
+import { finiteOrUndefined, integerOrUndefined } from "./wire.ts";
 import { screenAct } from "./workstation.ts";
 
 /** Where an answer came from: the agent's own reads, or the helper pack's Script API components. */
@@ -634,6 +635,60 @@ export function registerInventoryTools(server: McpServer, script: ScriptRoute): 
 const CRAFT_USAGE =
   "usage: sculk craft match --grid \"oak_planks,oak_planks,-;oak_planks,oak_planks,-\" | --ingredients oak_log,oak_log [--table] | sculk craft run <recipe> [--times N]";
 
+const CONTAINER_USAGE = "usage: sculk container get <x> <y> <z> [--dimension overworld|nether|the_end]";
+
+/**
+ * `container get`'s arguments, or the usage error to print: the three coordinates come before `--dimension` and may be
+ * negative; what follows the dimension is not read.
+ */
+export function containerArgs(args: string[]): { x: number; y: number; z: number; dimension?: string } | string {
+  const at = args.indexOf("--dimension");
+  const coords = at === -1 ? args : args.slice(0, at);
+  const dimension = at === -1 ? undefined : args[at + 1];
+  if (coords.length !== 3 || (at !== -1 && (!dimension || !dimensionName(dimension)))) return CONTAINER_USAGE;
+  const [x, y, z] = coords.map(Number) as [number, number, number];
+  if (!Number.isInteger(x) || !Number.isInteger(y) || !Number.isInteger(z)) return "x, y and z must be whole block coordinates";
+  return { x, y, z, ...(dimension ? { dimension } : {}) };
+}
+
+/**
+ * `craft match`'s arguments, or the usage error to print. A flag's value is the next argument whatever it starts with
+ * (`--grid -,-,stick`) or follows `=`; a repeated flag is read again and its last value kept.
+ */
+export function craftMatchArgs(args: string[]): { grid?: (string | null)[][]; ingredients?: string[]; table?: true } | string {
+  let grid: (string | null)[][] | undefined;
+  let ingredients: string[] | undefined;
+  let table = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string;
+    if (arg === "--table") table = true;
+    else if (arg === "--grid" || arg.startsWith("--grid=")) {
+      const text = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[++i];
+      if (!text) return "--grid needs rows of item ids";
+      grid = parseCraftGrid(text);
+      if (!grid) return `cannot read the grid ${JSON.stringify(text)}: rows of up to 3 item ids, "-" for an empty cell`;
+    } else if (arg === "--ingredients" || arg.startsWith("--ingredients=")) {
+      const text = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[++i];
+      if (!text) return "--ingredients needs a comma-separated list of item ids";
+      ingredients = text
+        .split(",")
+        .map((id) => id.trim())
+        .filter((id) => id.length > 0);
+    } else return CRAFT_USAGE;
+  }
+  return { ...(grid ? { grid } : {}), ...(ingredients ? { ingredients } : {}), ...(table ? { table } : {}) };
+}
+
+/** `craft run`'s arguments, or the usage error to print: the recipe comes first, then `--times N` (N may be negative). */
+export function craftRunArgs(args: string[]): { recipe: string; times?: number } | string {
+  const recipe = args[0];
+  const at = args.indexOf("--times");
+  const times = at === -1 ? undefined : Number(args[at + 1]);
+  const extra = args.filter((arg) => arg !== recipe && arg !== "--times" && String(times) !== arg);
+  if (!recipe || extra.length || (at !== -1 && !Number.isInteger(times))) return CRAFT_USAGE;
+  return { recipe, ...(times !== undefined ? { times } : {}) };
+}
+
 /** `player inventory`, `container get` and `craft`. */
 export function inventoryCommands(script: ScriptRoute): CliCommand[] {
   const playerInventoryCommand: CliCommand = {
@@ -659,19 +714,12 @@ export function inventoryCommands(script: ScriptRoute): CliCommand[] {
     summary: "What a block's container holds: container get <x> <y> <z> [--dimension overworld|nether|the_end]",
     async run(args) {
       return oneShot(async () => {
-        const line = parseCommandLine(args, { dimension: { type: "string" } });
-        if (!line) return ExitCode.usage;
-        const dimension = stringOption(line, "dimension");
-        if (line.positionals.length !== 3 || (dimension !== undefined && !dimensionName(dimension))) {
-          err("usage: sculk container get <x> <y> <z> [--dimension overworld|nether|the_end]");
+        const parsed = containerArgs(args);
+        if (typeof parsed === "string") {
+          err(parsed);
           return ExitCode.usage;
         }
-        const [x, y, z] = line.positionals.map(Number) as [number, number, number];
-        if (!Number.isInteger(x) || !Number.isInteger(y) || !Number.isInteger(z)) {
-          err("x, y and z must be whole block coordinates");
-          return ExitCode.usage;
-        }
-        const result = await readContainer({ x, y, z, ...(dimension ? { dimension } : {}) }, script.query);
+        const result = await readContainer(parsed, script.query);
         if (!result.ok) return failed(result);
         printJson(result.value);
         err(containerText(result.value));
@@ -689,53 +737,28 @@ export function inventoryCommands(script: ScriptRoute): CliCommand[] {
       return oneShot(async () => {
         const [action, ...rest] = args;
         if (action === "match") {
-          const line = parseCommandLine(rest, { grid: { type: "string" }, ingredients: { type: "string" }, table: { type: "boolean" } });
-          if (!line) return ExitCode.usage;
-          if (line.positionals.length) {
-            err(CRAFT_USAGE);
+          const parsed = craftMatchArgs(rest);
+          if (typeof parsed === "string") {
+            err(parsed);
             return ExitCode.usage;
           }
-          const gridText = stringOption(line, "grid");
-          const ingredientsText = stringOption(line, "ingredients");
-          let grid: (string | null)[][] | undefined;
-          if (gridText !== undefined) {
-            if (!gridText) {
-              err("--grid needs rows of item ids");
-              return ExitCode.usage;
-            }
-            grid = parseCraftGrid(gridText);
-            if (!grid) {
-              err(`cannot read the grid ${JSON.stringify(gridText)}: rows of up to 3 item ids, "-" for an empty cell`);
-              return ExitCode.usage;
-            }
-          }
-          if (ingredientsText !== undefined && !ingredientsText) {
-            err("--ingredients needs a comma-separated list of item ids");
-            return ExitCode.usage;
-          }
-          const ingredients = ingredientsText
-            ?.split(",")
-            .map((id) => id.trim())
-            .filter((id) => id.length > 0);
-          const table = line.values.table === true;
-          const result = await craftMatch({ ...(grid ? { grid } : {}), ...(ingredients ? { ingredients } : {}), ...(table ? { table } : {}) });
+          const result = await craftMatch(parsed);
           if (!result.ok) return failed(result);
           printJson(result.value);
           err(craftMatchText(result.value));
           return ExitCode.ok;
         }
         if (action === "run") {
-          const line = parseCommandLine(rest, { times: { type: "string" } });
-          if (!line) return ExitCode.usage;
-          const [recipe, ...extra] = line.positionals;
-          const timesText = stringOption(line, "times");
-          const times = timesText === undefined ? undefined : Number(timesText);
-          if (!recipe || extra.length || (times !== undefined && !Number.isInteger(times))) {
-            err(CRAFT_USAGE);
+          const parsed = craftRunArgs(rest);
+          if (typeof parsed === "string") {
+            err(parsed);
             return ExitCode.usage;
           }
-          const result = await craftRun(recipe, times);
-          if (!result.ok) return failed(result, "crafting needs the agent: run sculk engine attach first");
+          const result = await craftRun(parsed.recipe, parsed.times);
+          if (!result.ok) {
+            if (result.reason === "not_attached") err("crafting needs the agent: run sculk engine attach first");
+            return failed(result);
+          }
           printJson(result.value);
           err(`crafted ${result.value.crafted}`);
           return ExitCode.ok;

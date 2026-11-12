@@ -57,20 +57,38 @@ export async function attempt<T>(body: () => Promise<EngineResult<T>>): Promise<
   return result.ok ? { value: result.value } : { code: failed(result) };
 }
 
-type OptionSpec = Record<string, { type: "string" | "boolean"; multiple?: boolean }>;
+type OptionSpec = Record<string, { type: "string"; multiple?: boolean } | { type: "boolean" }>;
 export type CommandLine = { values: Record<string, string | boolean | string[] | undefined>; positionals: string[] };
 
 /**
- * `parseArgs` for an engine command. An argument that looks like an option this command does not take stays a
- * positional, so negative coordinates and entity ids (`-12`) and a grid starting with `-` pass through. A string
- * option without a value and a boolean option given one are usage errors (printed); undefined then.
+ * How a command reads its arguments.
+ * - `strict`: node's `parseArgs` rules. An unknown option, a string option without a value and a boolean option given
+ *   one are usage errors; a repeated option keeps its last value.
+ * - `loose`: an argument that looks like an option this command does not take stays a positional, so negative
+ *   coordinates and entity ids (`-12`) pass through, and so does `--`. A repeated option keeps its first value, and a
+ *   string option without a value counts as not given.
  */
-export function parseCommandLine(args: string[], options: OptionSpec = {}): CommandLine | undefined {
-  const { values, tokens } = parseArgs({ args, options, allowPositionals: true, strict: false, tokens: true });
+export type ArgMode = "strict" | "loose";
+
+/** Parses one engine command's arguments; a usage error is printed and gives undefined. */
+export function parseCommandLine(args: string[], options: OptionSpec = {}, mode: ArgMode = "strict"): CommandLine | undefined {
+  if (mode === "strict") {
+    try {
+      const { values, positionals } = parseArgs({ args, options, allowPositionals: true });
+      // Only a string option can be `multiple` (`OptionSpec`), so a repeated value is a string array.
+      return { values: values as CommandLine["values"], positionals };
+    } catch (e) {
+      err(errorMessage(e));
+      return undefined;
+    }
+  }
+  const { tokens } = parseArgs({ args, options, allowPositionals: true, strict: false, tokens: true });
+  const values: CommandLine["values"] = {};
   const positionals: string[] = [];
   let last = -1;
   for (const token of tokens) {
     if (token.kind === "positional") positionals.push(token.value);
+    if (token.kind === "option-terminator") positionals.push("--");
     if (token.kind !== "option") continue;
     const spec = options[token.name];
     if (!spec) {
@@ -79,21 +97,23 @@ export function parseCommandLine(args: string[], options: OptionSpec = {}): Comm
       last = token.index;
       continue;
     }
-    if (spec.type === "string" && token.value === undefined) {
-      err(`option ${token.rawName} needs a value`);
-      return undefined;
+    if (spec.type === "boolean") {
+      if (token.value !== undefined) {
+        err(`option ${token.rawName} takes no value`);
+        return undefined;
+      }
+      values[token.name] = true;
+      continue;
     }
-    if (spec.type === "boolean" && token.value !== undefined) {
-      err(`option ${token.rawName} takes no value`);
-      return undefined;
-    }
+    if (token.value === undefined) continue;
+    const seen = values[token.name];
+    if (spec.multiple) values[token.name] = [...(Array.isArray(seen) ? seen : []), token.value];
+    else if (seen === undefined) values[token.name] = token.value;
   }
-  const known: CommandLine["values"] = {};
-  for (const name of Object.keys(options)) known[name] = values[name] as CommandLine["values"][string];
-  return { values: known, positionals };
+  return { values, positionals };
 }
 
-/** A string option's value: the last one given when it was repeated. */
+/** A string option's value (see `ArgMode` for which one a repeated option keeps). */
 export function stringOption(line: CommandLine, name: string): string | undefined {
   const value = line.values[name];
   return typeof value === "string" ? value : undefined;

@@ -1,9 +1,10 @@
 /** One running `bedrock_server` process: line-split console, stdin commands, start/stop lifecycle. */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { createWriteStream, type WriteStream } from "node:fs";
+import { createWriteStream, existsSync, type WriteStream } from "node:fs";
 import { join, win32 } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { setTimeout as sleep } from "node:timers/promises";
 import { findOnPath } from "../../core/which.ts";
 import { CONSOLE_LOG, serverExecutable } from "./files.ts";
 
@@ -40,6 +41,14 @@ export function serverCommand(dir: string, platform: NodeJS.Platform, stdbuf?: s
   const env = { LD_LIBRARY_PATH: "." };
   const exe = `./${serverExecutable("linux")}`;
   return stdbuf ? { command: stdbuf, args: ["-oL", "-eL", exe], env } : { command: exe, args: [], env };
+}
+
+/** `stdbuf` on `PATH`, else coreutils' `/usr/bin/stdbuf` (a service or GUI-launched client may lack `/usr/bin` on `PATH`). */
+export function findStdbuf(
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (path: string) => boolean = existsSync,
+): string | undefined {
+  return findOnPath("stdbuf", env, "linux") ?? (exists("/usr/bin/stdbuf") ? "/usr/bin/stdbuf" : undefined);
 }
 
 /**
@@ -90,7 +99,7 @@ export class BdsServer extends EventEmitter {
     super();
     this.dir = dir;
     this.#log = createWriteStream(join(dir, CONSOLE_LOG));
-    const stdbuf = process.platform !== "win32" ? findOnPath("stdbuf") : undefined;
+    const stdbuf = process.platform !== "win32" ? findStdbuf() : undefined;
     const { command, args, env } = serverCommand(dir, process.platform, stdbuf);
     this.#proc = spawn(command, args, {
       cwd: dir,
@@ -216,7 +225,7 @@ export class BdsServer extends EventEmitter {
     let seen = this.lines.length;
     let quietSince = Date.now();
     while (Date.now() - start < maxMs && this.state !== "exited") {
-      await new Promise((r) => setTimeout(r, 50));
+      await sleep(50);
       if (this.lines.length !== seen) {
         seen = this.lines.length;
         quietSince = Date.now();

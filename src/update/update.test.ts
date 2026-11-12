@@ -1,16 +1,15 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { runUnattended } from "../core/process.ts";
 import { autoUpdate, versionInfo } from "./auto.ts";
 import { runUpdate } from "./cli.ts";
-import { serverEntry } from "../setup/register.ts";
 import { readChannel, saveChannel } from "./config.ts";
 import { rollback, update } from "./install.ts";
-import { detectRunning, initLayout, layout, type Layout, readCurrent, type Running, writeLaunchers } from "./layout.ts";
-import { runUnattended } from "./process.ts";
+import { initLayout, layout, type Layout, readCurrent, type Running } from "./layout.ts";
 import { dueForCheck, readState } from "./state.ts";
 import { compareTags, isNewer, latestTarget, newestTag } from "./tags.ts";
 
@@ -130,49 +129,6 @@ describe("tags and channels", () => {
 });
 
 describe("layout", () => {
-  it("writes launchers that run the current version, the way an MCP client starts them", async () => {
-    const l = layout(join(root, "it's here"));
-    await mkdir(join(l.versions, "v0.1.0", "src"), { recursive: true });
-    await writeFile(join(l.versions, "v0.1.0", "src", "cli.ts"), 'process.stdout.write(`${process.argv[2]} 0.1.0${process.env.SCULK_VIA ? ` via ${process.env.SCULK_VIA}` : ""}\\n`);\n');
-    if (l.pointer === "symlink") await symlink(join("versions", "v0.1.0"), l.pointerPath);
-    else await writeFile(l.pointerPath, "v0.1.0\n");
-    await writeLaunchers(l);
-    // The registered entry with `--version` in place of `mcp`: `cmd /c <bin>\sculk.cmd` on Windows, `<bin>/sculk` elsewhere.
-    const entry = serverEntry(managed(l, "v0.1.0"));
-    expect(entry.args.at(-1)).toBe("mcp");
-    const launch = (env: NodeJS.ProcessEnv) => {
-      const r = spawnSync(entry.command, [...entry.args.slice(0, -1), "--version"], { env, encoding: "utf8", timeout: 30_000 });
-      return `${r.stdout}${r.stderr}`.trim();
-    };
-    const { SCULKWIRE_NODE: _, ...env } = process.env;
-    // Without SCULKWIRE_NODE the launcher runs `node` from PATH (`Path` in a copied Windows environment).
-    const pathKey = Object.keys(env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
-    expect(launch({ ...env, [pathKey]: `${dirname(process.execPath)}${delimiter}${env[pathKey] ?? ""}` })).toBe("--version 0.1.0");
-    // SCULKWIRE_NODE picks another node: a wrapper that marks the run.
-    const wrapper = join(root, process.platform === "win32" ? "node-wrapper.cmd" : "node-wrapper");
-    await writeFile(
-      wrapper,
-      process.platform === "win32"
-        ? `@echo off\r\nset SCULK_VIA=wrapper\r\n"${process.execPath}" %*\r\n`
-        : `#!/bin/sh\nSCULK_VIA=wrapper exec '${process.execPath}' "$@"\n`,
-    );
-    await chmod(wrapper, 0o755);
-    expect(launch({ ...env, SCULKWIRE_NODE: wrapper })).toBe("--version 0.1.0 via wrapper");
-  });
-
-  it("tells a managed version from a development checkout", async () => {
-    const l = layout(root);
-    await mkdir(join(l.versions, "v0.1.0"), { recursive: true });
-    expect(detectRunning(join(l.versions, "v0.1.0")).managed).toBeUndefined();
-    await initLayout(l, bare);
-    expect(detectRunning(join(l.versions, "v0.1.0")).managed).toMatchObject({ version: "v0.1.0", layout: { root } });
-    expect(detectRunning(join(l.versions, ".staging-v0.2.0-1")).managed).toBeUndefined();
-    expect(detectRunning(work)).toEqual({ root: work });
-    expect(serverEntry({ root: work })).toEqual({ type: "stdio", command: "node", args: [join(work, "src", "cli.ts"), "mcp"] });
-    const launcher = process.platform === "win32" ? { command: "cmd", args: ["/c", l.launcherCmd, "mcp"] } : { command: l.launcher, args: ["mcp"] };
-    expect(serverEntry(managed(l, "v0.1.0"))).toEqual({ type: "stdio", ...launcher });
-  });
-
   it("prints how to update a development checkout and exits 0", async () => {
     const out: string[] = [];
     vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {

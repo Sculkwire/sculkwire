@@ -8,7 +8,8 @@ import { cp, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os";
 import { join, posix, relative, resolve, sep, win32 } from "node:path";
 import { parse as parseJsonc } from "jsonc-parser";
-import { run } from "./process.ts";
+import { isPlainObject, type JsonObject } from "./json.ts";
+import { run, type RunOptions } from "./process.ts";
 import { findOnPath } from "./which.ts";
 
 export interface RegolithBuild {
@@ -27,7 +28,6 @@ export interface RegolithFailure {
   message: string;
 }
 
-type Obj = Record<string, unknown>;
 
 const SKIP_TOP: Record<string, true> = { ".git": true, build: true, node_modules: true, dist: true };
 
@@ -52,19 +52,19 @@ export function findRgl(explicit?: string, env: NodeJS.ProcessEnv = process.env,
   return rglCandidates(platform, env, home).find((f) => existsSync(f)) ?? findOnPath("rgl", env, platform);
 }
 
-async function readConfig(root: string): Promise<Obj | undefined> {
+async function readConfig(root: string): Promise<JsonObject | undefined> {
   try {
     const v: unknown = parseJsonc(await readFile(join(root, "config.json"), "utf8"), [], { allowTrailingComma: true });
-    return v && typeof v === "object" && !Array.isArray(v) ? (v as Obj) : undefined;
+    return isPlainObject(v) ? v : undefined;
   } catch {
     return undefined;
   }
 }
 
-function profilesOf(config: Obj): Obj {
+function profilesOf(config: JsonObject): JsonObject {
   const reg = config.regolith;
   const profiles = reg && typeof reg === "object" && "profiles" in reg ? reg.profiles : undefined;
-  return profiles && typeof profiles === "object" && !Array.isArray(profiles) ? (profiles as Obj) : {};
+  return isPlainObject(profiles) ? profiles : {};
 }
 
 /** Profile to build (`default`, else the first) and whether it (transitively) runs any filter. */
@@ -118,7 +118,7 @@ export async function regolithExportFolders(root: string): Promise<RegolithExpor
   for (const profile of Object.values(profilesOf(config))) {
     const exp = profile && typeof profile === "object" && "export" in profile ? profile.export : undefined;
     if (!exp || typeof exp !== "object") continue;
-    const e = exp as Obj;
+    const e = exp as JsonObject;
     if (e.target === "development" || e.target === "preview") {
       if (name !== undefined || e.bpName !== undefined) add(out.behavior, exportName(e.bpName, `${name}_bp`));
       if (name !== undefined || e.rpName !== undefined) add(out.resource, exportName(e.rpName, `${name}_rp`));
@@ -167,11 +167,11 @@ export async function buildRegolith(projectRoot: string, profile: string, rglPat
     await symlink(join(root, "node_modules"), join(work, "node_modules"), process.platform === "win32" ? "junction" : "dir");
   }
   const profiles = profilesOf(config);
-  const p = (profiles[profile] && typeof profiles[profile] === "object" ? profiles[profile] : { filters: [] }) as Obj;
+  const p = (profiles[profile] && typeof profiles[profile] === "object" ? profiles[profile] : { filters: [] }) as JsonObject;
   profiles[profile] = { ...p, export: { target: "exact", bpPath: join(out, "BP"), rpPath: join(out, "RP") } };
-  (config.regolith as Obj).profiles = profiles;
+  (config.regolith as JsonObject).profiles = profiles;
   await writeFile(join(work, "config.json"), JSON.stringify(config, null, 2));
-  const rglOptions = { cwd: work, env: { ...process.env, NO_COLOR: "1" }, timeoutMs: 900_000 };
+  const rglOptions: RunOptions = { cwd: work, env: { ...process.env, NO_COLOR: "1" }, timeoutMs: 900_000, killSignal: "SIGTERM" };
   let r = await run(rgl, ["run", profile], rglOptions);
   if (r.code !== 0 && /\bget\b|not installed|install/i.test(r.stdout + r.stderr)) {
     await run(rgl, ["get"], rglOptions);
@@ -184,7 +184,7 @@ export async function buildRegolith(projectRoot: string, profile: string, rglPat
     const tail = output.slice(-2000);
     return { profile, kind: "failed", message: `rgl run ${profile} failed: ${tail.length < output.length ? tail.slice(tail.indexOf("\n") + 1) : tail}` };
   }
-  const packs = (config.packs && typeof config.packs === "object" ? config.packs : {}) as Obj;
+  const packs = (config.packs && typeof config.packs === "object" ? config.packs : {}) as JsonObject;
   const outputs: { source: string; built: string }[] = [];
   for (const [key, def] of [
     ["behaviorPack", "./packs/BP"],

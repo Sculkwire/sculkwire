@@ -7,6 +7,7 @@ import { existsSync } from "node:fs";
 import { readFile, rm, stat } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { atLeast, compareDiagnostics, type Diagnostic, type DiagnosticSummary, type Severity, summarize } from "../core/diagnostic.ts";
+import { isPlainObject } from "../core/json.ts";
 import { discoverProject, type PackInfo } from "../core/project.ts";
 import { buildRegolith, regolithPlan } from "../core/regolith.ts";
 import type { Channel } from "../core/version.ts";
@@ -126,8 +127,9 @@ export interface ValidationResult {
 }
 
 /**
- * Process-wide defaults merged under every call's options (MCP + CLI). The integrator wires runtime providers
- * here, e.g. `validateDefaults.resolveSamples = (ch) => ensureBedrockSamples({channel: ch}).then((s) => s.root)`.
+ * Process-wide defaults merged under every call's options (MCP + CLI). `useKnowledgeProviders()`
+ * (`validate/providers.ts`, called by `wireFeatures()`) fills in the samples, rockide and typings providers; a
+ * caller that skips it validates without them.
  */
 export const validateDefaults: ValidateOptions = {};
 
@@ -163,7 +165,7 @@ function jsonFinding(p: JsonProblem): Omit<Finding, "file"> {
 async function readManifests(ctx: Context): Promise<void> {
   for (const pack of ctx.packs) {
     const m = await ctx.value(pack, "manifest.json");
-    if (m && typeof m === "object" && !Array.isArray(m)) pack.manifest = m as Record<string, unknown>;
+    if (isPlainObject(m)) pack.manifest = m;
   }
 }
 

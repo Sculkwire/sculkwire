@@ -108,7 +108,7 @@ export function settingsText(value: SettingValue): string {
 const FILE_SCALE: Readonly<Record<string, number>> = { gfx_viewdistance: 16 };
 
 /** The number in `text`, or undefined when it is not one. */
-function numberIn(text: string): number | undefined {
+export function numberIn(text: string): number | undefined {
   const n = Number(text);
   return text.trim() !== "" && Number.isFinite(n) ? n : undefined;
 }

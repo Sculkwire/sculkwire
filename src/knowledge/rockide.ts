@@ -4,9 +4,9 @@
  *
  * Cache (`tracked.ts`): one directory per release tag (`<tag>/`, the source tarball of the tag with `schema/` and
  * `scripts/compile.ts`, whose entry tables `rockideRoutes` reads for the validator) plus `current.json` naming the
- * release in use. The
- * release asset `schemas.tar.gz` is not used: it holds only compiled bundles. The tags are re-checked at most once a
- * day (`git ls-remote --tags`), or on `refresh` (`sculk knowledge update`); offline and failed checks keep the last copy.
+ * release in use. The release asset `schemas.tar.gz` is not used: it holds only compiled bundles. The tags are
+ * re-checked at most once a day (`git ls-remote --tags`), or on `refresh` (`sculk knowledge update`); offline and failed
+ * checks keep the last copy.
  */
 import { existsSync } from "node:fs";
 import { readdir, readFile, rm } from "node:fs/promises";
@@ -14,6 +14,7 @@ import { dirname, join, relative } from "node:path";
 import { x as untar } from "tar";
 import { errorMessage } from "../core/errors.ts";
 import { writeFileAtomic } from "../core/fs.ts";
+import { isPlainObject, type JsonObject } from "../core/json.ts";
 import { memoAsync } from "../core/memo.ts";
 import { cacheDir } from "../core/paths.ts";
 import type { PackKind } from "../core/project.ts";
@@ -133,7 +134,6 @@ export async function rockideRoutes(root: string): Promise<RockideRoute[]> {
   return routes;
 }
 
-type Json = Record<string, unknown>;
 
 export interface RockideProperty {
   name: string;
@@ -190,7 +190,7 @@ interface IndexEntry {
   version: string;
   /** The `_index.json` naming the component and its property node there (a `$ref` or an inline definition). */
   indexFile: string;
-  node: Json;
+  node: JsonObject;
   /** Where the definition lives, relative to the rockide root (`file#pointer`). */
   target: string;
 }
@@ -200,14 +200,13 @@ const VERSION_DIR = /^\d+(?:\.\d+)+$/;
 const ENUM_CAP = 50;
 const TEXT_ENUM_CAP = 12;
 
-const isObj = (v: unknown): v is Json => !!v && typeof v === "object" && !Array.isArray(v);
 
 function atPointer(doc: unknown, pointer: string): unknown {
   let v = doc;
   for (const raw of pointer.split("/").filter(Boolean)) {
     const seg = decodeURIComponent(raw).replace(/~1/g, "/").replace(/~0/g, "~");
-    if (!isObj(v) && !Array.isArray(v)) return undefined;
-    v = (v as Json)[seg];
+    if (!isPlainObject(v) && !Array.isArray(v)) return undefined;
+    v = (v as JsonObject)[seg];
   }
   return v;
 }
@@ -238,9 +237,9 @@ function componentIndex(root: string): Promise<Map<string, IndexEntry[]>> {
             } catch {
               continue;
             }
-            const props = isObj(index) && isObj(index.properties) ? index.properties : {};
+            const props = isPlainObject(index) && isPlainObject(index.properties) ? index.properties : {};
             for (const [id, node] of Object.entries(props)) {
-              if (!id.includes(":") || !isObj(node)) continue;
+              if (!id.includes(":") || !isPlainObject(node)) continue;
               const { file, pointer } =
                 typeof node.$ref === "string" ? splitRef(node.$ref, indexFile) : { file: indexFile, pointer: `/properties/${id.replace(/~/g, "~0").replace(/\//g, "~1")}` };
               const entry: IndexEntry = { scope: `${area}/${kind}/${group}`, version, indexFile, node, target: posix(root, file, pointer) };
@@ -262,8 +261,8 @@ export async function rockideComponentIds(root: string): Promise<string[]> {
 }
 
 /** Follow `$ref` chains (bounded); sibling keys of a `$ref` override the target's, as VS Code merges them. */
-async function deref(node: unknown, file: string, depth = 0): Promise<{ node: Json; file: string }> {
-  if (!isObj(node)) return { node: {}, file };
+async function deref(node: unknown, file: string, depth = 0): Promise<{ node: JsonObject; file: string }> {
+  if (!isPlainObject(node)) return { node: {}, file };
   if (typeof node.$ref !== "string" || depth > 8) return { node, file };
   const { file: f, pointer } = splitRef(node.$ref, file);
   let target: unknown;
@@ -274,20 +273,20 @@ async function deref(node: unknown, file: string, depth = 0): Promise<{ node: Js
   }
   const { $ref: _ref, ...rest } = node;
   const inner = await deref(target, f, depth + 1);
-  const merged: Json = { ...inner.node };
+  const merged: JsonObject = { ...inner.node };
   for (const [k, v] of Object.entries(rest)) if (v !== "" && v !== undefined) merged[k] = v;
   return { node: merged, file: inner.file };
 }
 
-const branchesOf = (n: Json): unknown[] => [...((n.anyOf as unknown[]) ?? []), ...((n.oneOf as unknown[]) ?? [])];
+const branchesOf = (n: JsonObject): unknown[] => [...((n.anyOf as unknown[]) ?? []), ...((n.oneOf as unknown[]) ?? [])];
 
-async function describeType(node: Json, file: string, depth = 0): Promise<{ types: string[]; values: unknown[] }> {
+async function describeType(node: JsonObject, file: string, depth = 0): Promise<{ types: string[]; values: unknown[] }> {
   const types = new Set<string>();
   const values: unknown[] = [];
   const declared = typeof node.type === "string" ? [node.type] : Array.isArray(node.type) ? node.type.map(String) : [];
   for (const t of declared) {
     // `array<string>`: element types (and their allowed values) of a uniform array.
-    if (t === "array" && isObj(node.items) && depth < 3) {
+    if (t === "array" && isPlainObject(node.items) && depth < 3) {
       const r = await deref(node.items, file);
       const inner = await describeType(r.node, r.file, depth + 1);
       types.add(inner.types.length ? `array<${inner.types.join(" | ")}>` : "array");
@@ -333,12 +332,12 @@ async function summarize(raw: unknown, file: string, name: string, required: boo
   return p;
 }
 
-async function properties(node: Json, file: string, depth: number): Promise<RockideProperty[]> {
+async function properties(node: JsonObject, file: string, depth: number): Promise<RockideProperty[]> {
   // The object form among `oneOf: [shorthand, {type: object, properties}]`, or the element of an array of objects.
-  let obj: { node: Json; file: string } | undefined;
+  let obj: { node: JsonObject; file: string } | undefined;
   for (const c of [{ node, file }, ...(await Promise.all(branchesOf(node).map((b) => deref(b, file))))]) {
-    const candidate = !isObj(c.node.properties) && isObj(c.node.items) ? await deref(c.node.items, c.file) : c;
-    if (isObj(candidate.node.properties)) {
+    const candidate = !isPlainObject(c.node.properties) && isPlainObject(c.node.items) ? await deref(c.node.items, c.file) : c;
+    if (isPlainObject(candidate.node.properties)) {
       obj = candidate;
       break;
     }
@@ -346,7 +345,7 @@ async function properties(node: Json, file: string, depth: number): Promise<Rock
   if (!obj) return [];
   const req = new Set(Array.isArray(obj.node.required) ? (obj.node.required as string[]) : []);
   const out: RockideProperty[] = [];
-  for (const [name, child] of Object.entries(obj.node.properties as Json)) out.push(await summarize(child, obj.file, name, req.has(name), depth));
+  for (const [name, child] of Object.entries(obj.node.properties as JsonObject)) out.push(await summarize(child, obj.file, name, req.has(name), depth));
   return out;
 }
 

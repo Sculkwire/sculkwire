@@ -5,7 +5,7 @@ import type { PrintEvent } from "./print.ts";
 import { connectTo, listen } from "./session.ts";
 
 /** A fake game listening like BDS auto-attach=listen: announces its protocol, records what the debugger sends. */
-async function fakeGame(version: number, requirePasscode = false) {
+async function fakeGame(version: number) {
   const received: Record<string, unknown>[] = [];
   const waiters: { n: number; resolve: () => void }[] = [];
   /** Resolves once the debugger has sent `n` messages in total. */
@@ -25,7 +25,7 @@ async function fakeGame(version: number, requirePasscode = false) {
     });
     const announce = encodeFrame({
       type: "event",
-      event: { type: "ProtocolEvent", version, require_passcode: requirePasscode, plugins: [{ name: "BP", module_uuid: "AAAA-1" }] },
+      event: { type: "ProtocolEvent", version, plugins: [{ name: "BP", module_uuid: "AAAA-1" }] },
     });
     // Split the frame to exercise reassembly on the debugger side.
     s.write(announce.subarray(0, 5));
@@ -41,9 +41,9 @@ async function fakeGame(version: number, requirePasscode = false) {
 
 describe("DebuggerSession handshake", () => {
   it("answers with the game's version and target module, then resumes", async () => {
-    const game = await fakeGame(11, true);
+    const game = await fakeGame(11);
     const session = await connectTo("127.0.0.1", game.port, { timeoutMs: 2000 });
-    expect(session.info).toMatchObject({ gameVersion: 11, version: 11, targetModuleUuid: "AAAA-1", requirePasscode: true });
+    expect(session.info).toMatchObject({ gameVersion: 11, version: 11, targetModuleUuid: "AAAA-1" });
     session.command("/say hi");
     const { promise, resolve } = Promise.withResolvers<PrintEvent>();
     session.once("print", resolve);
@@ -71,21 +71,6 @@ describe("DebuggerSession handshake", () => {
     expect(old.received.at(-1)).toEqual({ type: "minecraftCommand", command: { command: "list", dimension_type: "overworld" } });
     s2.close();
     old.server.close();
-  });
-
-  it("collects a command's output after its echo, without ignored traffic", async () => {
-    const game = await fakeGame(11);
-    const session = await connectTo("127.0.0.1", game.port, { timeoutMs: 2000 });
-    const print = (message: string) => game.send({ type: "event", event: { type: "PrintEvent", message, logLevel: 1 } });
-    const output = session.runCommand("/list", { ignore: (m) => m.startsWith("helper") });
-    await game.receivedCount(4);
-    print("before the echo");
-    print("[Scripting] Executing command [list]");
-    print("helper traffic");
-    print("There are 1/10 players online:");
-    expect((await output).map((p) => p.message)).toEqual(["There are 1/10 players online:"]);
-    session.close();
-    game.server.close();
   });
 
   it("accepts a game that dials in", async () => {

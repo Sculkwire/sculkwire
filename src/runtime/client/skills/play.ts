@@ -13,7 +13,7 @@ import type { ActionResult, EntityInfo, Loadout, PlayerAction, PlayerState } fro
 import { errorMessage } from "../../../core/errors.ts";
 import { runTaskStep } from "../tasks/steps.ts";
 import type { TaskEnv, TaskFailure, TaskStep, TaskStepResult } from "../tasks/types.ts";
-import type { Stance } from "./pack.ts";
+import type { Stance } from "./types.ts";
 import { checkGoal, GOAL_RADIUS, type Goal, type GoalCheck } from "./goal.ts";
 import { shortType } from "./mobs.ts";
 import { compileGoal, isTaskStep, stepLabel, UNDERSTOOD_FORMS, type PlanKind, type PlanStep } from "./plan.ts";

@@ -2,9 +2,13 @@
 import { z } from "zod";
 import { formatDiagnostic, type Diagnostic } from "./diagnostic.ts";
 import { errorMessage } from "./errors.ts";
+import { CHANNELS } from "./version.ts";
 
 type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 export type ToolResult = { content: Content[]; structuredContent?: Record<string, unknown>; isError?: boolean };
+
+/** A release channel: `stable` or `preview`. */
+export const channelSchema = z.enum(CHANNELS);
 
 export function ok(text: string, structured: object): ToolResult {
   return { content: [{ type: "text", text }], structuredContent: { ...structured } };

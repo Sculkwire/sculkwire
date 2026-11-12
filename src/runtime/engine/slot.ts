@@ -4,7 +4,8 @@
  * into its own maximum.
  */
 import { z } from "zod";
-import { finiteOrUndefined, integerOrUndefined, isPlainObject } from "./wire.ts";
+import { isPlainObject } from "../../core/json.ts";
+import { finiteOrUndefined, integerOrUndefined } from "./wire.ts";
 
 /** One enchantment on an item: the game's `minecraft:` id and its level (1 = I). */
 export interface ItemEnchantment {

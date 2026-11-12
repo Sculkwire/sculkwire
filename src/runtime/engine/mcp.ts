@@ -7,6 +7,7 @@
 import { readFile } from "node:fs/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { isPlainObject } from "../../core/json.ts";
 import { ok, type ToolResult } from "../../core/mcp.ts";
 import { DIFFICULTIES, GAME_TYPES, type Difficulty } from "../../gamefiles/worlds.ts";
 import type { EngineDeps } from "./deps.ts";
@@ -28,7 +29,6 @@ import { changeText, getSetting, listSettings, setSetting } from "./settings.ts"
 import { failureResult, invalidParamsResult, prerequisiteResult } from "./toolresult.ts";
 import { UI_BUTTONS, UI_CONTROL_TYPES, UI_KEY_ACTIONS, uiControlsText, uiScreenText } from "./ui.ts";
 import { registerWorkstationTools } from "./workstation.ts";
-import { isPlainObject } from "./wire.ts";
 import { getWorldSettings, setWorldSettings } from "./world.ts";
 
 /** Output schemas, built from the zod sculkwire depends on. Exported so tests check real agent answers against them. */

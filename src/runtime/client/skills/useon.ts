@@ -10,16 +10,7 @@ import type { EntityInfo } from "../types.ts";
 import { isEntityId, typeIdOf } from "./target.ts";
 import { shortType } from "./mobs.ts";
 import { combatStats } from "./stats.ts";
-import type { SkillResult } from "./types.ts";
-
-export interface UseOnArgs {
-  /** Entity id or type to hit. */
-  target: string;
-  /** Go on to the next one of the type that has not been hit yet (default true for a type). */
-  all?: boolean;
-  radius?: number;
-  timeoutMs?: number;
-}
+import type { SkillResult, UseOnArgs } from "./types.ts";
 
 export async function useOn(pc: PlayerController, args: UseOnArgs, signal?: AbortSignal): Promise<SkillResult> {
   const h = pc.hands;

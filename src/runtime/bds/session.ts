@@ -7,6 +7,7 @@
  * `reload` builds again into the same dirs, so edits to the sources apply.
  */
 import { cp, rm } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { formatDiagnostic, type Diagnostic } from "../../core/diagnostic.ts";
 import { errorMessage } from "../../core/errors.ts";
 import { summarizeProfile, type ProfileSummary } from "../debugger/profile.ts";
@@ -14,7 +15,7 @@ import { DebuggerSession, connectTo } from "../debugger/session.ts";
 import { entriesToDiagnostics, mergeEntries, parseConsole, type IndexedPack } from "../gamelog/logparse.ts";
 import { freeTcpPort, type BdsInstance } from "./instance.ts";
 import { disposeBuild, disposeRun, indexProject, prepareInstance, projectPacks, type BdsRunOptions, type ProjectPacks } from "./project.ts";
-import { finishRun, runLabel } from "./run.ts";
+import { finishRun, runLabel, serverVersionOf } from "./run.ts";
 import { BdsServer, START_TIMEOUT_MS, type ConsoleLine } from "./server.ts";
 
 export interface BdsSession {
@@ -206,7 +207,7 @@ export function sessionLogs(id: string, since = 0, limit = 500): LogsResult {
   // `seq` is the 1-based index of a line, so the lines after `since` start at index `since`.
   const lines = s.server.lines.slice(since, since + limit);
   const entries = mergeEntries(parseConsole(lines.map((l) => l.text)));
-  const diagnostics = entriesToDiagnostics(entries, s.indexed, { baseline: s.baseline, label: runLabel(s.server, s.instance) });
+  const diagnostics = entriesToDiagnostics(entries, s.indexed, { baseline: s.baseline, label: runLabel(serverVersionOf(s.server, s.instance)) });
   return { lines, next: lines.at(-1)?.seq ?? since, diagnostics };
 }
 
@@ -251,7 +252,7 @@ export async function sessionProfile(
   if (opts.action === "capture") {
     dbg.startProfiler();
     if (opts.command) dbg.command(opts.command);
-    await new Promise((r) => setTimeout(r, opts.durationMs));
+    await sleep(opts.durationMs);
   }
   const capture = await dbg.stopProfiler();
   return { action: opts.action, ...summarizeProfile(capture.profile, opts.limit) };

@@ -1,8 +1,9 @@
 /** The check a new checkout passes before `current` switches to it: the CLI answers `--help` and the MCP server lists tools. */
 import { spawn } from "node:child_process";
 import { join } from "node:path";
+import { runUnattended } from "../core/process.ts";
 import { AUTO_UPDATE_ENV } from "./config.ts";
-import { lastLine, runUnattended } from "./process.ts";
+import { lastLine } from "./process.ts";
 
 const SMOKE_TIMEOUT_MS = 60_000;
 

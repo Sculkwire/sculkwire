@@ -22,16 +22,12 @@ export interface ProtocolInfo {
   version: number;
   plugins: PluginDetails[];
   targetModuleUuid?: string;
-  requirePasscode: boolean;
 }
 
 export interface ProfilerCapture {
   basePath: string;
   profile: CpuProfile;
 }
-
-/** How long the game may take to echo a command it received. */
-const ECHO_TIMEOUT_MS = 10_000;
 
 /** Event map: `print`, `profilerCapture`, `close`, `error`. */
 export class DebuggerSession extends EventEmitter {
@@ -132,7 +128,7 @@ export class DebuggerSession extends EventEmitter {
     const version = Math.min(gameVersion, MAX_PROTOCOL_VERSION);
     const plugins = Array.isArray(event.plugins) ? event.plugins : [];
     const target = version >= PROTOCOL.SupportTargetSelection ? plugins[0]?.module_uuid : undefined;
-    const info: ProtocolInfo = { gameVersion, version, plugins, requirePasscode: event.require_passcode === true };
+    const info: ProtocolInfo = { gameVersion, version, plugins };
     if (target) info.targetModuleUuid = target;
     this.info = info;
     const reply: Record<string, unknown> = { type: "protocol", version };
@@ -147,57 +143,10 @@ export class DebuggerSession extends EventEmitter {
 
   /**
    * Run a command in the game. No direct reply: the game echoes `Executing command [<cmd>]` as a print, then
-   * prints the command's own output (or `Syntax error: …`); `runCommand` collects it.
+   * prints the command's own output (or `Syntax error: …`); collect `print` events after the echo for output.
    */
   command(commandLine: string, dimension = "overworld"): void {
     this.#sendVersioned("minecraftCommand", { command: commandLine.replace(/^\//, ""), dimension_type: dimension }, "command");
-  }
-
-  /**
-   * Run a command and collect its output: the prints after the game's `Executing command [<cmd>]` echo until a quiet
-   * gap. Prints `ignore` matches (other traffic on the same session) neither extend the gap nor appear in the result.
-   */
-  async runCommand(commandLine: string, opts: { dimension?: string; ignore?: (message: string) => boolean } = {}): Promise<PrintEvent[]> {
-    const command = commandLine.replace(/^\//, "");
-    const ignore = opts.ignore ?? (() => false);
-    const prints: PrintEvent[] = [];
-    let echoAt = -1;
-    const echoed = Promise.withResolvers<void>();
-    const onPrint = (p: PrintEvent): void => {
-      prints.push(p);
-      if (echoAt < 0 && p.message.includes(`Executing command [${command}]`)) {
-        echoAt = prints.length;
-        echoed.resolve();
-      }
-    };
-    const onClose = (): void => echoed.reject(new Error("the debugger connection closed"));
-    this.on("print", onPrint);
-    this.once("close", onClose);
-    const timer = setTimeout(() => echoed.reject(new Error(`timed out after ${ECHO_TIMEOUT_MS} ms waiting for the game`)), ECHO_TIMEOUT_MS);
-    try {
-      this.command(command, opts.dimension);
-      await echoed.promise;
-      clearTimeout(timer);
-      // Output follows the echo; stop after a quiet gap. Only the command's own lines extend it: other traffic
-      // (the client's helper pack sends queries four times a second, each with an echo, a confirmation and a reply)
-      // would never let it go quiet.
-      let last = echoAt;
-      let quietUntil = Date.now() + 600;
-      const deadline = Date.now() + 5_000;
-      while (Date.now() < quietUntil && Date.now() < deadline) {
-        await sleep(100);
-        if (prints.length > last) {
-          const fresh = prints.slice(last);
-          last = prints.length;
-          if (fresh.some((p) => !ignore(p.message))) quietUntil = Date.now() + 400;
-        }
-      }
-      return prints.slice(echoAt, last).filter((p) => !ignore(p.message));
-    } finally {
-      clearTimeout(timer);
-      this.off("print", onPrint);
-      this.off("close", onClose);
-    }
   }
 
   startProfiler(): void {

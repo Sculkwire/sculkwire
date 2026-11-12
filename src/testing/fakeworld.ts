@@ -10,9 +10,9 @@ import type { ItemSlot, Slot } from "../runtime/engine/slot.ts";
 import type { ScreenKind, ScreenSlotRef, ScreenState, TradeOffer } from "../runtime/engine/workstation.ts";
 import type { Clock } from "../runtime/client/clock.ts";
 import type { Vec3 } from "../runtime/client/types.ts";
-import { namespaced } from "../runtime/client/tasks/ids.ts";
+import { armorSlotOf, namespaced } from "../runtime/client/tasks/ids.ts";
 import { fuelValue, matches, parseRecipe, RecipeIndex, type Recipe } from "../runtime/client/tasks/recipes.ts";
-import { armorSlotOf, runTaskStep } from "../runtime/client/tasks/steps.ts";
+import { runTaskStep } from "../runtime/client/tasks/steps.ts";
 import type { BlockInfo, TaskEnv, TaskStep, TaskStepResult } from "../runtime/client/tasks/types.ts";
 import { drive, fakeClock } from "./faketime.ts";
 

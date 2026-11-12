@@ -35,7 +35,7 @@ export interface ClientInstall {
   logsDir: string;
   /**
    * Launch command (argv). `{uri}` becomes the world deeplink (`minecraft://` or `minecraft-preview://`), appended
-   * when absent. Absent: sculkwire cannot start the game and the user starts it.
+   * when absent. A part that is exactly `{args}` is dropped. Absent: sculkwire cannot start the game and the user starts it.
    */
   launch?: string[];
   /** Stop command (argv). Absent: the game process is terminated directly. */

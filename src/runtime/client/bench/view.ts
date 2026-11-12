@@ -4,7 +4,7 @@
  * the end of the bench. Pure, so the tests check the parsing and the values.
  */
 import type { GameSetting, SettingValue } from "../../engine/engine.ts";
-import { parseEnumList } from "./stance.ts";
+import { parseEnumList } from "./args.ts";
 
 export type BenchView = "first" | "third";
 

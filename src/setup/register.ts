@@ -8,9 +8,9 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { writeJsonAtomic } from "../core/fs.ts";
+import { runUnattended } from "../core/process.ts";
 import { findOnPath } from "../core/which.ts";
 import { detectRunning, platformLauncher, type Running } from "../update/layout.ts";
-import { runUnattended } from "../update/process.ts";
 
 export interface ServerEntry {
   type: "stdio";

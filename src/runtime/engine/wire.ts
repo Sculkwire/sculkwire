@@ -5,11 +5,6 @@ export function isObjectLike(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-/** A JSON object: non-null and not an array. */
-export function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return isObjectLike(value) && !Array.isArray(value);
-}
-
 export function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }

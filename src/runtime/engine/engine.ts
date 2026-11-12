@@ -20,6 +20,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
 import { errorMessage } from "../../core/errors.ts";
+import { isPlainObject } from "../../core/json.ts";
 import { cacheDir } from "../../core/paths.ts";
 import { gameDirCandidates } from "../../gamefiles/detect.ts";
 import { GAME_EXE } from "../../gamefiles/gdk.ts";
@@ -565,9 +566,10 @@ export class EngineSession {
   #hostFocused: boolean | undefined;
   /**
    * The desktop focus watcher of a window-mode game, or the `windows` record of a game on Windows: started and stopped
-   * by the built-in input provider (`runtime/client/agentprovider.ts`), read by `game_input_lock`.
+   * by the built-in input provider (`runtime/client/agentprovider.ts`), read by `game_input_lock`. `close()` leaves it
+   * to the provider, which stops it when the game stops or the provider closes.
    */
-  focusWatcher: HostFocus | undefined;
+  #focusWatcher: HostFocus | undefined;
 
   constructor(options: EngineSessionOptions = {}) {
     this.port = options.port ?? enginePort();
@@ -905,7 +907,7 @@ export class EngineSession {
       ok: true,
       value: {
         hit: typeof hit === "string" || typeof hit === "number" ? String(hit) : null,
-        target: target && typeof target === "object" && !Array.isArray(target) ? (target as Record<string, unknown>) : null,
+        target: isPlainObject(target) ? target : null,
       },
     };
   }
@@ -1042,7 +1044,19 @@ export class EngineSession {
 
   /** The desktop focus watcher's state; undefined when no window-mode game runs (Linux) or no game was launched. */
   focusWatch(): FocusWatchState | undefined {
-    return this.focusWatcher?.state();
+    return this.#focusWatcher?.state();
+  }
+
+  /** Keep the focus watcher the input provider started. */
+  setFocusWatcher(watcher: HostFocus): void {
+    this.#focusWatcher = watcher;
+  }
+
+  /** Forget the focus watcher now; the returned promise settles once it has stopped. */
+  stopFocusWatcher(): Promise<void> {
+    const watcher = this.#focusWatcher;
+    this.#focusWatcher = undefined;
+    return watcher ? watcher.stop() : Promise.resolve();
   }
 
   /** Every connection receives `lock` notifications, and learns the watched host focus. */

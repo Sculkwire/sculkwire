@@ -4,23 +4,22 @@
  */
 import { err, type CliCommand } from "../../core/cli.ts";
 import { ExitCode } from "../../core/diagnostic.ts";
+import { isPlainObject } from "../../core/json.ts";
 import { DIFFICULTIES, GAME_TYPES, type Difficulty, type GameType } from "../../gamefiles/worlds.ts";
 import { attempt, failed, oneShot, parseCommandLine, prerequisite, printJson, stringOption } from "./cliutil.ts";
 import type { EngineDeps } from "./deps.ts";
 import { defaultScreenshotPath, engine, type EngineTickArgs, type SettingValue, type WorldChange } from "./engine.ts";
 import { inventoryCommands } from "./inventory.ts";
 import { KEYBOARD_LOCK_NOTE, LOCK_MODES, lockText, type LockMode } from "./lock.ts";
-import { changeText, getSetting, listSettings, setSetting } from "./settings.ts";
+import { changeText, getSetting, listSettings, numberIn, setSetting } from "./settings.ts";
 import { UI_BUTTONS, UI_KEY_ACTIONS, uiControlsText, uiScreenText, type UiButton, type UiKeyAction } from "./ui.ts";
 import { workstationCommands } from "./workstation.ts";
-import { isPlainObject } from "./wire.ts";
 import { getWorldSettings, setWorldSettings } from "./world.ts";
 
 /** A command-line value: `true`/`false`, a number, or the text itself. */
 function valueOf(text: string): SettingValue {
   if (/^(true|false)$/i.test(text)) return text.toLowerCase() === "true";
-  const n = Number(text);
-  return text.trim() !== "" && Number.isFinite(n) ? n : text;
+  return numberIn(text) ?? text;
 }
 
 const attach: CliCommand = {
@@ -169,7 +168,10 @@ const lock: CliCommand = {
         return ExitCode.usage;
       }
       const result = await engine.lock.request(mode as LockMode | undefined);
-      if (!result.ok) return failed(result, KEYBOARD_LOCK_NOTE);
+      if (!result.ok) {
+        if (result.reason === "not_attached") err(KEYBOARD_LOCK_NOTE);
+        return failed(result);
+      }
       printJson(result.value);
       err(lockText(result.value));
       return ExitCode.ok;
@@ -226,7 +228,7 @@ const gameSettings: CliCommand = {
 };
 
 function worldSettingsCommand(deps: EngineDeps): CliCommand {
-    return {
+  return {
     name: "world settings",
     summary:
       "Read or change a test world: world settings [get] [--world name] | world settings set [--world name] [--difficulty d] " +
@@ -243,7 +245,7 @@ function worldSettingsCommand(deps: EngineDeps): CliCommand {
         });
         if (!parsed) return ExitCode.usage;
         const [action = "get", ...rest] = parsed.positionals;
-        const worldFlag = typeof parsed.values.world === "string" ? parsed.values.world : undefined;
+        const worldFlag = stringOption(parsed, "world");
         if (rest.length || (action !== "get" && action !== "set")) {
           err("usage: sculk world settings [get|set ...] [--world name]");
           return ExitCode.usage;
@@ -255,19 +257,20 @@ function worldSettingsCommand(deps: EngineDeps): CliCommand {
           return ExitCode.ok;
         }
         const change: WorldChange = {};
-        const difficulty = typeof parsed.values.difficulty === "string" ? parsed.values.difficulty : undefined;
+        const difficulty = stringOption(parsed, "difficulty");
         if (difficulty !== undefined && !(difficulty in DIFFICULTIES)) {
           err(`--difficulty must be one of ${Object.keys(DIFFICULTIES).join(", ")}`);
           return ExitCode.usage;
         }
         if (difficulty !== undefined) change.difficulty = difficulty as Difficulty;
-        const gameType = typeof parsed.values["game-type"] === "string" ? parsed.values["game-type"] : undefined;
+        const gameType = stringOption(parsed, "game-type");
         if (gameType !== undefined && !(GAME_TYPES as readonly string[]).includes(gameType)) {
           err(`--game-type must be one of ${GAME_TYPES.join(", ")}`);
           return ExitCode.usage;
         }
         if (gameType !== undefined) change.gameType = gameType as GameType;
-        const time = typeof parsed.values.time === "string" ? Number(parsed.values.time) : undefined;
+        const timeText = stringOption(parsed, "time");
+        const time = timeText === undefined ? undefined : Number(timeText);
         if (time !== undefined) {
           if (!Number.isInteger(time) || time < 0 || time > 24000) {
             err("--time needs whole ticks from 0 to 24000");
@@ -291,7 +294,7 @@ function worldSettingsCommand(deps: EngineDeps): CliCommand {
           }
           change.gamerules = gamerules;
         }
-        const weather = typeof parsed.values.weather === "string" ? parsed.values.weather : undefined;
+        const weather = stringOption(parsed, "weather");
         if (weather === "clear") change.weather = { rain: false, lightning: false };
         else if (weather === "rain") change.weather = { rain: true, lightning: false };
         else if (weather === "thunder") change.weather = { rain: true, lightning: true };
@@ -329,7 +332,6 @@ const gameUi: CliCommand = {
         "click <x> <y> [--button right]|scroll <x> <y> <delta>]";
       const parsed = parseCommandLine(args, { action: { type: "string" }, button: { type: "string" }, filter: { type: "string" } });
       if (!parsed) return ExitCode.usage;
-      const { values } = parsed;
       const [action = "screen", ...rest] = parsed.positionals;
       const flag = (name: "action" | "button" | "filter"): string | undefined => stringOption(parsed, name);
       if (action === "screen") {

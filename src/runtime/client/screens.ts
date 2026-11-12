@@ -271,9 +271,9 @@ export interface RecoveryIO {
   click?(x: number, y: number, count?: number): Promise<void>;
   /**
    * The agent's own UI while one is attached, asked before each step (an agent can attach during the recovery).
-   * Without it the recovery reads the log and uses the keys.
+   * Without it the recovery reads the log and uses the keys. Its double clicks wait on `sleep`, the recovery's own.
    */
-  ui?(): UiRecovery | undefined;
+  ui?(sleep: (ms: number) => Promise<void>): UiRecovery | undefined;
   /** A screenshot of the game: its file and PNG bytes. */
   screenshot(label: string): Promise<{ path: string; png: Buffer } | undefined>;
   /** False once the game process is gone. */
@@ -490,7 +490,7 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
   const opened: string[] = [];
   let lastOpened = screens.opened;
   const seen: string[] = [];
-  const uiRoute = (): UiRecovery | undefined => (uiDown ? undefined : io.ui?.());
+  const uiRoute = (): UiRecovery | undefined => (uiDown ? undefined : io.ui?.(io.sleep));
   const touches = touchRoute(io, uiRoute, () => frame);
   const shoot = async (label: string) => {
     const shot = await io.screenshot(label).catch(() => undefined);

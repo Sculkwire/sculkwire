@@ -161,11 +161,15 @@ export function worldUri(levelId: string, preview: boolean): string {
   return `${preview ? "minecraft-preview" : "minecraft"}://connect?localLevelId=${encodeURIComponent(levelId)}`;
 }
 
-/** Expand the install's launch command: `{uri}` → world deeplink (appended when the command has no `{uri}`). */
+/**
+ * Expand the install's launch command: `{uri}` → world deeplink (appended when the command has no `{uri}`). A part
+ * that is exactly `{args}` is dropped: the game takes no activation arguments.
+ */
 export function launchArgv(template: readonly string[], uri: string | undefined): string[] {
   const out: string[] = [];
   let usedUri = false;
   for (const part of template) {
+    if (part === "{args}") continue;
     if (part.includes("{uri}")) {
       usedUri = true;
       if (uri) out.push(part.replace("{uri}", uri));

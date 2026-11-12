@@ -305,11 +305,20 @@ export interface LogResult {
   cursor: { log?: LogPosition; printSeq: number };
 }
 
-/** `count` clicks one after another, 120 ms apart: `count: 2` is a double click. */
-async function clicks(count: number, click: () => Promise<void>): Promise<void> {
+/** `count` clicks one after another, 120 ms apart on `wait`: `count: 2` is a double click. */
+async function clicks(count: number, click: () => Promise<void>, wait: (ms: number) => Promise<void>): Promise<void> {
   for (let i = 0; i < count; i++) {
     await click();
-    if (i + 1 < count) await sleep(120);
+    if (i + 1 < count) await wait(120);
+  }
+}
+
+/** `wait`, rejecting with "the game stopped" instead of the abort error once `stop` aborted `signal`. */
+async function untilStopped<T>(wait: Promise<T>, signal: AbortSignal): Promise<T> {
+  try {
+    return await wait;
+  } catch (e) {
+    throw signal.aborted ? new Error("the game stopped") : e;
   }
 }
 
@@ -320,9 +329,9 @@ async function launchStateExists(): Promise<boolean> {
 
 /**
  * The in-game agent's UI calls (`engine.ui*`) as the recovery's `UiRecovery`, or undefined while no agent is attached
- * (then the recovery reads the log and uses the keys).
+ * (then the recovery reads the log and uses the keys). A double click waits on `sleep`, the recovery's own.
  */
-function agentUi(): UiRecovery | undefined {
+function agentUi(sleep: (ms: number) => Promise<void>): UiRecovery | undefined {
   if (!engine.attached) return undefined;
   const value = <T>(result: EngineResult<T>): T => {
     if (!result.ok) throw new Error(`${result.reason}: ${result.message}`);
@@ -333,7 +342,7 @@ function agentUi(): UiRecovery | undefined {
     controls: async () => value(await engine.uiControls()),
     press: async (name) => void value(await engine.uiPress(name)),
     key: async (key) => void value(await engine.uiKey(key)),
-    click: (x, y, count = 1) => clicks(count, async () => void value(await engine.uiClick(x, y))),
+    click: (x, y, count = 1) => clicks(count, async () => void value(await engine.uiClick(x, y)), sleep),
     scroll: async (x, y, delta) => void value(await engine.uiScroll(x, y, delta)),
   };
 }
@@ -568,7 +577,8 @@ export class ClientBridge {
         this.#finishStart(BACKGROUND_WAIT_MS, since, signal).catch(waitFailed);
         return this.status();
       }
-      await this.stop();
+      // `stop` aborted the wait: it is already cleaning up.
+      if (!signal.aborted) await this.stop();
       throw new Error(`client did not reach the world: ${errorMessage(e)}`);
     }
     return this.status();
@@ -576,18 +586,18 @@ export class ClientBridge {
 
   /**
    * Wait for the game process, then for the world (each up to `timeoutMs`), counting helper prints after `since`.
-   * Rejects once `signal` aborts.
+   * Rejects with "the game stopped" once `signal` aborts.
    */
   async #finishStart(timeoutMs: number, since: number, signal: AbortSignal): Promise<void> {
     let gamePid: number;
     try {
-      gamePid = await waitForGame(this.install as ClientInstall, timeoutMs, signal);
+      gamePid = await untilStopped(waitForGame(this.install as ClientInstall, timeoutMs, signal), signal);
     } catch (e) {
       if (signal.aborted) throw e;
       throw new WaitTimeout(errorMessage(e));
     }
     if (this.launchState) this.launchState.gamePid = gamePid;
-    const atFirstLook = await this.#waitForWorld(timeoutMs, since, signal);
+    const atFirstLook = await untilStopped(this.#waitForWorld(timeoutMs, since, signal), signal);
     // Windows mutes the game's audio sessions, which exist once it plays sound: by now it surely opened its device.
     if (this.launchState?.muteRequested) {
       const note = await muteWindowsGame(this.launchState, gamePid);
@@ -698,7 +708,7 @@ export class ClientBridge {
       await this.#attachForEntry(auto);
       if (!engine.attached) return false;
     }
-    const screen = await agentUi()?.screen().catch(() => undefined);
+    const screen = await agentUi((ms) => sleep(ms))?.screen().catch(() => undefined);
     if (screen) this.#screens = screensFromUi(screen, this.#screens);
     const kind = currentScreen(this.#screens);
     const now = Date.now();
@@ -786,7 +796,11 @@ export class ClientBridge {
         ? {
             click: (x: number, y: number, count = 1) => {
               const frame = this.#frame ?? { width: state.width ?? DEFAULT_FRAME.width, height: state.height ?? DEFAULT_FRAME.height };
-              return clicks(count, async () => void (await sendInput(state, { action: "click", x: Math.round(frame.width * x), y: Math.round(frame.height * y) })));
+              return clicks(
+                count,
+                async () => void (await sendInput(state, { action: "click", x: Math.round(frame.width * x), y: Math.round(frame.height * y) })),
+                (ms) => sleep(ms),
+              );
             },
           }
         : {}),
@@ -994,9 +1008,23 @@ export class ClientBridge {
     }
     const session = this.#session;
     if (!session || session.closed) throw new Error("script debugger not attached");
-    // The helper's traffic (a `play` run sends queries four times a second, its state stream) is not the command's output.
-    const prints = await session.runCommand(command, { ignore: helperTraffic });
-    const output = prints.map((p) => p.message.trim());
+    const since = this.#printSeq;
+    session.command(command);
+    const echo = await this.waitForPrint((p) => p.message.includes(`Executing command [${command}]`), 10_000, since);
+    // Output follows the echo; stop after a quiet gap. Only the command's own lines extend it: the helper's traffic
+    // (a `play` run sends queries four times a second, each with an echo, a confirmation and a reply) never lets it go quiet.
+    let last = echo.seq;
+    let quietUntil = Date.now() + 600;
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < quietUntil && Date.now() < deadline) {
+      await sleep(100);
+      if (this.#printSeq > last) {
+        const seen = last;
+        last = this.#printSeq;
+        if (this.#prints.some((p) => p.seq > seen && !helperTraffic(p.message))) quietUntil = Date.now() + 400;
+      }
+    }
+    const output = this.#prints.filter((p) => p.seq > echo.seq && p.seq <= last && !helperTraffic(p.message)).map((p) => p.message.trim());
     return { command, via: "debugger", ok: debuggerCommandOk(output, await this.#failureMatcher()), output };
   }
 

@@ -3,11 +3,7 @@ import type { ProjectileKind } from "./ballistics.ts";
 import type { InputKind } from "./input.ts";
 import type { EngineInput } from "./inputprovider.ts";
 import type { PlayerInput } from "./input.ts";
-import type { EatArgs } from "./skills/eat.ts";
-import type { FightArgs } from "./skills/fight.ts";
-import type { FleeArgs } from "./skills/flee.ts";
-import type { FightStats } from "./skills/types.ts";
-import type { UseOnArgs } from "./skills/useon.ts";
+import type { EatArgs, FightArgs, FightStats, FleeArgs, UseOnArgs } from "./skills/types.ts";
 
 export interface Vec3 {
   x: number;

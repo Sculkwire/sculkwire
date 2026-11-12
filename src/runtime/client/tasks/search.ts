@@ -148,7 +148,6 @@ export async function findEntities(env: TaskEnv, types: readonly string[], optio
   return result(await ask(reach), `${reach} blocks`, 2);
 }
 
-
 /** Why a search found nothing, for a step's message: what was asked, how far, and the helper's errors. */
 export function notFoundText(what: string, search: Found<unknown>, asked: readonly string[]): string {
   const failures = search.errors.length ? `; ${search.failed ? "every query failed" : "some queries failed"}: ${search.errors.join("; ")}` : "";

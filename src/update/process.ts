@@ -1,24 +1,8 @@
 /**
- * Child processes of the update steps. They never inherit stdout (the MCP server speaks JSON-RPC on it) and every step
- * has a timeout.
+ * Git for the update steps. Like every update step it runs through `runUnattended`: it never inherits stdout (the MCP
+ * server speaks JSON-RPC on it) and has a timeout.
  */
-import { run, type RunResult } from "../core/process.ts";
-
-/**
- * `run` for the update steps: rejects when the command does not start or times out. Git never prompts: a repository
- * that needs credentials works through the user's credential helper, and missing credentials fail instead of hanging.
- */
-export async function runUnattended(command: string, args: readonly string[], options: { cwd?: string; timeoutMs: number; env?: NodeJS.ProcessEnv; input?: string }): Promise<RunResult> {
-  const r = await run(command, args, {
-    cwd: options.cwd,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", ...options.env },
-    timeoutMs: options.timeoutMs,
-    input: options.input ?? "",
-  });
-  if (r.startError) throw r.startError;
-  if (r.timedOut) throw new Error(`${command} ${args.join(" ")} timed out after ${Math.round(options.timeoutMs / 1000)} s`);
-  return r;
-}
+import { runUnattended } from "../core/process.ts";
 
 export async function git(args: readonly string[], options: { cwd?: string; timeoutMs: number }): Promise<string> {
   const r = await runUnattended("git", args, options);

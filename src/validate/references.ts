@@ -4,6 +4,7 @@
  * range of the referencing JSON value.
  */
 import type { Severity } from "../core/diagnostic.ts";
+import { isPlainObject, type JsonObject } from "../core/json.ts";
 import { IMAGE_EXT, SOUND_EXT } from "./classify.ts";
 import type { Context, Pack } from "./context.ts";
 import { pointerJoin } from "./jsonc.ts";
@@ -100,10 +101,9 @@ const SLUG: Record<RefKind, string> = {
   block_rp: "block",
 };
 
-type Obj = Record<string, unknown>;
 
-function obj(v: unknown): Obj | undefined {
-  return v && typeof v === "object" && !Array.isArray(v) ? (v as Obj) : undefined;
+function obj(v: unknown): JsonObject | undefined {
+  return isPlainObject(v) ? v : undefined;
 }
 
 function arr(v: unknown): unknown[] {
@@ -111,7 +111,7 @@ function arr(v: unknown): unknown[] {
 }
 
 /** `{root: {description: {...}}}` -> [root object, description]. */
-function desc(data: unknown, rootKey: string): [Obj | undefined, Obj | undefined] {
+function desc(data: unknown, rootKey: string): [JsonObject | undefined, JsonObject | undefined] {
   const root = obj(obj(data)?.[rootKey]);
   return [root, obj(root?.description)];
 }
@@ -320,7 +320,7 @@ export class ReferenceChecker {
         const data = await this.ctx.value(pack, rel);
         if (!data || typeof data !== "object") continue;
         if (pack.kind === "behavior") await this.behaviorFile(pack, rel, data);
-        else if (pack.kind === "resource" && obj(data)) await this.resourceFile(pack, rel, data as Obj);
+        else if (pack.kind === "resource" && obj(data)) await this.resourceFile(pack, rel, data as JsonObject);
       }
     }
   }
@@ -420,11 +420,11 @@ export class ReferenceChecker {
     }
   }
 
-  async animate(pack: Pack, rel: string, base: string, scripts: Obj | undefined, anims: Obj): Promise<void> {
+  async animate(pack: Pack, rel: string, base: string, scripts: JsonObject | undefined, anims: JsonObject): Promise<void> {
     const animate = arr(scripts?.animate);
     for (let i = 0; i < animate.length; i++) {
       const a = animate[i];
-      const name = obj(a) ? Object.keys(a as Obj)[0] : a;
+      const name = obj(a) ? Object.keys(a as JsonObject)[0] : a;
       if (typeof name === "string" && !(name in anims)) {
         await this.ctx.at(pack, rel, `${base}/scripts/animate/${i}`, {
           severity: "error",
@@ -435,7 +435,7 @@ export class ReferenceChecker {
     }
   }
 
-  async bpEntity(pack: Pack, rel: string, data: Obj): Promise<void> {
+  async bpEntity(pack: Pack, rel: string, data: JsonObject): Promise<void> {
     const [, d] = desc(data, "minecraft:entity");
     if (!d) return;
     const base = "/minecraft:entity/description";
@@ -464,7 +464,7 @@ export class ReferenceChecker {
     }
   }
 
-  async bpItem(pack: Pack, rel: string, data: Obj): Promise<void> {
+  async bpItem(pack: Pack, rel: string, data: JsonObject): Promise<void> {
     const [item, d] = desc(data, "minecraft:item");
     if (!item) return;
     const comps = obj(item.components) ?? {};
@@ -473,7 +473,7 @@ export class ReferenceChecker {
     const refs: [string, unknown][] = [];
     if (typeof icon === "string") refs.push([base, icon]);
     else if (obj(icon)) {
-      const io = icon as Obj;
+      const io = icon as JsonObject;
       if (typeof io.texture === "string") refs.push([`${base}/texture`, io.texture]);
       for (const [k, v] of Object.entries(obj(io.textures) ?? {})) refs.push([pointerJoin(`${base}/textures`, k), v]);
     }
@@ -495,7 +495,7 @@ export class ReferenceChecker {
     }
   }
 
-  async bpBlock(pack: Pack, rel: string, data: Obj): Promise<void> {
+  async bpBlock(pack: Pack, rel: string, data: JsonObject): Promise<void> {
     const [block, d] = desc(data, "minecraft:block");
     if (!block) return;
     const parts: [string, unknown][] = [["/minecraft:block/components", block.components]];
@@ -536,7 +536,7 @@ export class ReferenceChecker {
     }
   }
 
-  async recipe(pack: Pack, rel: string, data: Obj): Promise<void> {
+  async recipe(pack: Pack, rel: string, data: JsonObject): Promise<void> {
     for (const [rk, b] of Object.entries(data)) {
       const body = obj(b);
       if (!rk.startsWith("minecraft:recipe_") || !body) continue;
@@ -561,7 +561,7 @@ export class ReferenceChecker {
     }
   }
 
-  async resourceFile(pack: Pack, rel: string, data: Obj): Promise<void> {
+  async resourceFile(pack: Pack, rel: string, data: JsonObject): Promise<void> {
     const top = rel.split("/", 1)[0];
     if (top === "entity" || top === "attachables") {
       await this.clientDescription(pack, rel, data, top === "entity" ? "minecraft:client_entity" : "minecraft:attachable");
@@ -578,7 +578,7 @@ export class ReferenceChecker {
         const sounds = arr(obj(def)?.sounds);
         for (let i = 0; i < sounds.length; i++) {
           const s = sounds[i];
-          const name = obj(s) ? (s as Obj).name : s;
+          const name = obj(s) ? (s as JsonObject).name : s;
           const p = `${pointerJoin(base, ev)}/sounds/${i}${obj(s) ? "/name" : ""}`;
           if (typeof name === "string" && name) await this.need(pack, rel, p, "sound_file", name);
         }
@@ -598,7 +598,7 @@ export class ReferenceChecker {
           const t = dd[key];
           const p = `${pointerJoin("", b)}/${key}`;
           if (typeof t === "string") await this.need(pack, rel, p, "terrain_texture", t);
-          else if (obj(t)) for (const [face, v] of Object.entries(t as Obj)) await this.need(pack, rel, pointerJoin(p, face), "terrain_texture", v);
+          else if (obj(t)) for (const [face, v] of Object.entries(t as JsonObject)) await this.need(pack, rel, pointerJoin(p, face), "terrain_texture", v);
         }
       }
     } else if (top === "particles") {
@@ -619,11 +619,11 @@ export class ReferenceChecker {
     } else if (Array.isArray(v)) {
       for (let i = 0; i < v.length; i++) await this.textureValue(pack, rel, `${pointer}/${i}`, v[i]);
     } else if (typeof obj(v)?.path === "string") {
-      await this.textureValue(pack, rel, `${pointer}/path`, (v as Obj).path);
+      await this.textureValue(pack, rel, `${pointer}/path`, (v as JsonObject).path);
     }
   }
 
-  async clientDescription(pack: Pack, rel: string, data: Obj, root: string): Promise<void> {
+  async clientDescription(pack: Pack, rel: string, data: JsonObject, root: string): Promise<void> {
     const [, d] = desc(data, root);
     if (!d) return;
     const base = `${pointerJoin("", root)}/description`;
@@ -631,7 +631,7 @@ export class ReferenceChecker {
     const rcs = arr(d.render_controllers);
     for (let i = 0; i < rcs.length; i++) {
       const rc = rcs[i];
-      const name = typeof rc === "string" ? rc : obj(rc) ? Object.keys(rc as Obj)[0] : undefined;
+      const name = typeof rc === "string" ? rc : obj(rc) ? Object.keys(rc as JsonObject)[0] : undefined;
       await this.need(pack, rel, `${base}/render_controllers/${i}`, "render_controller", name);
     }
     const anims = obj(d.animations) ?? {};

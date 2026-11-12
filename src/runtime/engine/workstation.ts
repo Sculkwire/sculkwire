@@ -35,6 +35,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { err, type CliCommand } from "../../core/cli.ts";
 import { ExitCode } from "../../core/diagnostic.ts";
+import { isPlainObject } from "../../core/json.ts";
 import { ok, type ToolResult } from "../../core/mcp.ts";
 import { failed, oneShot, parseCommandLine, printJson, stringOption } from "./cliutil.ts";
 import { dimensionName, dimensionParam, dimensionSchema } from "./dimension.ts";
@@ -42,7 +43,7 @@ import { engine, type EngineSession } from "./engine.ts";
 import { failureSchema, invalid, malformed, type EngineFailure, type EngineResult } from "./failure.ts";
 import { itemSlotSchema, parseSlot, parseSlots, type Slot } from "./slot.ts";
 import { failureResult, invalidParamsResult } from "./toolresult.ts";
-import { countOrUndefined, integerOrUndefined, isObjectLike, isPlainObject, nonEmptyText } from "./wire.ts";
+import { countOrUndefined, integerOrUndefined, isObjectLike, nonEmptyText } from "./wire.ts";
 
 /** The faces a block can be used on, in the game's own order (0 = down, 1 = up, then north, south, west, east). */
 export const BLOCK_FACES = ["down", "up", "north", "south", "west", "east"] as const;
@@ -960,7 +961,7 @@ const interactBlockCommand: CliCommand = {
   summary: "Use a block like a right click and say what opened: interact block <x> <y> <z> [--face up] (needs the agent)",
   async run(args) {
     return oneShot(async () => {
-      const line = parseCommandLine(args, { dimension: { type: "string" }, face: { type: "string" } });
+      const line = parseCommandLine(args, { dimension: { type: "string" }, face: { type: "string" } }, "loose");
       if (!line) return ExitCode.usage;
       const dimension = stringOption(line, "dimension");
       const face = stringOption(line, "face");
@@ -987,7 +988,7 @@ const interactEntityCommand: CliCommand = {
   summary: "Use an entity like a right click (a villager's trades, a horse's screen, a chest boat): interact entity <id>",
   async run(args) {
     return oneShot(async () => {
-      const line = parseCommandLine(args);
+      const line = parseCommandLine(args, {}, "loose");
       if (!line) return ExitCode.usage;
       const id = line.positionals.join(" ").trim();
       if (line.positionals.length !== 1 || !id) {
@@ -1011,7 +1012,7 @@ const screenStateCommand: CliCommand = {
   summary: "The open screen: its kind, its containers and its own data (anvil, offers, furnace progress, ...) (needs the agent)",
   async run(args) {
     return oneShot(async () => {
-      const line = parseCommandLine(args);
+      const line = parseCommandLine(args, {}, "loose");
       if (!line) return ExitCode.usage;
       if (line.positionals.length) {
         err("screen state takes no arguments");
@@ -1031,7 +1032,7 @@ const screenMoveCommand: CliCommand = {
   summary: "Move items inside the open screen: screen move <container:slot> <container:slot> [--count N] (needs the agent)",
   async run(args) {
     return oneShot(async () => {
-      const line = parseCommandLine(args, { count: { type: "string" } });
+      const line = parseCommandLine(args, { count: { type: "string" } }, "loose");
       if (!line) return ExitCode.usage;
       if (line.positionals.length !== 2) {
         err(SCREEN_USAGE);
@@ -1068,7 +1069,7 @@ const screenActCommand: CliCommand = {
     "beacon|take_result [its parameters] (needs the agent)",
   async run(args) {
     return oneShot(async () => {
-      const line = parseCommandLine(args, Object.fromEntries(SCREEN_ACT_FLAGS.map((flag) => [flag, { type: "string" as const }])));
+      const line = parseCommandLine(args, Object.fromEntries(SCREEN_ACT_FLAGS.map((flag) => [flag, { type: "string" as const }])), "loose");
       if (!line) return ExitCode.usage;
       const [action, ...rest] = line.positionals;
       if (!action || rest.length) {
@@ -1110,7 +1111,7 @@ const screenCloseCommand: CliCommand = {
   summary: "Close the open screen like Escape (needs the agent)",
   async run(args) {
     return oneShot(async () => {
-      const line = parseCommandLine(args);
+      const line = parseCommandLine(args, {}, "loose");
       if (!line) return ExitCode.usage;
       if (line.positionals.length) {
         err("screen close takes no arguments");

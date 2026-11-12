@@ -8,6 +8,7 @@
  */
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
 import type { Diagnostic } from "../../core/diagnostic.ts";
 import { compareDiagnostics, ExitCode } from "../../core/diagnostic.ts";
@@ -244,14 +245,14 @@ async function runOnServer(prepared: PreparedRun, opts: GameTestOptions, t0: num
       // BDS exits on completion. The results file exists from the start (empty `results`, empty `endTime`);
       // completion is `logs/TestCompletion` or a filled `endTime`, in case a build keeps running afterwards.
       while (server.state !== "exited" && Date.now() < deadline && !(await automationFinished(instance.dir))) {
-        await Promise.race([server.exited, new Promise((r) => setTimeout(r, 250))]);
+        await Promise.race([server.exited, sleep(250)]);
       }
     } else {
       for (const tag of tags) server.write(`gametest runset ${tag}`);
       while (server.state !== "exited" && Date.now() < deadline) {
         const { results, expected } = parseConsoleResults(server.text());
         if (expected > 0 && results.length >= expected) break;
-        await new Promise((r) => setTimeout(r, 250));
+        await sleep(250);
       }
     }
     timedOut = Date.now() >= deadline;

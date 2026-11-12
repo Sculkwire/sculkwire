@@ -8,15 +8,7 @@ import type { EntityInfo } from "../types.ts";
 import { navigate } from "../nav/navigate.ts";
 import { isHostile, mobInfo } from "./mobs.ts";
 import { escapeYaw, isEntityId, typeIdOf } from "./target.ts";
-import type { SkillResult } from "./types.ts";
-
-export interface FleeArgs {
-  /** Entity id or type to get away from. Default: every hostile mob within 24 blocks. */
-  from?: string;
-  /** Done once every threat is at least this far (default 12). */
-  distance?: number;
-  timeoutMs?: number;
-}
+import type { FleeArgs, SkillResult } from "./types.ts";
 
 /** A threat at hand this long while running means the player is cornered: give up so `play` can fight back. */
 const CORNERED_MS = 1500;
