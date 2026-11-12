@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -33,7 +33,8 @@ describe("winePrefix", () => {
 // POSIX homes with real files; the Wine branch never runs on a Windows host.
 describe.skipIf(process.platform === "win32")("wine prefix game folders", () => {
   beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), "sculk-wine-"));
+    // Real path: the walk resolves Proton's user links, and macOS keeps the temp folder behind `/var` -> `/private/var`.
+    home = realpathSync(mkdtempSync(join(tmpdir(), "sculk-wine-")));
   });
   afterEach(() => rmSync(home, { recursive: true, force: true }));
 

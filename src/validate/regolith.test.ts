@@ -1,17 +1,17 @@
 /** Regolith projects through the validator, with a stand-in rgl (a node script; no real rgl or filter runs). */
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { validateProject } from "./index.ts";
+import { writeFakeRgl } from "../testing/fakergl.ts";
 
 const tmp = mkdtempSync(join(tmpdir(), "sculk-validate-rgl-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
 /** Exports packs/BP and packs/RP to the `exact` paths sculkwire sets and prepends a line to the entity (a changing filter). */
-const rgl = join(tmp, "rgl");
-writeFileSync(
-  rgl,
+const rgl = writeFakeRgl(
+  tmp,
   `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
@@ -26,7 +26,6 @@ const entity = path.join(exp.bpPath, "entities", "mob.json");
 fs.writeFileSync(entity, "// added by a filter\\n" + fs.readFileSync(entity, "utf8"));
 `,
 );
-chmodSync(rgl, 0o755);
 
 function project(name: string, fail = false): string {
   const root = join(tmp, name);

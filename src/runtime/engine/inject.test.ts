@@ -1,4 +1,4 @@
-import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -35,7 +35,8 @@ afterEach(async () => {
 });
 
 async function tempRoot(): Promise<string> {
-  dir = await mkdtemp(join(tmpdir(), "sculkwire-inject-"));
+  // Real path: the prefix is resolved for Wine, and macOS keeps the temp folder behind `/var` -> `/private/var`.
+  dir = realpathSync(await mkdtemp(join(tmpdir(), "sculkwire-inject-")));
   return dir;
 }
 

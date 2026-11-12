@@ -5,21 +5,28 @@ import { describe, expect, it } from "vitest";
 import { findStdbuf, LineSplitter, serverCommand } from "./server.ts";
 
 describe("findStdbuf", () => {
-  it("takes stdbuf on PATH first, then /usr/bin/stdbuf when that file exists, else none", () => {
+  // findStdbuf runs on Linux only (Windows starts bedrock_server.exe without it) and always looks with Linux rules: a
+  // `:`-separated PATH and the execute bit. A Windows host has neither (`C:\…` splits at the drive colon), as in which.test.ts.
+  it.skipIf(process.platform === "win32")("takes an executable stdbuf on PATH first", () => {
     const dir = mkdtempSync(join(tmpdir(), "sculkwire-stdbuf-"));
     try {
       writeFileSync(join(dir, "stdbuf"), "");
       chmodSync(join(dir, "stdbuf"), 0o755);
       const seen: string[] = [];
       const exists = (path: string): boolean => (seen.push(path), true);
-      expect(findStdbuf({ PATH: dir }, exists)).toBe(join(dir, "stdbuf"));
+      expect(findStdbuf({ PATH: `/nonexistent:${dir}` }, exists)).toBe(join(dir, "stdbuf"));
       expect(seen).toEqual([]);
-      expect(findStdbuf({ PATH: "" }, exists)).toBe("/usr/bin/stdbuf");
-      expect(seen).toEqual(["/usr/bin/stdbuf"]);
-      expect(findStdbuf({}, () => false)).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("falls back to /usr/bin/stdbuf when that file exists, else none", () => {
+    const seen: string[] = [];
+    const exists = (path: string): boolean => (seen.push(path), true);
+    expect(findStdbuf({ PATH: "" }, exists)).toBe("/usr/bin/stdbuf");
+    expect(seen).toEqual(["/usr/bin/stdbuf"]);
+    expect(findStdbuf({}, () => false)).toBeUndefined();
   });
 });
 

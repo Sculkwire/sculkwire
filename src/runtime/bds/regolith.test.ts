@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -7,6 +7,7 @@ import { bdsCheck } from "./check.ts";
 import { indexProject, projectPacks } from "./project.ts";
 import { runGameTests } from "./gametest.ts";
 import { entriesToDiagnostics, parseConsole } from "../gamelog/logparse.ts";
+import { writeFakeRgl } from "../../testing/fakergl.ts";
 
 /**
  * Stand-in for rgl: copies packs/BP and packs/RP to the `exact` export paths sculkwire writes into the config,
@@ -96,16 +97,7 @@ describe("Regolith projects on BDS", () => {
   beforeAll(async () => {
     tmp = await mkdtemp(join(tmpdir(), "sculk-bds-rgl-"));
     rglLog = join(tmp, "rgl.log");
-    if (process.platform === "win32") {
-      // Windows cannot exec a shebang script: a .cmd shim runs it with node (rgl's runner starts it through cmd.exe).
-      await writeFile(join(tmp, "rgl.js"), FAKE_RGL);
-      rgl = join(tmp, "rgl.cmd");
-      await writeFile(rgl, `@"${process.execPath}" "%~dp0rgl.js" %*\r\n`);
-    } else {
-      rgl = join(tmp, "rgl");
-      await writeFile(rgl, FAKE_RGL);
-      await chmod(rgl, 0o755);
-    }
+    rgl = writeFakeRgl(tmp, FAKE_RGL);
     process.env.FAKE_RGL_LOG = rglLog;
   });
   afterAll(async () => {
