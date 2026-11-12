@@ -667,8 +667,8 @@ export function register(server: McpServer): void {
         "flees until clear and tries it again (at most 2 retries). Every step is checked against the game; the run ends " +
         "when the last one is done. A part of the goal the grammar did not understand does not idle to the time limit: once the placed " +
         "steps are done and there has been nothing to do for 5 s (no hostile near), the run stops with goal_unknown, " +
-        "quoting that part and listing the forms play understands with an example each; a goal that names a duration " +
-        "(\"for 30 seconds\") or says to survive or defend runs to its time. `play` runs in the background and the call returns at once with a job id. " +
+        "quoting that part and listing the forms play understands with an example each; a goal that says to survive, defend or wait " +
+        "(\"survive for 30 seconds\") runs to its time. `play` runs in the background and the call returns at once with a job id. " +
         "A kill step counts its targets that died by another mob's attack within its radius (spear husks run each " +
         "other through) next to the player's kills, and stops with targets_gone once none of its targets is left within " +
         "the radius before the count is reached. " +

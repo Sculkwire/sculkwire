@@ -265,12 +265,13 @@ function equipClause(c: string): TaskStep | undefined {
 const UNITS: Record<string, number> = { s: 1, sec: 1, secs: 1, second: 1, seconds: 1, m: 60, min: 60, mins: 60, minute: 60, minutes: 60 };
 
 /**
- * Stay alive for a while: "survive", "defend yourself", "hold out", and any clause that names a duration ("for 30
- * seconds"), which is a goal with a check (the time), not one to drop.
+ * Stay alive for a while: "survive", "defend yourself", "hold out", "wait", with the time a duration in the clause
+ * names ("for 30 seconds"). A duration alone does not make one: "dance for 30 seconds" is not understood, and saying
+ * so beats reporting a goal as done that was only waited out.
  */
 function surviveClause(c: string, durationMs?: number): PlanAction | undefined {
   const d = c.match(/\bfor\s+(?:(\d+)|(one|two|three|four|five|six|seven|eight|nine|ten))\s*(s|secs?|seconds?|m|mins?|minutes?)\b/);
-  if (!d && !/\b(?:survive|stay alive|hold out|hold the line|stay safe|keep yourself alive|defend(?: yourself)?|protect yourself)\b/.test(c)) return undefined;
+  if (!/\b(?:survive|stay alive|hold out|hold the line|stay safe|keep yourself alive|defend(?: yourself)?|protect yourself|wait|stay (?:put|here|where you are)|stand still)\b/.test(c)) return undefined;
   const n = d ? (d[1] ? Number(d[1]) : NUMBERS[d[2] ?? ""]) : undefined;
   const seconds = n !== undefined ? n * (UNITS[d?.[3] ?? "s"] ?? 1) : durationMs !== undefined ? Math.round(durationMs / 1000) : DEFAULT_SURVIVE_S;
   return { kind: "survive", seconds };

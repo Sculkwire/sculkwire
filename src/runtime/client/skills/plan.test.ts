@@ -267,9 +267,10 @@ describe("a goal that was not understood", () => {
     ]);
   });
 
-  it("keeps a goal that names a duration or says to defend running to its time", async () => {
+  it("keeps a goal that says to survive, defend or wait running to its time, and does not take a duration alone for one", async () => {
     expect((compileGoal("defend yourself")).steps[0]).toMatchObject({ kind: "survive" });
-    const r = await drive(play({ action: "play", goal: "dance around for 10 seconds", durationMs: 60_000 }, arena([]).env), 50, 70_000);
+    expect((compileGoal("dance around for 10 seconds")).steps[0]).toMatchObject({ kind: "free" });
+    const r = await drive(play({ action: "play", goal: "wait here for 10 seconds", durationMs: 60_000 }, arena([]).env), 50, 70_000);
     expect(r.plan).toMatchObject([{ kind: "survive", status: "done" }]);
     expect(r.stoppedBy).toBe("goal_done");
     expect(r.durationMs).toBeGreaterThanOrEqual(10_000);
