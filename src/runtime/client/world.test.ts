@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ICON_FILE, worldIcon } from "./icon.ts";
-import type { ClientInstall } from "./install.ts";
+import type { ClientInstall } from "../../gamefiles/install.ts";
 import { createWorld, writeWorldIcon } from "./world.ts";
 
 const dirs: string[] = [];

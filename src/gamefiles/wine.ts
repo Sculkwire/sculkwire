@@ -1,7 +1,7 @@
 /**
  * Wine/Proton prefixes that hold a Bedrock client on Linux and macOS (Bottles, Lutris, Steam, BedrockOnLinux,
  * Flarial…) and the game folders their launchers keep next to them. The one place that walks for them:
- * `runtime/client/install.ts` builds client installs from it, `detect.ts` probes its game folders.
+ * `install.ts` builds client installs from it, `detect.ts` probes its game folders.
  */
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync, type Dirent } from "node:fs";
 import { join } from "node:path";
@@ -61,6 +61,12 @@ export function wineAppDataDirs(home: string): string[] {
 /** The prefix (the folder holding `drive_c`) of a Wine AppData folder. */
 export function prefixOf(appData: string): string {
   return appData.split(/drive_c/)[0]?.replace(/[\\/]+$/, "") ?? appData;
+}
+
+/** The Wine prefix (`…/pfx`) an install's data folder lives in; undefined for native Windows installs. */
+export function winePrefix(appData: string): string | undefined {
+  const i = appData.search(/[\\/]drive_c[\\/]/);
+  return i > 0 ? appData.slice(0, i) : undefined;
 }
 
 /** A launcher's `settings.json` `game_dir` (BedrockOnLinux names its current game folder there). */

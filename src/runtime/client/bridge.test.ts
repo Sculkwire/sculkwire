@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { encodeFrame, FrameDecoder } from "../debugger/framing.ts";
 import { ClientBridge, connectView } from "./bridge.ts";
-import type { ClientInstall } from "./install.ts";
+import type { ClientInstall } from "../../gamefiles/install.ts";
 import type { LaunchState } from "./launcher.ts";
 
 const launch = (gamePid?: number): LaunchState => ({

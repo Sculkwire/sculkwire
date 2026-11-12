@@ -11,7 +11,7 @@ import { formatDiagnostic, type Diagnostic } from "../../core/diagnostic.ts";
 import { DebuggerSession, connectTo } from "../debugger/session.ts";
 import { disposeBuild, indexProject, prepareInstance, projectPacks, writeRawLog, type BdsRunOptions, type ProjectPacks } from "./check.ts";
 import { disposeInstance, freeTcpPort, type BdsInstance } from "./instance.ts";
-import { entriesToDiagnostics, mergeEntries, parseConsole, type IndexedPack } from "./logparse.ts";
+import { entriesToDiagnostics, mergeEntries, parseConsole, type IndexedPack } from "../gamelog/logparse.ts";
 import { BdsServer, type ConsoleLine } from "./server.ts";
 import { collectLogs } from "./template.ts";
 

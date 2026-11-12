@@ -4,7 +4,7 @@ import { KILL_PHRASINGS, REACH_PHRASINGS, TWO_STEP_PHRASINGS } from "../bench/sc
 import { SHULKER_PHRASINGS, SMELT_CRAFT_PHRASINGS, TRADE_PHRASINGS } from "../bench/scenarios/task-phrased.ts";
 import type { PlayerInput } from "../launcher.ts";
 import { PlayerController, type EntityInfo, type Loadout, type PlayerState, type PlayerWorld } from "../player.ts";
-import { FakeWorld } from "../tasks/fakeworld.ts";
+import { FakeWorld } from "../../../testing/fakeworld.ts";
 import { parseRecipe, RecipeIndex, type Recipe } from "../tasks/recipes.ts";
 import { parseGoal } from "./goal.ts";
 import { compileGoal, stepLabel } from "./plan.ts";

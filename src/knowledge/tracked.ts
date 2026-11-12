@@ -7,7 +7,8 @@
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { installDir, OfflineMissingError, progress, single, writeJsonAtomic } from "./net.ts";
+import { writeJsonAtomic } from "../core/fs.ts";
+import { installDir, OfflineMissingError, progress, single } from "./net.ts";
 
 /** How often an upstream is asked for its newest release. */
 export const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;

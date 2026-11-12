@@ -11,7 +11,7 @@
 import { cp, readdir, readFile, rm } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { parse as parseJsonc } from "jsonc-parser";
-import type { RegolithExportFolders } from "../../validate/regolith.ts";
+import type { RegolithExportFolders } from "../../core/regolith.ts";
 import type { Diagnostic } from "../../core/diagnostic.ts";
 
 /** Pack kinds a world can activate. */

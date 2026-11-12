@@ -14,7 +14,8 @@ import {
   type GameVersion,
   parseGameVersion,
 } from "../core/version.ts";
-import { httpJson, OfflineMissingError, progress, run, single, writeJsonAtomic } from "./net.ts";
+import { writeJsonAtomic } from "../core/fs.ts";
+import { httpJson, OfflineMissingError, progress, runOk, single } from "./net.ts";
 import { CHECK_INTERVAL_MS, RETRY_AFTER_FAILURE_MS } from "./tracked.ts";
 
 export const SAMPLES_REPO = "https://github.com/Mojang/bedrock-samples";
@@ -328,7 +329,7 @@ export interface PinsUpstream {
 }
 
 const liveUpstream: PinsUpstream = {
-  samples: async () => parseSamplesRemote((await run("git", ["ls-remote", "--tags", "--heads", SAMPLES_REPO])).stdout),
+  samples: async () => parseSamplesRemote((await runOk("git", ["ls-remote", "--tags", "--heads", SAMPLES_REPO])).stdout),
   bdsLinks: () => httpJson<BdsLinks>(BDS_LINKS_URL),
   packument: fetchPackument,
   changelogs: (c) => httpJson<ZendeskList>(`${zendeskArticlesUrl(c)}?per_page=10&sort_by=created_at&sort_order=desc`),

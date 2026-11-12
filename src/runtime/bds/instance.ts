@@ -11,7 +11,7 @@ import { basename, join, resolve } from "node:path";
 import type { PackInfo } from "../../core/project.ts";
 import { dataDir } from "../../core/paths.ts";
 import type { BdsInstall } from "./install.ts";
-import { enableExperiments, readLevelDat, writeLevelDat } from "./nbt.ts";
+import { enableExperiments, readLevelDat, writeLevelDat } from "../../gamefiles/nbt.ts";
 
 /** Files the server writes or we rewrite: copied, never linked (a hardlink would modify the install). */
 const COPY_FILES: Record<string, true> = { "server.properties": true, "allowlist.json": true, "permissions.json": true };

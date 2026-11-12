@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { dataDir } from "../../core/paths.ts";
 import type { BdsInstall } from "./install.ts";
 import { contentLogFiles, createInstance, disposeInstance, exists, type BdsInstance } from "./instance.ts";
-import { entryKey, mergeEntries, parseConsole, parseContentLog, type LogEntry } from "./logparse.ts";
+import { entryKey, mergeEntries, parseConsole, parseContentLog, type LogEntry } from "../gamelog/logparse.ts";
 import { BdsServer } from "./server.ts";
 
 export interface Template {

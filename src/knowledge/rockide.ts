@@ -13,7 +13,8 @@ import { dirname, join, relative } from "node:path";
 import { parse as parseJsonc } from "jsonc-parser";
 import { x as untar } from "tar";
 import { cacheDir } from "../core/paths.ts";
-import { httpBytes, run, writeFileAtomic } from "./net.ts";
+import { writeFileAtomic } from "../core/fs.ts";
+import { httpBytes, runOk } from "./net.ts";
 import { CHECK_INTERVAL_MS, ensureTracked, type Marker, readTracked, type ReleaseFetcher, resetTrackedBackoff, type TrackedSpec } from "./tracked.ts";
 
 export const ROCKIDE_REPO = "https://github.com/rockide/schemas";
@@ -63,7 +64,7 @@ export function newestRelease(lsRemote: string): RockideRelease | undefined {
 
 const githubFetcher: RockideFetcher = {
   async latest() {
-    const { stdout } = await run("git", ["ls-remote", "--tags", ROCKIDE_REPO]);
+    const { stdout } = await runOk("git", ["ls-remote", "--tags", ROCKIDE_REPO]);
     const release = newestRelease(stdout);
     if (!release) throw new Error(`git ls-remote ${ROCKIDE_REPO}: no release tag`);
     return release;

@@ -4,16 +4,16 @@
  * rotation while it is fresh, the pause guard, the input lock around actions and play jobs, and the desktop focus
  * watcher of a window-mode game that gates polled input in the agent.
  *
- * `agentProvider` is installed as the built-in provider when this module loads, which is why `src/mcp/server.ts` and
- * `src/cli.ts` import the engine feature. An extension's `registerInputProvider` replaces it while that extension is
- * active; nothing has to be registered for the agent to be the default route.
+ * `installAgentProvider()` installs it as the built-in provider; `wireFeatures()` (`src/features.ts`) calls it once for
+ * the MCP server and the CLI. An extension's `registerInputProvider` replaces it while that extension is active;
+ * nothing has to be registered for the agent to be the default route.
  */
 import { setTimeout as sleep } from "node:timers/promises";
-import { setBuiltinInputProvider, type InputProvider, type ProviderGame, type ProviderMotion } from "../client/inputprovider.ts";
-import type { EngineInput } from "../client/player.ts";
-import { engine, type EngineResult, type EngineSession, type EngineTick } from "./engine.ts";
-import { HostFocus, type FocusWatchState } from "./focus.ts";
-import { KEYBOARD_LOCK_NOTE } from "./lock.ts";
+import { setBuiltinInputProvider, type InputProvider, type ProviderGame, type ProviderMotion } from "./inputprovider.ts";
+import type { EngineInput } from "./player.ts";
+import { engine, type EngineResult, type EngineSession, type EngineTick } from "../engine/engine.ts";
+import { HostFocus, type FocusWatchState } from "../engine/focus.ts";
+import { KEYBOARD_LOCK_NOTE } from "../engine/lock.ts";
 
 /** A tick older than this no longer counts as a running stream (a missed tick is 50 ms). */
 const TICK_FRESH_MS = 250;
@@ -33,8 +33,6 @@ export class AgentInputProvider implements InputProvider {
   #tick?: { at: number; tick: EngineTick };
   /** Removes this provider's tick listener from the session. */
   #tickOff?: () => Promise<void>;
-  /** The desktop focus watcher of a window-mode game, or the `windows` record of a game on Windows. */
-  #focus?: HostFocus;
   /** The game to watch, kept from `launched` until an engine call starts the watcher. */
   #gamePid?: number;
   readonly #platform: NodeJS.Platform;
@@ -114,10 +112,11 @@ export class AgentInputProvider implements InputProvider {
    */
   async #watch(): Promise<void> {
     const pid = this.#gamePid;
-    if (pid === undefined || this.#focus || !this.#session.attached) return;
+    if (pid === undefined || this.#session.focusWatcher || !this.#session.attached) return;
     const session = this.#session;
-    this.#focus = await HostFocus.start({ pid, platform: this.#platform, onChange: (focused) => void session.setHostFocus(focused) });
-    if (this.#focus.state().running) await session.setHostFocus(this.#focus.focused);
+    const focus = await HostFocus.start({ pid, platform: this.#platform, onChange: (focused) => void session.setHostFocus(focused) });
+    session.focusWatcher = focus;
+    if (focus.state().running) await session.setHostFocus(focus.focused);
   }
 
   /**
@@ -133,8 +132,8 @@ export class AgentInputProvider implements InputProvider {
 
   /** A new game has no agent and no pause: drop what the session remembered, and stop watching focus. */
   async stopped(): Promise<void> {
-    await this.#focus?.stop();
-    this.#focus = undefined;
+    await this.#session.focusWatcher?.stop();
+    this.#session.focusWatcher = undefined;
     this.#gamePid = undefined;
     await this.#session.setHostFocus(undefined);
     this.#session.close();
@@ -143,18 +142,23 @@ export class AgentInputProvider implements InputProvider {
   }
 
   close(): void {
-    void this.#focus?.stop();
-    this.#focus = undefined;
+    void this.#session.focusWatcher?.stop();
+    this.#session.focusWatcher = undefined;
     this.#gamePid = undefined;
     this.#session.close();
   }
 
   /** The desktop focus watcher's state; undefined when no window-mode game runs (Linux) or no game was launched. */
   focusWatch(): FocusWatchState | undefined {
-    return this.#focus?.state();
+    return this.#session.focusWatch();
   }
 }
 
-/** The process-wide provider sculkwire installs for itself. */
-export const agentProvider = new AgentInputProvider();
-setBuiltinInputProvider(agentProvider);
+let installed: AgentInputProvider | undefined;
+
+/** Install the process-wide provider sculkwire uses for itself (once; later calls keep the first). */
+export function installAgentProvider(): void {
+  if (installed) return;
+  installed = new AgentInputProvider();
+  setBuiltinInputProvider(installed);
+}

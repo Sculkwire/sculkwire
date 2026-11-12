@@ -14,8 +14,8 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { dataDir } from "../../core/paths.ts";
-import { findInstall, optionsFiles, type ClientInstall } from "../client/install.ts";
-import { applyOptions, bridgeOptions, parseOptions, removeOptions } from "../client/options.ts";
+import { findInstall, optionsFiles, type ClientInstall } from "../../gamefiles/install.ts";
+import { applyOptions, bridgeOptions, parseOptions, removeOptions } from "../../gamefiles/options.ts";
 import { engine, isRecord, type EngineResult, type EngineSession, type GameSetting, type SettingValue } from "./engine.ts";
 
 /** Where a value came from: the running game, or the file the game reads at its next launch. */

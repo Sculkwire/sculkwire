@@ -1,7 +1,7 @@
 /** BM25 full-text index (MiniSearch) over knowledge chunks, persisted next to the data it was built from. */
 import { readFile } from "node:fs/promises";
 import MiniSearch from "minisearch";
-import { writeFileAtomic, writeJsonAtomic } from "./net.ts";
+import { writeFileAtomic, writeJsonAtomic } from "../core/fs.ts";
 import { tokenize } from "./tokenize.ts";
 
 export interface IndexedDoc {

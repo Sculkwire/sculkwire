@@ -16,7 +16,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { dataDir } from "../../core/paths.ts";
 import { findOnPath } from "../../core/which.ts";
-import type { ClientInstall } from "./install.ts";
+import { winePrefix } from "../../gamefiles/wine.ts";
+import type { ClientInstall } from "../../gamefiles/install.ts";
 import type { InputTakeover } from "./player.ts";
 import {
   belongsToInstall,
@@ -99,12 +100,6 @@ export async function readLaunchState(): Promise<LaunchState | undefined> {
 async function writeLaunchState(state: LaunchState): Promise<void> {
   await mkdir(dataDir("client"), { recursive: true });
   await writeFile(statePath(), `${JSON.stringify(state, null, 2)}\n`);
-}
-
-/** The Wine prefix (`…/pfx`) an install's data folder lives in; undefined for native Windows installs. */
-export function winePrefix(appData: string): string | undefined {
-  const i = appData.search(/[\\/]drive_c[\\/]/);
-  return i > 0 ? appData.slice(0, i) : undefined;
 }
 
 /**

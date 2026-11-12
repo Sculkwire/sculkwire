@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { clientDiagnostics, normalizeClientMessage } from "./contentlog.ts";
-import { appxToGameVersion, splitCommand } from "./install.ts";
-import { activationArgs, defaultMode, gamescopeArgv, gamescopeBackend, gamescopeBlocker, launchArgv, parseGamescopeLog, winePrefix, windowsMode, worldUri } from "./launcher.ts";
-import { applyOptions, parseOptions, removeOptions } from "./options.ts";
+import { appxToGameVersion, splitCommand } from "../../gamefiles/install.ts";
+import { activationArgs, defaultMode, gamescopeArgv, gamescopeBackend, gamescopeBlocker, launchArgv, parseGamescopeLog, windowsMode, worldUri } from "./launcher.ts";
+import { winePrefix } from "../../gamefiles/wine.ts";
+import { applyOptions, parseOptions, removeOptions } from "../../gamefiles/options.ts";
 import { belongsToInstall, chordKeys, encodeCommand, parseHelperLine, parseProcessList, virtualKey } from "./windows.ts";
 
 describe("launch arguments", () => {

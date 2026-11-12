@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { encodeFrame, FrameDecoder, FrameError } from "./framing.ts";
-import { parseLocations, printToDiagnostic } from "./print.ts";
+import { parseLocations } from "../gamelog/frames.ts";
+import { printToDiagnostic } from "./print.ts";
 import { summarizeProfile } from "./profile.ts";
 
 describe("debugger framing", () => {

@@ -13,10 +13,10 @@
 import { existsSync } from "node:fs";
 import { readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { readLevelDat, writeLevelDat, TAG, type LevelDat, type NbtTag } from "../bds/nbt.ts";
+import { readLevelDat, writeLevelDat, TAG, type LevelDat, type NbtTag } from "../../gamefiles/nbt.ts";
 import { bridge } from "../client/bridge.ts";
-import { findInstall, type ClientInstall } from "../client/install.ts";
-import { DIFFICULTIES, WORLD_PREFIX, worldName } from "../client/world.ts";
+import { findInstall, type ClientInstall } from "../../gamefiles/install.ts";
+import { DIFFICULTIES, WORLD_PREFIX, worldName } from "../../gamefiles/worlds.ts";
 import {
   GAME_TYPES,
   difficultyOf,

@@ -5,7 +5,8 @@ import { ExitCode, exitCodeFor, formatDiagnostic, summarize } from "../../core/d
 import { isChannel, type Channel } from "../../core/version.ts";
 import { bdsCheck } from "./check.ts";
 import { runGameTests } from "./gametest.ts";
-import { installBds, listInstalled, PrerequisiteError } from "./install.ts";
+import { PrerequisiteError } from "../../core/errors.ts";
+import { installBds, listInstalled } from "./install.ts";
 import { getSession, startSession, stopSession } from "./session.ts";
 
 const log = (line: string): void => {

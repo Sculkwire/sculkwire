@@ -5,7 +5,7 @@
 import { parseArgs } from "node:util";
 import type { CliCommand } from "../../core/cli.ts";
 import { ExitCode } from "../../core/diagnostic.ts";
-import { DIFFICULTIES, type Difficulty } from "../client/world.ts";
+import { DIFFICULTIES, type Difficulty } from "../../gamefiles/worlds.ts";
 import {
   GAME_TYPES,
   defaultScreenshotPath,
@@ -24,8 +24,6 @@ import { workstationCommands } from "./workstation.ts";
 import { changeText, getSetting, listSettings, setSetting } from "./settings.ts";
 import { UI_BUTTONS, UI_KEY_ACTIONS, uiControlsText, uiScreenText, type UiButton, type UiKeyAction } from "./ui.ts";
 import { getWorldSettings, setWorldSettings } from "./world.ts";
-// Loading the engine feature installs sculkwire's built-in input provider, which `sculk bench` and `player_act` use.
-import "./provider.ts";
 
 type Parsed = { values: Record<string, string | boolean | undefined>; positionals: string[] };
 

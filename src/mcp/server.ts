@@ -5,22 +5,8 @@ import { setBackgroundDownloads } from "../core/background.ts";
 import { VERSION } from "../core/meta.ts";
 import { runShutdown } from "../core/shutdown.ts";
 import { loadExtensions, registerExtension } from "../extensions/index.ts";
-import { register as gamefiles } from "../gamefiles/mcp.ts";
-import { register as knowledge } from "../knowledge/mcp.ts";
-import { register as bds } from "../runtime/bds/mcp.ts";
-import { register as game } from "../runtime/client/mcp.ts";
-import { register as engine } from "../runtime/engine/mcp.ts";
+import { FEATURES, wireFeatures } from "../features.ts";
 import { autoUpdate } from "../update/auto.ts";
-import { register as update } from "../update/mcp.ts";
-import { register as validate } from "../validate/mcp.ts";
-
-/**
- * Contract for feature modules: `src/<feature>/mcp.ts` exports `register(server)`, which calls
- * `server.registerTool` / `server.registerResource` with zod input schemas and returns structured content.
- */
-export type RegisterFeature = (server: McpServer) => void;
-
-const FEATURES: RegisterFeature[] = [knowledge, validate, bds, game, engine, gamefiles, update];
 
 /** The server with every built-in feature, then the tools of every installed extension (`src/extensions/`). */
 export async function createServer(): Promise<McpServer> {
@@ -34,7 +20,8 @@ export async function createServer(): Promise<McpServer> {
         "game (BDS or client) with GameTest, content log and screenshots.",
     },
   );
-  for (const register of FEATURES) register(server);
+  wireFeatures();
+  for (const feature of FEATURES) feature.register?.(server);
   for (const ext of await loadExtensions()) registerExtension(server, ext);
   return server;
 }

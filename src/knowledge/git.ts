@@ -1,7 +1,7 @@
 /** Blobless sparse git checkouts: only the requested paths' blobs are downloaded. */
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { installDir, run } from "./net.ts";
+import { installDir, runOk } from "./net.ts";
 
 export interface SparseCloneOptions {
   url: string;
@@ -22,10 +22,10 @@ export async function sparseClone(target: string, opts: SparseCloneOptions): Pro
     // core.autocrlf=false: the checkout has the upstream bytes on every OS (Git for Windows defaults to CRLF).
     const args = ["clone", "--quiet", "--filter=blob:none", "--no-checkout", "--config", "core.autocrlf=false", "--branch", opts.ref];
     if (!opts.history) args.push("--depth", "1");
-    await run("git", [...args, opts.url, tmp]);
+    await runOk("git", [...args, opts.url, tmp]);
     await setSparse(tmp, opts.patterns);
-    await run("git", ["checkout", "--quiet"], tmp);
-    const commit = (await run("git", ["rev-parse", "HEAD"], tmp)).stdout.trim();
+    await runOk("git", ["checkout", "--quiet"], tmp);
+    const commit = (await runOk("git", ["rev-parse", "HEAD"], tmp)).stdout.trim();
     await installDir(tmp, target);
     return commit;
   } catch (err) {
@@ -35,20 +35,20 @@ export async function sparseClone(target: string, opts: SparseCloneOptions): Pro
 }
 
 export async function setSparse(dir: string, patterns: string[]): Promise<void> {
-  await run("git", ["sparse-checkout", "set", "--no-cone", ...patterns], dir);
+  await runOk("git", ["sparse-checkout", "set", "--no-cone", ...patterns], dir);
 }
 
 /** Fetch `ref` (and history) and check out `commit` (default: the fetched tip). Returns the commit. */
 export async function fetchAndCheckout(dir: string, ref: string, commit?: string): Promise<string> {
-  await run("git", ["fetch", "--quiet", "--filter=blob:none", "origin", ref], dir);
-  const target = commit ?? (await run("git", ["rev-parse", "FETCH_HEAD"], dir)).stdout.trim();
-  await run("git", ["checkout", "--quiet", "--detach", target], dir);
+  await runOk("git", ["fetch", "--quiet", "--filter=blob:none", "origin", ref], dir);
+  const target = commit ?? (await runOk("git", ["rev-parse", "FETCH_HEAD"], dir)).stdout.trim();
+  await runOk("git", ["checkout", "--quiet", "--detach", target], dir);
   return target;
 }
 
 export async function headCommit(dir: string): Promise<string | undefined> {
   try {
-    return (await run("git", ["rev-parse", "HEAD"], dir)).stdout.trim();
+    return (await runOk("git", ["rev-parse", "HEAD"], dir)).stdout.trim();
   } catch {
     return undefined;
   }

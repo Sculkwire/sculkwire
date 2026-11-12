@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ClientInstall } from "../client/install.ts";
+import type { ClientInstall } from "../../gamefiles/install.ts";
 import { EngineSession, type EngineResult, type SettingEdit, type SettingValue } from "./engine.ts";
 import { changeText, getSetting, listSettings, restoreGameSettings, setSetting, settingsText } from "./settings.ts";
 

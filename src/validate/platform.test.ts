@@ -2,7 +2,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { findRgl, rglCandidates } from "./regolith.ts";
+import { findRgl, rglCandidates } from "../core/regolith.ts";
 import { cmdShimTargets, tscOnPath } from "./typescript.ts";
 
 let base: string;

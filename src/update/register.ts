@@ -6,7 +6,7 @@
 import { copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { detectRunning, platformLauncher, run, type Running } from "./install.ts";
+import { detectRunning, platformLauncher, runUnattended, type Running } from "./install.ts";
 
 export const CLIENTS = ["omp", "claude"] as const;
 export type Client = (typeof CLIENTS)[number];
@@ -66,8 +66,8 @@ export async function registerOmp(entry: ServerEntry, path: string = ompConfigPa
 
 /** `claude mcp add --scope user sculkwire -- <command> <args>`, replacing an earlier registration. */
 export async function registerClaude(entry: ServerEntry, claude: string): Promise<void> {
-  await run(claude, ["mcp", "remove", "--scope", "user", "sculkwire"], { timeoutMs: 30_000 }).catch(() => undefined);
-  const r = await run(claude, ["mcp", "add", "--scope", "user", "sculkwire", "--", entry.command, ...entry.args], { timeoutMs: 30_000 });
+  await runUnattended(claude, ["mcp", "remove", "--scope", "user", "sculkwire"], { timeoutMs: 30_000 }).catch(() => undefined);
+  const r = await runUnattended(claude, ["mcp", "add", "--scope", "user", "sculkwire", "--", entry.command, ...entry.args], { timeoutMs: 30_000 });
   if (r.code !== 0) throw new Error(`claude mcp add failed: ${(r.stderr || r.stdout).trim().split("\n").at(-1) ?? `exit ${r.code}`}`);
 }
 

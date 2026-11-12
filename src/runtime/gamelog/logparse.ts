@@ -8,7 +8,7 @@ import { join, relative, sep } from "node:path";
 import { parse as parseJsonc } from "jsonc-parser";
 import type { Diagnostic, DiagnosticSource, Range, Severity } from "../../core/diagnostic.ts";
 import type { PackInfo } from "../../core/project.ts";
-import { parseLocations } from "../debugger/print.ts";
+import { parseLocations } from "./frames.ts";
 
 export interface LogEntry {
   severity: Severity;

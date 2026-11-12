@@ -11,10 +11,10 @@ import { ExitCode } from "../core/diagnostic.ts";
 import { cacheDir } from "../core/paths.ts";
 import { findOnPath } from "../core/which.ts";
 import { listInstalled } from "../runtime/bds/install.ts";
-import { findInstalls } from "../runtime/client/install.ts";
+import { findInstalls } from "../gamefiles/install.ts";
 import { describeVersion, versionInfo } from "../update/auto.ts";
 import { CLIENTS, type Client, ompConfigPath, parseClients, registerClaude, registerOmp, serverEntry, snippet } from "../update/register.ts";
-import { findRgl } from "../validate/regolith.ts";
+import { findRgl } from "../core/regolith.ts";
 
 /** The install command for Node.js on this Linux distribution (from /etc/os-release), or undefined when unknown. */
 function linuxNodeInstall(): string | undefined {

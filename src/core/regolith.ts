@@ -7,9 +7,9 @@ import { existsSync } from "node:fs";
 import { cp, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, posix, relative, resolve, sep, win32 } from "node:path";
-import { execFile } from "node:child_process";
 import { parse as parseJsonc } from "jsonc-parser";
-import { findOnPath } from "../core/which.ts";
+import { run } from "./process.ts";
+import { findOnPath } from "./which.ts";
 
 export interface RegolithBuild {
   profile: string;
@@ -137,21 +137,6 @@ export async function regolithExportFolders(root: string): Promise<RegolithExpor
   return out;
 }
 
-/** Runs `cmd`. A Windows `.cmd`/`.bat` file (an rgl shim) runs through cmd.exe: `execFile` refuses to start one. */
-function run(cmd: string, args: string[], cwd: string): Promise<{ code: number; output: string }> {
-  const { promise, resolve: settle } = Promise.withResolvers<{ code: number; output: string }>();
-  const viaCmd = process.platform === "win32" && /\.(cmd|bat)$/i.test(cmd);
-  // `cmd /d /s /c "<line>"` strips only the outer quotes, so each quoted argument reaches the script as written.
-  const file = viaCmd ? (process.env.ComSpec ?? "cmd.exe") : cmd;
-  const argv = viaCmd ? ["/d", "/s", "/c", `"${[cmd, ...args].map((a) => `"${a}"`).join(" ")}"`] : args;
-  const options = { cwd, env: { ...process.env, NO_COLOR: "1" }, maxBuffer: 64 * 1024 * 1024, timeout: 900_000, windowsVerbatimArguments: viaCmd };
-  execFile(file, argv, options, (err, stdout, stderr) => {
-    const exit = err && "code" in err ? err.code : undefined;
-    settle({ code: typeof exit === "number" ? exit : err ? 1 : 0, output: `${stdout}${stderr}` });
-  });
-  return promise;
-}
-
 /**
  * Copy the project to a temp dir and build `profile` with rgl into `<tmp>/out/{BP,RP}`. `projectRoot` may be relative:
  * it is resolved first, because the copy links back to the project's `node_modules` and a relative link target would
@@ -187,15 +172,16 @@ export async function buildRegolith(projectRoot: string, profile: string, rglPat
   profiles[profile] = { ...p, export: { target: "exact", bpPath: join(out, "BP"), rpPath: join(out, "RP") } };
   (config.regolith as Obj).profiles = profiles;
   await writeFile(join(work, "config.json"), JSON.stringify(config, null, 2));
-  let r = await run(rgl, ["run", profile], work);
-  if (r.code !== 0 && /\bget\b|not installed|install/i.test(r.output)) {
-    await run(rgl, ["get"], work);
-    r = await run(rgl, ["run", profile], work);
+  const rglOptions = { cwd: work, env: { ...process.env, NO_COLOR: "1" }, timeoutMs: 900_000 };
+  let r = await run(rgl, ["run", profile], rglOptions);
+  if (r.code !== 0 && /\bget\b|not installed|install/i.test(r.stdout + r.stderr)) {
+    await run(rgl, ["get"], rglOptions);
+    r = await run(rgl, ["run", profile], rglOptions);
   }
   if (r.code !== 0) {
     await rm(workDir, { recursive: true, force: true });
     // rgl colours its log even with NO_COLOR, and the message is read as plain text.
-    const output = r.output.replace(/\x1b\[[0-9;]*m/g, "").trim();
+    const output = (r.stdout + r.stderr).replace(/\x1b\[[0-9;]*m/g, "").trim();
     const tail = output.slice(-2000);
     return { profile, pointer, message: `rgl run ${profile} failed: ${tail.length < output.length ? tail.slice(tail.indexOf("\n") + 1) : tail}` };
   }

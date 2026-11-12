@@ -10,7 +10,8 @@ import { backgroundDownloadsAllowed } from "../core/background.ts";
 import { cacheDir } from "../core/paths.ts";
 import { type Channel, compareGameVersions, parseGameVersion } from "../core/version.ts";
 import { setSparse, sparseClone } from "./git.ts";
-import { OfflineMissingError, progress, single, writeJsonAtomic } from "./net.ts";
+import { writeJsonAtomic } from "../core/fs.ts";
+import { OfflineMissingError, progress, single } from "./net.ts";
 import { RETRY_AFTER_FAILURE_MS } from "./tracked.ts";
 import { findSamplesTag, getPins, SAMPLES_REPO, type SamplesTag, updatePins } from "./versions.ts";
 

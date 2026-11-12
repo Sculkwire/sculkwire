@@ -20,11 +20,10 @@ import {
   type WorldChange,
   type WorldState,
 } from "./engine.ts";
-import { DIFFICULTIES, type Difficulty } from "../client/world.ts";
+import { DIFFICULTIES, type Difficulty } from "../../gamefiles/worlds.ts";
 import { KEYBOARD_LOCK_NOTE, LOCK_MODES, lockText } from "./lock.ts";
 import { registerInventoryTools } from "./inventory.ts";
 import { registerWorkstationTools } from "./workstation.ts";
-import { agentProvider } from "./provider.ts";
 import { changeText, getSetting, listSettings, setSetting } from "./settings.ts";
 import { UI_BUTTONS, UI_CONTROL_TYPES, UI_KEY_ACTIONS, uiControlsText, uiScreenText } from "./ui.ts";
 import { getWorldSettings, setWorldSettings } from "./world.ts";
@@ -430,7 +429,7 @@ export function register(server: McpServer): void {
         return failure(keyboard);
       }
       // Report the desktop focus watcher so a focus failure can be told apart.
-      const focusWatch = agentProvider.focusWatch();
+      const focusWatch = engine.focusWatch();
       return ok(lockText(result.value), { ok: true, ...result.value, ...(focusWatch ? { focusWatch } : {}) });
     },
   );

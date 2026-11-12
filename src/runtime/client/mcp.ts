@@ -4,7 +4,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { formatDiagnostic, summarize, type Diagnostic } from "../../core/diagnostic.ts";
+import { formatDiagnostic, summarize } from "../../core/diagnostic.ts";
+import { diagText, fail, ok, summarySchema } from "../../core/mcp.ts";
 import { dataDir } from "../../core/paths.ts";
 import { onShutdown } from "../../core/shutdown.ts";
 import { bridge, WORLD_WAIT_MAX_S, WORLD_WAIT_MS, type BridgeStatus } from "./bridge.ts";
@@ -17,7 +18,7 @@ import { STANCES } from "./skills/pack.ts";
 import type { FightStats } from "./skills/types.ts";
 import { liveTaskEnv } from "./tasks/live.ts";
 import { pauseOnTakeover, playJobs, runActions, stepText, type PlayJobInfo } from "./jobs.ts";
-import { DIFFICULTIES, type Difficulty } from "./world.ts";
+import { DIFFICULTIES, type Difficulty } from "../../gamefiles/worlds.ts";
 import { FOREGROUND_MESSAGE } from "./windows.ts";
 import type { InputRoute } from "./launcher.ts";
 
@@ -31,7 +32,6 @@ const diagnosticSchema = z.object({
   range: z.object({ start: position, end: position }).optional(),
   hint: z.string().optional(),
 });
-const summarySchema = z.object({ errors: z.number(), warnings: z.number(), infos: z.number() });
 const statusSchema = {
   running: z.boolean(),
   mode: z.enum(["window", "headless", "desktop"]).optional(),
@@ -73,23 +73,6 @@ const commandSchema = {
   statusCode: z.number().optional(),
   body: z.record(z.string(), z.unknown()).optional(),
 };
-
-type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
-type ToolResult = { content: Content[]; structuredContent?: Record<string, unknown>; isError?: boolean };
-
-function ok(text: string, structured: object): ToolResult {
-  return { content: [{ type: "text", text }], structuredContent: { ...structured } };
-}
-
-function fail(err: unknown): ToolResult {
-  return { content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }], isError: true };
-}
-
-function diagText(diagnostics: readonly Diagnostic[], max = 20): string {
-  const lines = diagnostics.slice(0, max).map(formatDiagnostic);
-  if (diagnostics.length > max) lines.push(`… ${diagnostics.length - max} more`);
-  return lines.join("\n");
-}
 
 /**
  * Take a `game_input` action through the agent's own UI when it is attached: one `ui.key` per chord, `ui.text` into

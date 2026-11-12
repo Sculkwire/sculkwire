@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { bdsCheck, indexProject, projectPacks } from "./check.ts";
 import { runGameTests } from "./gametest.ts";
-import { entriesToDiagnostics, parseConsole } from "./logparse.ts";
+import { entriesToDiagnostics, parseConsole } from "../gamelog/logparse.ts";
 
 /**
  * Stand-in for rgl: copies packs/BP and packs/RP to the `exact` export paths sculkwire writes into the config,

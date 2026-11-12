@@ -1,8 +1,8 @@
-/** Shared plumbing for the knowledge layer: HTTP, child processes, atomic writes, progress on stderr. */
-import { execFile } from "node:child_process";
-import { mkdir, rename, rm, writeFile } from "node:fs/promises";
+/** Shared plumbing for the knowledge layer: HTTP, child processes, progress on stderr. */
+import { mkdir, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { USER_AGENT } from "../core/meta.ts";
+import { run, type RunResult } from "../core/process.ts";
 
 export function progress(message: string): void {
   process.stderr.write(`[knowledge] ${message}\n`);
@@ -37,36 +37,11 @@ export async function httpBytes(url: string): Promise<Uint8Array> {
   return new Uint8Array(await res.arrayBuffer());
 }
 
-export interface RunResult {
-  stdout: string;
-  stderr: string;
-}
-
-/** Runs a binary without a shell. Rejects with stderr in the message on a non-zero exit. */
-export function run(cmd: string, args: string[], cwd?: string): Promise<RunResult> {
-  const { promise, resolve, reject } = Promise.withResolvers<RunResult>();
-  execFile(
-    cmd,
-    args,
-    { cwd, maxBuffer: 256 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } },
-    (err, stdout, stderr) => {
-      if (err) reject(new Error(`${cmd} ${args.join(" ")} failed: ${stderr.trim() || err.message}`));
-      else resolve({ stdout, stderr });
-    },
-  );
-  return promise;
-}
-
-/** Write via a sibling temp file and rename, so concurrent readers never see a partial file. */
-export async function writeFileAtomic(path: string, data: string | Uint8Array): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmp, data);
-  await rename(tmp, path);
-}
-
-export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
-  await writeFileAtomic(path, `${JSON.stringify(value, null, 2)}\n`);
+/** Runs a binary without a shell; git never prompts. Rejects with stderr in the message unless it exits 0. */
+export async function runOk(cmd: string, args: string[], cwd?: string): Promise<RunResult> {
+  const r = await run(cmd, args, { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+  if (r.code !== 0) throw new Error(`${cmd} ${args.join(" ")} failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+  return r;
 }
 
 /**

@@ -5,7 +5,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { dataDir } from "../../core/paths.ts";
+import { dataDir } from "../core/paths.ts";
 
 export type Options = Map<string, string>;
 

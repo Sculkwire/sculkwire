@@ -10,7 +10,8 @@ import { backgroundDownloadsAllowed } from "../core/background.ts";
 import { cacheDir } from "../core/paths.ts";
 import { type Channel, parseGameVersion } from "../core/version.ts";
 import { fetchAndCheckout, headCommit, sparseClone } from "./git.ts";
-import { OfflineMissingError, progress, run, single, writeJsonAtomic } from "./net.ts";
+import { writeJsonAtomic } from "../core/fs.ts";
+import { OfflineMissingError, progress, runOk, single } from "./net.ts";
 import { chunkMarkdown, excerpt, type IndexedDoc, SearchIndex } from "./search.ts";
 import { CHECK_INTERVAL_MS, RETRY_AFTER_FAILURE_MS } from "./tracked.ts";
 import { getPins, readPins } from "./versions.ts";
@@ -54,7 +55,7 @@ export function docsGameVersion(minecraftVersion: string): string {
 }
 
 async function docsVersionAt(dir: string, commit: string): Promise<string> {
-  const { stdout } = await run("git", ["show", `${commit}:reference-docs-metadata.json`], dir);
+  const { stdout } = await runOk("git", ["show", `${commit}:reference-docs-metadata.json`], dir);
   const meta: unknown = JSON.parse(stdout);
   if (meta && typeof meta === "object" && "minecraft_version" in meta && typeof meta.minecraft_version === "string") {
     return meta.minecraft_version;
@@ -65,7 +66,7 @@ async function docsVersionAt(dir: string, commit: string): Promise<string> {
 /** Newest commit whose documented cycle is not newer than `stableVersion` (major.minor.patch). */
 async function stableCommit(dir: string, stableVersion: string): Promise<{ commit: string; docsVersion: string }> {
   const target = parseGameVersion(stableVersion);
-  const { stdout } = await run("git", ["log", "--format=%H", "origin/main", "--", "reference-docs-metadata.json"], dir);
+  const { stdout } = await runOk("git", ["log", "--format=%H", "origin/main", "--", "reference-docs-metadata.json"], dir);
   for (const commit of stdout.split("\n").filter(Boolean)) {
     const docsVersion = await docsVersionAt(dir, commit);
     const v = parseGameVersion(docsVersion);
@@ -90,7 +91,7 @@ const checking = new Set<Channel>();
 
 /** Compare `main` and the stable pin with the checkout; fetch and re-index when either moved. */
 async function checkForUpdate(channel: Channel, marker: Marker): Promise<void> {
-  const { stdout } = await run("git", ["ls-remote", DOCS_REPO, "refs/heads/main"]);
+  const { stdout } = await runOk("git", ["ls-remote", DOCS_REPO, "refs/heads/main"]);
   const head = /^([0-9a-f]{40})\s/.exec(stdout)?.[1];
   if (!head) throw new Error(`git ls-remote ${DOCS_REPO}: no refs/heads/main`);
   const stable = (await readPins())?.channels.stable.samples.version;
@@ -124,9 +125,9 @@ export async function ensureCreatorDocs(opts: {
           await sparseClone(dir, { url: DOCS_REPO, ref: "main", patterns: DOCS_PATTERNS, history: true });
         } else {
           progress(`updating minecraft-creator docs (${opts.channel})`);
-          await run("git", ["fetch", "--quiet", "--filter=blob:none", "origin", "main:refs/remotes/origin/main"], dir);
+          await runOk("git", ["fetch", "--quiet", "--filter=blob:none", "origin", "main:refs/remotes/origin/main"], dir);
         }
-        const head = (await run("git", ["rev-parse", "refs/remotes/origin/main"], dir)).stdout.trim();
+        const head = (await runOk("git", ["rev-parse", "refs/remotes/origin/main"], dir)).stdout.trim();
         const stable = pins.channels.stable.samples.version;
         let commit: string;
         let docsVersion: string;
@@ -135,7 +136,7 @@ export async function ensureCreatorDocs(opts: {
           docsVersion = await docsVersionAt(dir, commit);
         } else {
           ({ commit, docsVersion } = await stableCommit(dir, stable));
-          await run("git", ["checkout", "--quiet", "--detach", commit], dir);
+          await runOk("git", ["checkout", "--quiet", "--detach", commit], dir);
         }
         marker = { commit, docsVersion, head, stable, checkedAt: new Date().toISOString() };
         await writeJsonAtomic(join(dir, MARKER), marker);

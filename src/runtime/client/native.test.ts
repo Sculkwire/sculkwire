@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { findInstalls } from "./install.ts";
+import { findInstalls } from "../../gamefiles/install.ts";
 import { gamePids, playerInput, screenshot, sendInput, type LaunchState } from "./launcher.ts";
 import { FOREGROUND_MESSAGE, WindowsInputHelper, windowsScreenshot } from "./windows.ts";
 

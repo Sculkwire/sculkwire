@@ -5,13 +5,13 @@
 import { cp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { TAG, writeLevelDat } from "../bds/nbt.ts";
-import type { NbtCompound, NbtTag } from "../bds/nbt.ts";
+import { TAG, writeLevelDat } from "../../gamefiles/nbt.ts";
+import type { NbtCompound, NbtTag } from "../../gamefiles/nbt.ts";
 import { parseGameVersion } from "../../core/version.ts";
 import { ICON_FILE, worldIcon } from "./icon.ts";
-import type { ClientInstall } from "./install.ts";
+import type { ClientInstall } from "../../gamefiles/install.ts";
+import { DIFFICULTIES, levelIdFor, WORLD_PREFIX, worldName, type Difficulty } from "../../gamefiles/worlds.ts";
 
-export const WORLD_PREFIX = "sculkwire-";
 export const HELPER_PACK_DIR = join(dirname(fileURLToPath(import.meta.url)), "helper-pack");
 export const HELPER_PACK_FOLDER = "sculkwire_helper";
 
@@ -20,10 +20,6 @@ export interface PackRef {
   version: number[];
   kind: "behavior" | "resource";
 }
-
-/** Level.dat `Difficulty` values. */
-export const DIFFICULTIES = { peaceful: 0, easy: 1, normal: 2, hard: 3 } as const;
-export type Difficulty = keyof typeof DIFFICULTIES;
 
 export interface WorldOptions {
   /** Without the `sculkwire-` prefix; it is added when missing. */
@@ -102,15 +98,6 @@ export function levelDatRoot(name: string, opts: Pick<WorldOptions, "experiments
   }
   root.set("experiments", { type: TAG.Compound, value: exp });
   return root;
-}
-
-export function worldName(name: string): string {
-  return name.startsWith(WORLD_PREFIX) ? name : `${WORLD_PREFIX}${name}`;
-}
-
-/** Folder-safe level id derived from the world name (stable, so a re-create replaces the same world). */
-export function levelIdFor(name: string): string {
-  return worldName(name).replace(/[^A-Za-z0-9_-]+/g, "_");
 }
 
 async function helperManifest(): Promise<{ header: { uuid: string; version: number[] } }> {

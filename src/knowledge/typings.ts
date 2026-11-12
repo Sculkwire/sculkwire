@@ -8,7 +8,8 @@ import { join } from "node:path";
 import { x as untar } from "tar";
 import { cacheDir } from "../core/paths.ts";
 import type { Channel } from "../core/version.ts";
-import { httpBytes, installDir, OfflineMissingError, progress, single, writeFileAtomic, writeJsonAtomic } from "./net.ts";
+import { writeFileAtomic, writeJsonAtomic } from "../core/fs.ts";
+import { httpBytes, installDir, OfflineMissingError, progress, single } from "./net.ts";
 import {
   type ChannelPin,
   fetchPackument,

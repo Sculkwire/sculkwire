@@ -11,10 +11,10 @@ import { existsSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { GameVersion } from "../../core/version.ts";
-import { formatGameVersion } from "../../core/version.ts";
-import { gameDirCandidates, isPreviewGameDir } from "../../gamefiles/detect.ts";
-import { launcherGameDirs, prefixOf, wineAppDataDirs } from "../../gamefiles/wine.ts";
+import type { GameVersion } from "../core/version.ts";
+import { formatGameVersion } from "../core/version.ts";
+import { gameDirCandidates, isPreviewGameDir } from "./detect.ts";
+import { launcherGameDirs, prefixOf, wineAppDataDirs } from "./wine.ts";
 
 export type InstallKind = "custom" | "mcbe-gdk-installer" | "windows" | "wine-prefix";
 

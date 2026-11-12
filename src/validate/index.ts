@@ -16,7 +16,7 @@ import { checkLang } from "./lang.ts";
 import { checkManifests, type ManifestOptions } from "./manifest.ts";
 import { checkMcfunctions } from "./mcfunction.ts";
 import { checkReferences, type ReferenceOptions } from "./references.ts";
-import { buildRegolith, regolithPlan } from "./regolith.ts";
+import { buildRegolith, regolithPlan } from "../core/regolith.ts";
 import { calibration, checkSchemaFile, type SchemaFileArgs, type SchemaOptions } from "./schema.ts";
 import { checkTypeScript, type ResolveTypings, type TypeScriptOptions } from "./typescript.ts";
 import { loadVanilla, type VanillaData } from "./vanilla.ts";

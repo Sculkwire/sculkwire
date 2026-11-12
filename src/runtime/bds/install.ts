@@ -12,7 +12,7 @@ import type { Channel } from "../../core/version.ts";
 import { compareGameVersions, parseGameVersion } from "../../core/version.ts";
 import { backgroundDownloadsAllowed } from "../../core/background.ts";
 import { cacheDir, dataDir } from "../../core/paths.ts";
-import { ExitCode } from "../../core/diagnostic.ts";
+import { PrerequisiteError } from "../../core/errors.ts";
 import { getPins } from "../../knowledge/versions.ts";
 
 export const LINKS_API = "https://net-secondary.web.minecraft-services.net/api/v1.0/download/links";
@@ -32,15 +32,6 @@ export interface BdsInstall {
   /** Unpacked server directory (holds `bedrock_server` or `bedrock_server.exe`). */
   dir: string;
   url?: string;
-}
-
-/** A missing prerequisite (EULA, unsupported host, no install): maps to exit code 2. */
-export class PrerequisiteError extends Error {
-  readonly exitCode: number = ExitCode.usage;
-  constructor(message: string) {
-    super(message);
-    this.name = "PrerequisiteError";
-  }
 }
 
 const DOWNLOAD_TYPES: Record<string, { channel: Channel; platform: BdsPlatform }> = {

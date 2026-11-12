@@ -4,12 +4,12 @@
  * and walkable positions. It answers every `TaskEnv` call the way the game's agent and helper pack shape their answers.
  * Test-only: nothing outside the tests imports it.
  */
-import type { EngineFailure, EngineResult } from "../../engine/engine.ts";
-import type { ItemSlot, PlayerInventory, Slot } from "../../engine/inventory.ts";
-import type { ScreenKind, ScreenSlotRef, ScreenState, TradeOffer } from "../../engine/workstation.ts";
-import type { Clock, Vec3 } from "../player.ts";
-import { fuelValue, matches, namespaced, type Recipe, type RecipeIndex } from "./recipes.ts";
-import type { BlockInfo, TaskEnv } from "./types.ts";
+import type { EngineFailure, EngineResult } from "../runtime/engine/engine.ts";
+import type { ItemSlot, PlayerInventory, Slot } from "../runtime/engine/inventory.ts";
+import type { ScreenKind, ScreenSlotRef, ScreenState, TradeOffer } from "../runtime/engine/workstation.ts";
+import type { Clock, Vec3 } from "../runtime/client/player.ts";
+import { fuelValue, matches, namespaced, type Recipe, type RecipeIndex } from "../runtime/client/tasks/recipes.ts";
+import type { BlockInfo, TaskEnv } from "../runtime/client/tasks/types.ts";
 
 const GROUND_Y = 64;
 const SMELT_MS = 10_000;

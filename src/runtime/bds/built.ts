@@ -15,7 +15,7 @@ import { SourceMap, type SourceMapPayload } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Position, Range } from "../../core/diagnostic.ts";
 import type { PackInfo } from "../../core/project.ts";
-import { indexPack, projectPath, type IndexedPack, type SourceLocation } from "./logparse.ts";
+import { indexPack, projectPath, type IndexedPack, type SourceLocation } from "../gamelog/logparse.ts";
 
 const SOURCE_MAP_URL = /\/\/[#@] sourceMappingURL=(\S+)\s*$/;
 

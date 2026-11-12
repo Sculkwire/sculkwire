@@ -22,12 +22,13 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
 import { cacheDir } from "../../core/paths.ts";
 import { gameDirCandidates } from "../../gamefiles/detect.ts";
-import { findInstall, type ClientInstall } from "../client/install.ts";
-import { DIFFICULTIES, type Difficulty } from "../client/world.ts";
+import { findInstall, type ClientInstall } from "../../gamefiles/install.ts";
+import { DIFFICULTIES, type Difficulty } from "../../gamefiles/worlds.ts";
 import { gamePath } from "./gamepath.ts";
 import { buildAgent, type AgentBuild } from "./build.ts";
 import { AgentClient, AgentClientError, AgentRpcError } from "./client.ts";
 import { injectClient, type InjectionResult } from "./inject.ts";
+import type { FocusWatchState, HostFocus } from "./focus.ts";
 import { InputLock, parseLockState } from "./lock.ts";
 import { recompressPngFile } from "./png.ts";
 import {
@@ -662,8 +663,13 @@ export class EngineSession {
     (params) => this.#call("input.lock", params, { timeoutMs: INPUT_TIMEOUT_MS }),
     () => this.#ensureCommandOrigin(),
   );
-  /** The host focus this process watches (`src/focus.ts`, driven by `src/provider.ts`), or undefined when it watches none. */
+  /** The host focus this process watches (`focus.ts`, driven by `runtime/client/agentprovider.ts`), or undefined when it watches none. */
   #hostFocused: boolean | undefined;
+  /**
+   * The desktop focus watcher of a window-mode game, or the `windows` record of a game on Windows: started and stopped
+   * by the built-in input provider (`runtime/client/agentprovider.ts`), read by `game_input_lock`.
+   */
+  focusWatcher: HostFocus | undefined;
 
   constructor(options: EngineSessionOptions = {}) {
     this.port = options.port ?? enginePort();
@@ -1157,6 +1163,11 @@ export class EngineSession {
     if (!client?.connected) return;
     const state = await client.call("input.focus", { focused: focused ?? true }, { timeoutMs: INPUT_TIMEOUT_MS }).then(parseLockState, () => undefined);
     if (state) this.lock.update(state);
+  }
+
+  /** The desktop focus watcher's state; undefined when no window-mode game runs (Linux) or no game was launched. */
+  focusWatch(): FocusWatchState | undefined {
+    return this.focusWatcher?.state();
   }
 
   /** Every connection receives `lock` notifications, and learns the watched host focus. */

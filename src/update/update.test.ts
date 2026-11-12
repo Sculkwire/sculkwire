@@ -20,7 +20,7 @@ import {
   readCurrent,
   readState,
   rollback,
-  run,
+  runUnattended,
   type Running,
   update,
   writeLaunchers,
@@ -48,7 +48,7 @@ const GIT = ["-c", "user.name=Steve", "-c", "user.email=steve@example.com", "-c"
 const savedEnv: Record<string, string | undefined> = {};
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
-  const r = await run("git", [...GIT, ...args], { cwd, timeoutMs: 30_000 });
+  const r = await runUnattended("git", [...GIT, ...args], { cwd, timeoutMs: 30_000 });
   if (r.code !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
   return r.stdout.trim();
 }
@@ -218,7 +218,7 @@ describe.each(["symlink", "file"] as const)("update with a %s pointer", (pointer
     expect(await readCurrent(l)).toBe("v0.1.0");
     expect(existsSync(join(l.versions, "v0.1.0", "src", "cli.ts"))).toBe(true);
     if (pointer === "symlink" && process.platform !== "win32") {
-      const r = await run("sh", [l.launcher, "--help"], { timeoutMs: 30_000 });
+      const r = await runUnattended("sh", [l.launcher, "--help"], { timeoutMs: 30_000 });
       expect(r.stdout).toContain("Usage");
     }
 

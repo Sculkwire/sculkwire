@@ -13,7 +13,7 @@ import type { Diagnostic } from "../../core/diagnostic.ts";
 import { compareDiagnostics, ExitCode } from "../../core/diagnostic.ts";
 import { disposeBuild, prepareInstance, projectPacks, writeRawLog, type BdsRunOptions, type ProjectPacks } from "./check.ts";
 import { disposeInstance, exists } from "./instance.ts";
-import { entriesToDiagnostics, locate, sourceLocation, type IndexedPack, type SourceLocation } from "./logparse.ts";
+import { entriesToDiagnostics, locate, sourceLocation, type IndexedPack, type SourceLocation } from "../gamelog/logparse.ts";
 import { BdsServer } from "./server.ts";
 import { collectLogs } from "./template.ts";
 

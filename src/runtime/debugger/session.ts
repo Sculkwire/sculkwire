@@ -8,7 +8,8 @@
 import { EventEmitter } from "node:events";
 import { createConnection, createServer, type AddressInfo, type Server, type Socket } from "node:net";
 import { encodeFrame, FrameDecoder } from "./framing.ts";
-import { parseLocations, type PrintEvent } from "./print.ts";
+import { parseLocations } from "../gamelog/frames.ts";
+import type { PrintEvent } from "./print.ts";
 import {
   MAX_PROTOCOL_VERSION,
   PRINT_LEVELS,

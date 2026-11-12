@@ -2,7 +2,7 @@ import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { regolithExportFolders } from "../../validate/regolith.ts";
+import { regolithExportFolders } from "../../core/regolith.ts";
 import { applyPackDeploy, deployFolderName, langValue, listDevPacks, packDisplayName, planPackDeploy, readManifestHeader, type DevPackFolder } from "./deploy.ts";
 
 const project = "project";

@@ -4,8 +4,8 @@
  * state, tells it when a game starts and stops, and `player_act` asks it whether the simulation is paused and holds its
  * input lock around actions and play jobs.
  *
- * sculkwire installs its own provider, the in-game agent (`src/runtime/engine/provider.ts`), as the built-in one when
- * that module loads. An extension may replace it through `registerInputProvider`; removing that one falls back to the
+ * sculkwire installs its own provider, the in-game agent (`agentprovider.ts`), as the built-in one from `wireFeatures()`
+ * (`src/features.ts`). An extension may replace it through `registerInputProvider`; removing that one falls back to the
  * built-in provider. There is one provider in use at a time, so the controller, `player_act` and `sculk bench` never
  * have to choose.
  *
@@ -73,7 +73,7 @@ function hookShutdown(): void {
 }
 
 /**
- * Install sculkwire's own provider. Called once when the engine feature loads; an extension's provider replaces it and
+ * Install sculkwire's own provider. Called once by `installAgentProvider()`; an extension's provider replaces it and
  * falls back to it when removed.
  */
 export function setBuiltinInputProvider(provider: InputProvider | undefined): void {

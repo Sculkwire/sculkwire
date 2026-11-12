@@ -96,8 +96,8 @@ These hold for anything that drives a real client, by hand or from a test:
 
 ### A Tool
 
-1. Put it in the feature it belongs to: `src/<feature>/mcp.ts` calls `server.registerTool` with a zod input schema and an `outputSchema`, and returns `structuredContent` plus a one-line text summary. A new feature exports `register(server)` and is listed in `src/mcp/server.ts`.
-2. Add the matching CLI command to the feature's `commands` in `src/<feature>/cli.ts` (listed in `src/cli.ts` for a new feature).
+1. Put it in the feature it belongs to: `src/<feature>/mcp.ts` calls `server.registerTool` with a zod input schema and an `outputSchema`, and returns `structuredContent` plus a one-line text summary. A new feature exports `register(server)` and is listed in `src/features.ts`.
+2. Add the matching CLI command to the feature's `commands` in `src/<feature>/cli.ts` (listed in `src/features.ts` for a new feature).
 3. Keep every call under the client's timeout. Long work (BDS, the client, `play`) runs as a job the tool starts and another tool reads.
 4. Update the docs as above, and add tests for the parsing and the choices the tool makes.
 

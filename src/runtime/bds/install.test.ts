@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { assertHostSupported, bdsPlatformFor, pickLink, PrerequisiteError, serverExecutable, type BdsLink } from "./install.ts";
+import { PrerequisiteError } from "../../core/errors.ts";
+import { assertHostSupported, bdsPlatformFor, pickLink, serverExecutable, type BdsLink } from "./install.ts";
 
 const links: BdsLink[] = [
   { channel: "stable", platform: "linux", version: "1.26.63.1", url: "https://x/bin-linux/bedrock-server-1.26.63.1.zip" },

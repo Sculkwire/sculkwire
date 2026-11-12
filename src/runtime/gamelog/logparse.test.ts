@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PackInfo } from "../../core/project.ts";
 import { entriesToDiagnostics, entryKey, locate, parseConsole, parseContentLog, mergeEntries, type IndexedPack } from "./logparse.ts";
-import { packStackIds } from "./check.ts";
 
 function pack(kind: PackInfo["kind"], relDir: string, name: string, texts: Record<string, string>, identifiers: Record<string, string> = {}): IndexedPack {
   return {
@@ -125,12 +124,5 @@ describe("helpers", () => {
   it("locate returns 1-based line/column ranges", () => {
     expect(locate("ab\ncd\nxyz", "yz")).toEqual({ start: { line: 3, column: 2 }, end: { line: 3, column: 4 } });
     expect(locate("abc", "q")).toBeUndefined();
-  });
-
-  it("reads pack ids from the Pack Stack line", () => {
-    const ids = packStackIds([
-      "[2026-11-07 17:05:35:816 INFO] Pack Stack - [00] MCBE Fixture BP (id: 5b1c7a0e-2f1d-4c55-9a39-1e7d3b6a0b01, version: 1.0.0) @ worlds/x/behavior_packs/0_BP",
-    ]);
-    expect([...ids]).toEqual(["5b1c7a0e-2f1d-4c55-9a39-1e7d3b6a0b01"]);
   });
 });

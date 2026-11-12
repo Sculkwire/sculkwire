@@ -4,13 +4,13 @@
  * diagnostics. A project-level tsconfig.json (Regolith projects keep TypeScript sources outside the packs) is
  * checked with the project's own settings instead.
  */
-import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Diagnostic, Severity } from "../core/diagnostic.ts";
+import { run } from "../core/process.ts";
 import { findOnPath } from "../core/which.ts";
 import type { Channel } from "../core/version.ts";
 import type { Context, Pack } from "./context.ts";
@@ -119,15 +119,6 @@ export function findTsc(projectRoot: string, explicit?: string): { command: stri
   return tscOnPath();
 }
 
-function run(command: string, args: string[], cwd: string): Promise<{ code: number; output: string }> {
-  const { promise, resolve: done } = Promise.withResolvers<{ code: number; output: string }>();
-  execFile(command, args, { cwd, maxBuffer: 64 * 1024 * 1024, timeout: 600_000 }, (err, stdout, stderr) => {
-    const exit = err && "code" in err ? err.code : undefined;
-    done({ code: typeof exit === "number" ? exit : err ? 1 : 0, output: `${stdout}${stderr}` });
-  });
-  return promise;
-}
-
 function nodeModulesOf(dir: string): string {
   return existsSync(join(dir, "node_modules", "@minecraft")) ? join(dir, "node_modules") : dir;
 }
@@ -228,7 +219,8 @@ async function checkPack(ctx: Context, pack: Pack, opts: TypeScriptOptions, tsc:
     };
     const cfgPath = join(tmp, "tsconfig.json");
     await writeFile(cfgPath, JSON.stringify(config, null, 2));
-    const { code, output } = await run(tsc.command, [...tsc.args, "-p", cfgPath, "--pretty", "false"], tmp);
+    const { code, stdout, stderr } = await run(tsc.command, [...tsc.args, "-p", cfgPath, "--pretty", "false"], { cwd: tmp, timeoutMs: 600_000 });
+    const output = stdout + stderr;
     const diags = parseTscOutput(output);
     await report(ctx, [pack], tmp, diags);
     if (code !== 0 && diags.length === 0) {
@@ -257,7 +249,8 @@ async function checkProject(ctx: Context, tsconfig: string, tsc: { command: stri
     });
     return;
   }
-  const { code, output } = await run(tsc.command, [...tsc.args, "-p", tsconfig, "--noEmit", "--pretty", "false"], root);
+  const { code, stdout, stderr } = await run(tsc.command, [...tsc.args, "-p", tsconfig, "--noEmit", "--pretty", "false"], { cwd: root, timeoutMs: 600_000 });
+  const output = stdout + stderr;
   const diags = parseTscOutput(output);
   await report(ctx, ctx.packs, root, diags);
   if (code !== 0 && diags.length === 0) {

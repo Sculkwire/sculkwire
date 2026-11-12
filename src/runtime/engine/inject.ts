@@ -11,11 +11,11 @@
  *
  * The game has to be running: the injector fails when it finds no `Minecraft.Windows.exe`.
  */
-import { spawn } from "node:child_process";
 import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { findInstall, installerRoot, type ClientInstall } from "../client/install.ts";
-import { winePrefix } from "../client/launcher.ts";
+import { run } from "../../core/process.ts";
+import { findInstall, installerRoot, type ClientInstall } from "../../gamefiles/install.ts";
+import { winePrefix } from "../../gamefiles/wine.ts";
 import { gamePath } from "./gamepath.ts";
 import { buildAgent, type AgentBuild } from "./build.ts";
 
@@ -150,33 +150,6 @@ export function injectorCommand(
   return { cmd: wine, args: [injector, exe, gamePath(dll, platform)], env: wineEnv(wine, prefix), prefix, wine };
 }
 
-function run(cmd: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
-  const { promise, resolve: done } = Promise.withResolvers<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>();
-  const child = spawn(cmd, args, { env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-  let stdout = "";
-  let stderr = "";
-  child.stdout.on("data", (chunk: Buffer) => {
-    stdout = (stdout + chunk.toString("utf8")).slice(-16_000);
-  });
-  child.stderr.on("data", (chunk: Buffer) => {
-    stderr = (stderr + chunk.toString("utf8")).slice(-16_000);
-  });
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    child.kill("SIGKILL");
-  }, timeoutMs);
-  child.on("error", (err) => {
-    clearTimeout(timer);
-    done({ code: null, stdout, stderr: `${cmd}: ${err.message}`, timedOut: false });
-  });
-  child.on("close", (code) => {
-    clearTimeout(timer);
-    done({ code, stdout, stderr, timedOut });
-  });
-  return promise;
-}
-
 export interface InjectOptions {
   dll: string;
   injector: string;
@@ -193,7 +166,7 @@ export async function injectAgent(install: ClientInstall, options: InjectOptions
   if (!existsSync(options.injector)) throw new AgentInjectError("prerequisite", `injector does not exist: ${options.injector}`);
   const exe = options.exe ?? "Minecraft.Windows.exe";
   const command = injectorCommand(install, options.injector, options.dll, exe, options.platform ?? process.platform, options.check);
-  const result = await run(command.cmd, command.args, command.env, options.timeoutMs ?? 90_000);
+  const result = await run(command.cmd, command.args, { env: command.env, timeoutMs: options.timeoutMs ?? 90_000, maxOutput: 16_000 });
   const ok = /^OK\s+(\d+)/m.exec(result.stdout);
   if (result.code !== 0 || !ok) {
     const why = result.timedOut ? "injector timed out" : `injector exit code ${result.code}`;

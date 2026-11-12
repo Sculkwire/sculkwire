@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,7 +31,9 @@ describe("tools/list", () => {
       const { tools } = await client.listTools();
       const byName = new Map(tools.map((tool) => [tool.name, tool]));
       expect(byName.size).toBe(tools.length);
-      for (const name of ["docs_search", "validate_pack", "engine_status", "sculkwire_version"]) expect(byName.has(name), name).toBe(true);
+      // Every documented tool is registered and every registered tool is documented, so a dropped feature fails here.
+      const documented = [...readFileSync(fileURLToPath(new URL("../../docs/tools.md", import.meta.url)), "utf8").matchAll(/^### (\S+)\s*$/gm)].map((m) => m[1]);
+      expect([...byName.keys()].sort()).toEqual(documented.sort());
       // An item slot holds item slots (a bundle, a shulker box): every tool that returns slots refers to one definition.
       for (const name of ["player_inventory", "container", "craft", "screen"]) {
         const schema = byName.get(name)?.outputSchema;

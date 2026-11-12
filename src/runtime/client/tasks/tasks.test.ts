@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { drive, fakeClock } from "../../../testing/faketime.ts";
-import { FakeWorld, stack } from "./fakeworld.ts";
+import { FakeWorld, stack } from "../../../testing/fakeworld.ts";
 import { parseRecipe, RecipeIndex, type Recipe } from "./recipes.ts";
 import { runTaskStep, taskStepDone } from "./steps.ts";
 import type { TaskStep } from "./types.ts";

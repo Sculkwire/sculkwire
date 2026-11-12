@@ -1,24 +1,13 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { exitCodeFor, formatDiagnostic, summarize, type Diagnostic } from "../../core/diagnostic.ts";
+import { exitCodeFor, summarize } from "../../core/diagnostic.ts";
+import { diagnosticSchema, diagText, fail, ok, summarySchema } from "../../core/mcp.ts";
 import { summarizeProfile } from "../debugger/profile.ts";
 import { bdsCheck } from "./check.ts";
 import { runGameTests } from "./gametest.ts";
 import { onShutdown } from "../../core/shutdown.ts";
 import { getSession, reloadSession, sessionCommand, sessionLogs, startSession, stopAllSessions, stopSession } from "./session.ts";
 
-const position = z.object({ line: z.number(), column: z.number() });
-const diagnosticSchema = z.object({
-  severity: z.enum(["error", "warning", "info"]),
-  code: z.string(),
-  message: z.string(),
-  source: z.string(),
-  file: z.string().optional(),
-  range: z.object({ start: position, end: position }).optional(),
-  pointer: z.string().optional(),
-  hint: z.string().optional(),
-});
-const summarySchema = z.object({ errors: z.number(), warnings: z.number(), infos: z.number() });
 const channel = z.enum(["stable", "preview"]).optional().describe("BDS release channel (default stable)");
 const acceptEula = z
   .boolean()
@@ -36,22 +25,6 @@ const sessionInfoSchema = {
   packs: z.array(z.object({ name: z.string(), kind: z.string(), path: z.string() })),
   startedAt: z.string(),
 };
-
-type ToolResult = { content: { type: "text"; text: string }[]; structuredContent?: Record<string, unknown>; isError?: boolean };
-
-function ok(text: string, structured: object): ToolResult {
-  return { content: [{ type: "text", text }], structuredContent: { ...structured } };
-}
-
-function fail(err: unknown): ToolResult {
-  return { content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }], isError: true };
-}
-
-function diagText(diagnostics: readonly Diagnostic[], max = 20): string {
-  const lines = diagnostics.slice(0, max).map(formatDiagnostic);
-  if (diagnostics.length > max) lines.push(`… ${diagnostics.length - max} more`);
-  return lines.join("\n");
-}
 
 const plain = (lines: { seq: number; text: string }[]): { seq: number; text: string }[] => lines.map(({ seq, text }) => ({ seq, text }));
 

@@ -18,7 +18,6 @@
  *
  * `platform` is a parameter (never read from `process`) so the path rules and the binary names are testable.
  */
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { copyFile, mkdir, rename, rm, writeFile } from "node:fs/promises";
@@ -28,6 +27,7 @@ import { fileURLToPath } from "node:url";
 import { unzip } from "fflate";
 import { REPO_SLUG, USER_AGENT, VERSION } from "../../core/meta.ts";
 import { cacheDir } from "../../core/paths.ts";
+import { run, type RunResult } from "../../core/process.ts";
 import { findOnPath } from "../../core/which.ts";
 
 export type AgentBuildStage = "prerequisite" | "source" | "compile" | "download";
@@ -232,39 +232,8 @@ function tail(text: string, lines = 20): string {
     .join("\n");
 }
 
-/** One child process run: what `cargo` did, and its output tail. */
-export interface RunResult {
-  code: number | null;
-  output: string;
-  timedOut: boolean;
-}
-
-export type RunCommand = (cmd: string, args: string[], cwd: string, timeoutMs: number) => Promise<RunResult>;
-
-function run(cmd: string, args: string[], cwd: string, timeoutMs: number): Promise<RunResult> {
-  const { promise, resolve } = Promise.withResolvers<RunResult>();
-  const child = spawn(cmd, args, { cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-  let output = "";
-  const keep = (chunk: Buffer): void => {
-    output = (output + chunk.toString("utf8")).slice(-64_000);
-  };
-  child.stdout.on("data", keep);
-  child.stderr.on("data", keep);
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    child.kill("SIGKILL");
-  }, timeoutMs);
-  child.on("error", (err) => {
-    clearTimeout(timer);
-    resolve({ code: null, output: `${cmd} failed to start: ${err.message}`, timedOut: false });
-  });
-  child.on("close", (code) => {
-    clearTimeout(timer);
-    resolve({ code, output, timedOut });
-  });
-  return promise;
-}
+/** Runs cargo: its exit code, whether it timed out, and its output tail. */
+export type RunCommand = (cmd: string, args: string[], cwd: string, timeoutMs: number) => Promise<Pick<RunResult, "code" | "output" | "timedOut">>;
 
 export interface BuildOptions {
   /** Build or download again over an existing cache entry. */
@@ -381,7 +350,8 @@ async function compile(
   options: BuildOptions,
 ): Promise<AgentBuild> {
   await mkdir(target.dir, { recursive: true });
-  const result = await (options.run ?? run)(cargo, cargoBuildArgs(), root, options.timeoutMs ?? 600_000);
+  const runCargo: RunCommand = options.run ?? ((cmd, args, cwd, timeoutMs) => run(cmd, args, { cwd, timeoutMs, maxOutput: 64_000 }));
+  const result = await runCargo(cargo, cargoBuildArgs(), root, options.timeoutMs ?? 600_000);
   if (result.code !== 0) {
     const why = result.timedOut ? "timed out" : `exit code ${result.code}`;
     throw new AgentBuildError("compile", `${cargo} build failed (${why}):\n${tail(result.output)}`);

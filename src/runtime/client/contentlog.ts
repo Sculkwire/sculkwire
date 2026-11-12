@@ -9,9 +9,10 @@ import type { Diagnostic } from "../../core/diagnostic.ts";
 import { compareDiagnostics } from "../../core/diagnostic.ts";
 import { discoverProject } from "../../core/project.ts";
 import type { PackInfo } from "../../core/project.ts";
-import { entriesToDiagnostics, indexPack, NOISE, normalizeMessage, parseContentLog } from "../bds/logparse.ts";
-import type { IndexedPack, LogEntry } from "../bds/logparse.ts";
-import { parseLocations, type PrintEvent } from "../debugger/print.ts";
+import { entriesToDiagnostics, indexPack, NOISE, normalizeMessage, parseContentLog } from "../gamelog/logparse.ts";
+import type { IndexedPack, LogEntry } from "../gamelog/logparse.ts";
+import type { PrintEvent } from "../debugger/print.ts";
+import { parseLocations } from "../gamelog/frames.ts";
 import { listDevPacks, packDisplayName } from "./deploy.ts";
 
 export interface LogPosition {

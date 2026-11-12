@@ -1,19 +1,11 @@
 #!/usr/bin/env node
 import { backgroundDownloadsAllowed, exitAfterGrace } from "./core/background.ts";
-import type { CliCommand } from "./core/cli.ts";
+import { runMain, type CliCommand } from "./core/cli.ts";
 import { ExitCode } from "./core/diagnostic.ts";
 import { VERSION } from "./core/meta.ts";
 import { loadExtensions } from "./extensions/index.ts";
-import { commands as gamefilesCommands } from "./gamefiles/cli.ts";
-import { commands as knowledgeCommands } from "./knowledge/cli.ts";
+import { FEATURES, wireFeatures } from "./features.ts";
 import { serveStdio } from "./mcp/server.ts";
-import { commands as bdsCommands } from "./runtime/bds/cli.ts";
-import { commands as gameCommands } from "./runtime/client/cli.ts";
-import { commands as engineCommands } from "./runtime/engine/cli.ts";
-import { commands as setupCommands } from "./setup/cli.ts";
-import { commands as updateCommands } from "./update/cli.ts";
-import { commands as validateCommands } from "./validate/cli.ts";
-import { useKnowledgeProviders } from "./validate/providers.ts";
 
 const BUILTIN: CliCommand[] = [
   {
@@ -24,14 +16,7 @@ const BUILTIN: CliCommand[] = [
       return ExitCode.ok;
     },
   },
-  ...knowledgeCommands,
-  ...validateCommands,
-  ...bdsCommands,
-  ...gameCommands,
-  ...engineCommands,
-  ...gamefilesCommands,
-  ...setupCommands,
-  ...updateCommands,
+  ...FEATURES.flatMap((feature) => feature.commands ?? []),
 ];
 
 function usage(commands: readonly CliCommand[]): string {
@@ -73,20 +58,11 @@ async function main(argv: string[]): Promise<number> {
     process.stderr.write(`unknown command: ${argv.join(" ")}\n\n${usage(commands)}\n`);
     return ExitCode.usage;
   }
-  useKnowledgeProviders();
+  wireFeatures();
   return hit.command.run(hit.rest);
 }
 
-main(process.argv.slice(2))
-  .then(
-    (code) => {
-      process.exitCode = code;
-    },
-    (err: unknown) => {
-      process.stderr.write(`${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
-      process.exitCode = ExitCode.usage;
-    },
-  )
+runMain(() => main(process.argv.slice(2)))
   // A short-lived command does not wait for background metadata refreshes; `sculk mcp` keeps running.
   .finally(() => {
     if (!backgroundDownloadsAllowed()) exitAfterGrace();

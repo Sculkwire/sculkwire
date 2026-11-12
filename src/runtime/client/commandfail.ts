@@ -7,7 +7,7 @@
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { parseOptions } from "./options.ts";
+import { parseOptions } from "../../gamefiles/options.ts";
 
 /** Used when no language file can be read: the parser's own errors. */
 const BUILTIN_FAILURE = /^Syntax error|^Unknown command/i;

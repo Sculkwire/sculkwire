@@ -77,7 +77,7 @@ An extension uses the values on `host` at runtime and never imports sculkwire's 
 
 ## Input Provider
 
-`player_act` and `sculk bench` have two input routes. The keyboard route is built in, and sculkwire's in-game agent is the built-in engine route (`src/runtime/engine/provider.ts`): `input: "auto"` takes the engine whenever the provider answers and the keyboard otherwise, and `input: "engine"` requires it. An extension replaces the provider with `registerInputProvider(provider)`; one is active at a time, and removing the extension's returns the built-in one.
+`player_act` and `sculk bench` have two input routes. The keyboard route is built in, and sculkwire's in-game agent is the built-in engine route (`src/runtime/client/agentprovider.ts`): `input: "auto"` takes the engine whenever the provider answers and the keyboard otherwise, and `input: "engine"` requires it. An extension replaces the provider with `registerInputProvider(provider)`; one is active at a time, and removing the extension's returns the built-in one.
 
 | Member | Used for |
 |---|---|

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { EngineSession, type EngineResult } from "./engine.ts";
-import { AgentInputProvider } from "./provider.ts";
+import { EngineSession, type EngineResult } from "../engine/engine.ts";
+import { AgentInputProvider } from "./agentprovider.ts";
 
 describe("AgentInputProvider without an agent", () => {
   it("reports no motion and no pause, fails the engine route, and starts no watcher outside window mode on Linux", async () => {

@@ -6,7 +6,7 @@ import { basename, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import type { ClientInstall } from "../client/install.ts";
+import type { ClientInstall } from "../../gamefiles/install.ts";
 import { gamePath } from "./gamepath.ts";
 import { EngineSession, engineGameDir, type EngineStatus } from "./engine.ts";
 import { schemas } from "./mcp.ts";

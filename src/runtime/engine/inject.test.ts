@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ClientInstall } from "../client/install.ts";
+import type { ClientInstall } from "../../gamefiles/install.ts";
 import { gamePath } from "./gamepath.ts";
 import { agentPrefix, agentWine, injectorCommand } from "./inject.ts";
 

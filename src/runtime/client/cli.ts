@@ -5,7 +5,7 @@ import { ExitCode, exitCodeFor, formatDiagnostic, summarize } from "../../core/d
 import { bench } from "./bench/cli.ts";
 import { bridge, WORLD_WAIT_MAX_S } from "./bridge.ts";
 import { clientDiagnostics, indexProjectPacks, readSince } from "./contentlog.ts";
-import { findInstall, findInstalls, type ClientInstall } from "./install.ts";
+import { findInstall, findInstalls, type ClientInstall } from "../../gamefiles/install.ts";
 import { gamePids, readLaunchState } from "./launcher.ts";
 import { listWorlds } from "./world.ts";
 

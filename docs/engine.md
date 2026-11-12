@@ -56,7 +56,7 @@ The game must be running before `engine_attach`, because the injector finds it b
 
 ## Attach Flow
 
-1. sculkwire finds the install (`src/runtime/client/install.ts`) and checks that its kind matches this OS, then resolves the game folder that holds `Minecraft.Windows.exe`.
+1. sculkwire finds the install (`src/gamefiles/install.ts`) and checks that its kind matches this OS, then resolves the game folder that holds `Minecraft.Windows.exe`.
 2. The DLL and the injector are built or downloaded, once per source version (`build.ts`).
 3. The injector loads the DLL into the running `Minecraft.Windows.exe` and prints `OK <pid>`.
 4. sculkwire connects to `127.0.0.1:19160`, retrying while the DLL's listener thread starts, and reads `engine.status`.

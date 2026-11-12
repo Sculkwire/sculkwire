@@ -18,8 +18,8 @@ import type { Diagnostic } from "../../core/diagnostic.ts";
 import { compareDiagnostics } from "../../core/diagnostic.ts";
 import { dataDir } from "../../core/paths.ts";
 import { discoverProject } from "../../core/project.ts";
-import { buildRegolith, regolithExportFolders, regolithPlan } from "../../validate/regolith.ts";
-import type { IndexedPack } from "../bds/logparse.ts";
+import { buildRegolith, regolithExportFolders, regolithPlan } from "../../core/regolith.ts";
+import type { IndexedPack } from "../gamelog/logparse.ts";
 import { printToDiagnostic, type PrintEvent } from "../debugger/print.ts";
 import { listen, type DebuggerListener, type DebuggerSession } from "../debugger/session.ts";
 import { ConnectServer, DEFAULT_CONNECT_PORT, type CommandResult } from "../connect/server.ts";
@@ -40,7 +40,7 @@ import {
   type LogPosition,
 } from "./contentlog.ts";
 import { applyPackDeploy, listDevPacks, packDisplayName, planPackDeploy, readManifestHeader, type PackToDeploy } from "./deploy.ts";
-import { findInstall, optionsFiles, type ClientInstall } from "./install.ts";
+import { findInstall, optionsFiles, type ClientInstall } from "../../gamefiles/install.ts";
 import { debuggerCommandOk, helperTraffic, loadFailureMatcher, type FailureMatcher } from "./commandfail.ts";
 import {
   defaultMode,
@@ -62,13 +62,14 @@ import {
   type LaunchMode,
   type LaunchState,
 } from "./launcher.ts";
-import { bridgeOptions, restoreOptions, setOptions } from "./options.ts";
+import { bridgeOptions, restoreOptions, setOptions } from "../../gamefiles/options.ts";
 import { engine, type SettingValue } from "../engine/engine.ts";
 import { restoreGameSettings } from "../engine/settings.ts";
 import { Staleness, streamEntities, streamEntity, TickClock, type StreamedEntities } from "./entitystream.ts";
 import { horizontalDistance, PlayerController, type EntityInfo, type Impact, type Loadout, type PlayerState, type PlayerWorld } from "./player.ts";
 import { inputProvider } from "./inputprovider.ts";
-import { createWorld, writeWorldIcon, type CreatedWorld, type Difficulty, type PackRef } from "./world.ts";
+import { createWorld, writeWorldIcon, type CreatedWorld, type PackRef } from "./world.ts";
+import type { Difficulty } from "../../gamefiles/worlds.ts";
 import {
   currentScreen,
   NO_SCREENS,

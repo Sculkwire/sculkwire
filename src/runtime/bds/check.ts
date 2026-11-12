@@ -13,11 +13,12 @@ import { compareDiagnostics } from "../../core/diagnostic.ts";
 import { dataDir } from "../../core/paths.ts";
 import { discoverProject, type PackInfo } from "../../core/project.ts";
 import type { Channel } from "../../core/version.ts";
-import { buildRegolith, regolithPlan } from "../../validate/regolith.ts";
+import { buildRegolith, regolithPlan } from "../../core/regolith.ts";
 import { indexBuiltPack } from "./built.ts";
-import { PrerequisiteError, resolveBds, type BdsInstall } from "./install.ts";
+import { PrerequisiteError } from "../../core/errors.ts";
+import { resolveBds, type BdsInstall } from "./install.ts";
 import { createInstance, disposeInstance, newInstanceId, type BdsInstance } from "./instance.ts";
-import { entriesToDiagnostics, indexPack, projectPath, type IndexedPack } from "./logparse.ts";
+import { entriesToDiagnostics, indexPack, projectPath, type IndexedPack } from "../gamelog/logparse.ts";
 import type { BdsServer } from "./server.ts";
 import { ensureTemplate, runOnce } from "./template.ts";
 

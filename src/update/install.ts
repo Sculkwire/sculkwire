@@ -19,6 +19,7 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { REPO_URL } from "../core/meta.ts";
 import { dataDir } from "../core/paths.ts";
+import { run, type RunResult } from "../core/process.ts";
 
 export const DEFAULT_REPO = `${REPO_URL}.git`;
 export const CHANNELS = ["release", "main", "off"] as const;
@@ -141,51 +142,24 @@ export function mainVersion(sha: string): string {
 // ---------------------------------------------------------------------------------------------------------------
 // Processes
 
-export interface RunResult {
-  code: number;
-  stdout: string;
-  stderr: string;
-}
-
 /**
- * Run a command with stdout and stderr piped (never inherited) and a hard timeout. Git never prompts: a repository
+ * `run` for the update steps: rejects when the command does not start or times out. Git never prompts: a repository
  * that needs credentials works through the user's credential helper, and missing credentials fail instead of hanging.
  */
-export function run(command: string, args: readonly string[], options: { cwd?: string; timeoutMs: number; env?: NodeJS.ProcessEnv; input?: string }): Promise<RunResult> {
-  const { promise, resolve, reject } = Promise.withResolvers<RunResult>();
-  // npm and other .cmd shims only run through a shell on Windows, which then needs the quoting done here.
-  const shell = process.platform === "win32" && (command === "npm" || /\.(cmd|bat)$/i.test(command));
-  const quote = (s: string) => (shell && /[\s&()^|<>"]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s);
-  const child = spawn(quote(command), args.map(quote), {
+export async function runUnattended(command: string, args: readonly string[], options: { cwd?: string; timeoutMs: number; env?: NodeJS.ProcessEnv; input?: string }): Promise<RunResult> {
+  const r = await run(command, args, {
     cwd: options.cwd,
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", ...options.env },
-    stdio: ["pipe", "pipe", "pipe"],
-    shell,
-    windowsHide: true,
+    timeoutMs: options.timeoutMs,
+    input: options.input ?? "",
   });
-  let stdout = "";
-  let stderr = "";
-  child.stdout.on("data", (c: Buffer) => (stdout += c.toString()));
-  child.stderr.on("data", (c: Buffer) => (stderr += c.toString()));
-  const timer = setTimeout(() => {
-    child.kill("SIGKILL");
-    reject(new Error(`${command} ${args.join(" ")} timed out after ${Math.round(options.timeoutMs / 1000)} s`));
-  }, options.timeoutMs);
-  child.on("error", (err) => {
-    clearTimeout(timer);
-    reject(err);
-  });
-  child.on("close", (code) => {
-    clearTimeout(timer);
-    resolve({ code: code ?? 1, stdout, stderr });
-  });
-  child.stdin.on("error", () => {});
-  child.stdin.end(options.input ?? "");
-  return promise;
+  if (r.startError) throw r.startError;
+  if (r.timedOut) throw new Error(`${command} ${args.join(" ")} timed out after ${Math.round(options.timeoutMs / 1000)} s`);
+  return r;
 }
 
 async function git(args: readonly string[], options: { cwd?: string; timeoutMs: number }): Promise<string> {
-  const r = await run("git", args, options);
+  const r = await runUnattended("git", args, options);
   if (r.code !== 0) throw new Error(`git ${args[0]} failed: ${lastLine(r.stderr) || `exit ${r.code}`}`);
   return r.stdout;
 }
@@ -423,7 +397,7 @@ export interface Hooks {
 
 export async function npmCi(dir: string): Promise<void> {
   // Full install: the validator falls back to this checkout's TypeScript for the `typescript` check.
-  const r = await run("npm", ["ci", "--no-audit", "--no-fund", "--loglevel=error"], { cwd: dir, timeoutMs: TIMEOUTS.deps });
+  const r = await runUnattended("npm", ["ci", "--no-audit", "--no-fund", "--loglevel=error"], { cwd: dir, timeoutMs: TIMEOUTS.deps });
   if (r.code !== 0) throw new Error(`npm ci failed in ${dir}: ${lastLine(r.stderr) || `exit ${r.code}`}`);
 }
 
@@ -433,7 +407,7 @@ const SMOKE_ENV = { SCULKWIRE_AUTO_UPDATE: "0" };
 /** `node src/cli.ts --help` exits 0, and `node src/cli.ts mcp` answers `tools/list` with at least one tool. */
 export async function smokeCheck(dir: string): Promise<void> {
   const cli = join(dir, "src", "cli.ts");
-  const help = await run(process.execPath, [cli, "--help"], { cwd: dir, timeoutMs: TIMEOUTS.smoke, env: SMOKE_ENV });
+  const help = await runUnattended(process.execPath, [cli, "--help"], { cwd: dir, timeoutMs: TIMEOUTS.smoke, env: SMOKE_ENV });
   if (help.code !== 0 || !help.stdout.includes("Usage")) throw new Error(`smoke check: \`sculk --help\` failed: ${lastLine(help.stderr) || `exit ${help.code}`}`);
   const count = await mcpToolCount(cli, dir);
   if (count < 1) throw new Error("smoke check: the MCP server listed no tools");
@@ -633,7 +607,7 @@ export async function initLayout(l: Layout, repo: string): Promise<void> {
 
 /** `git remote get-url origin` of a checkout, if any. */
 export function checkoutRemote(dir: string): Promise<string | undefined> {
-  return run("git", ["remote", "get-url", "origin"], { cwd: dir, timeoutMs: 10_000 }).then(
+  return runUnattended("git", ["remote", "get-url", "origin"], { cwd: dir, timeoutMs: 10_000 }).then(
     (r) => (r.code === 0 ? r.stdout.trim() || undefined : undefined),
     () => undefined,
   );
