@@ -455,7 +455,7 @@ Lists every world of the active game user, sculkwire's test worlds and the user'
 
 ### game_stop
 
-Closes the game, closes the bridge and puts back the `options.txt` keys sculkwire changed. It stops a running play job first. The result has `stopped`, `message` and `restoredOptions`. The message says what happened, for example `closed the game (1 process(es))`, `the game was not running`, or that the game had to be forced to quit.
+Closes the game, closes the bridge and puts back the `options.txt` keys sculkwire changed. It stops a running play job first. The result has `stopped`, `message`, `restoredOptions` and `restoredSettings`. The message says what happened, for example `closed the game (1 process(es))`, `the game was not running`, or that the game had to be forced to quit. When the stopped world is a kept one (`game_launch` `keep` or `copyFrom`), the text adds that blocks changed in the last minute before the stop may be missing on the next launch: the stop ends the game without Save & Quit.
 
 No inputs.
 
