@@ -6,10 +6,13 @@
  * phrasing) with the fight's per-tick trace on, measure, and reset. Ends with the camera put back
  * and the game stopped (unless asked to keep it). The report says how the world was reached (`entry`).
  */
-import { mkdir, readdir, writeFile } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
+import { err } from "../../../core/cli.ts";
+import { errorMessage, UsageError } from "../../../core/errors.ts";
+import { writeFileAtomic } from "../../../core/fs.ts";
 import { cacheDir } from "../../../core/paths.ts";
 import { engine, type GameSetting, type SettingValue } from "../../engine/engine.ts";
 import { getSetting, setSetting } from "../../engine/settings.ts";
@@ -17,7 +20,9 @@ import { inputProvider } from "../inputprovider.ts";
 import { bridge, type BridgeStatus, type WorldEntry } from "../bridge.ts";
 import type { LaunchMode } from "../launcher.ts";
 import { FOREGROUND_MESSAGE } from "../windows.ts";
-import type { ActionResult, EntityInfo, InputMode, Loadout, PlayerAction, PlayerController } from "../player.ts";
+import type { InputMode } from "../input.ts";
+import type { PlayerController } from "../player.ts";
+import type { ActionResult, EntityInfo, Loadout, PlayerAction } from "../types.ts";
 import { play, type Death, type PlayAction, type PlayEnvironment, type PlayResult } from "../skills/play.ts";
 import { combatStats, traceFights, type TraceFrame } from "../skills/stats.ts";
 import { arenaCommands, arenaOrigin, clearMobsCommand, heldCommand, offsetAt, playerCommands, summonCommand, WORLD_RULES } from "./arena.ts";
@@ -131,7 +136,7 @@ async function command(line: string): Promise<void> {
   try {
     r = await bridge.command(line, route);
   } catch (err) {
-    if (route === "debugger" || !/time(d)? ?out/i.test(err instanceof Error ? err.message : String(err))) throw err;
+    if (route === "debugger" || !/time(d)? ?out/i.test(errorMessage(err))) throw err;
     route = "debugger";
     r = await bridge.command(line, route);
   }
@@ -313,7 +318,7 @@ async function runOnce(s: Scenario, index: number, run: number, controller: Play
     await late;
     await controller.releaseAll();
   }
-  if (spawnError !== undefined) throw new Error(`summoning the mobs during the action failed: ${spawnError instanceof Error ? spawnError.message : String(spawnError)}`);
+  if (spawnError !== undefined) throw new Error(`summoning the mobs during the action failed: ${errorMessage(spawnError)}`);
   const durationMs = Date.now() - started;
   const after = await bridge.playerState(300);
   const hurts = hurtTick !== undefined ? ((await hurtsSince(hurtTick))?.hurts ?? []) : [];
@@ -369,9 +374,6 @@ async function runOnce(s: Scenario, index: number, run: number, controller: Play
   };
 }
 
-/** A bench option that cannot work in this setup (exit 2), e.g. `--view` with no in-game agent to change the option. */
-export class BenchUsageError extends Error {}
-
 /** How often the manual-start wait looks at the bridge status. */
 const WAIT_POLL_MS = 2000;
 
@@ -414,7 +416,7 @@ async function attachProvider(input: InputMode, log: (l: string) => void): Promi
   try {
     await provider.attach();
   } catch (err) {
-    const why = err instanceof Error ? err.message : String(err);
+    const why = errorMessage(err);
     // The injector refuses a second load of an agent DLL that is already loaded, but that agent still answers on its port.
     const route = bridge.playerController().world.engine;
     if (route && (await route.reachable().catch(() => false))) {
@@ -432,10 +434,10 @@ const NO_AGENT_FOR_VIEW =
 
 /** The game's `game_thirdperson` before the bench changed it, read through the attached agent. */
 async function readView(): Promise<GameSetting> {
-  if (!(await engine.reachable())) throw new BenchUsageError(NO_AGENT_FOR_VIEW);
+  if (!(await engine.reachable())) throw new UsageError(NO_AGENT_FOR_VIEW);
   const got = await getSetting(VIEW_OPTION);
   if (!got.ok) throw new Error(`reading ${VIEW_OPTION} failed: ${got.message}`);
-  if (got.value.source !== "engine") throw new BenchUsageError(NO_AGENT_FOR_VIEW);
+  if (got.value.source !== "engine") throw new UsageError(NO_AGENT_FOR_VIEW);
   return got.value.setting;
 }
 
@@ -452,13 +454,13 @@ export function tracePathFor(jsonPath: string): string {
 }
 
 export async function runBench(opts: BenchOptions): Promise<BenchReport> {
-  const log = opts.log ?? ((l: string) => process.stderr.write(`${l}\n`));
+  const log = opts.log ?? err;
   const all = await loadScenarios();
   const names = opts.scenario?.split(",").map((n) => n.trim());
   const picked = all.filter((s) => (opts.suite === "all" || s.suite === opts.suite) && (!names || names.includes(s.name)));
   if (picked.length === 0) {
     const known = all.map((s) => `${s.suite}/${s.name}`).join(", ");
-    throw new Error(`no scenario matches suite ${opts.suite}${opts.scenario ? ` and name ${opts.scenario}` : ""}; known: ${known}`);
+    throw new UsageError(`no scenario matches suite ${opts.suite}${opts.scenario ? ` and name ${opts.scenario}` : ""}; known: ${known}`);
   }
   const startedAt = new Date().toISOString();
   log(`launching the game (${opts.display ?? "window"}, muted, difficulty normal)`);
@@ -489,7 +491,7 @@ export async function runBench(opts: BenchOptions): Promise<BenchReport> {
       log("bringing the game window to the foreground; leave it there until the bench ends");
       await gate.activate();
     }
-    for (const r of WORLD_RULES) await command(r).catch((err: unknown) => log(`warning: ${err instanceof Error ? err.message : String(err)}`));
+    for (const r of WORLD_RULES) await command(r).catch((err: unknown) => log(`warning: ${errorMessage(err)}`));
     for (const view of opts.views?.length ? opts.views : [undefined]) {
       if (view && originalView) {
         await setView(viewValue(view, originalView));
@@ -510,7 +512,7 @@ export async function runBench(opts: BenchOptions): Promise<BenchReport> {
               runs.push(done.record);
               if (done.frames) traces.push({ scenario: s.name, ...(view ? { view } : {}), ...(stance ? { stance } : {}), run, frames: done.frames });
             } catch (err) {
-              const message = err instanceof Error ? err.message : String(err);
+              const message = errorMessage(err);
               log(`${label} run ${run}: error ${message}`);
               await controller.releaseAll().catch(() => undefined);
               runs.push({
@@ -538,15 +540,14 @@ export async function runBench(opts: BenchOptions): Promise<BenchReport> {
       const value = originalView.value;
       await setView(value).then(
         () => log(`${VIEW_OPTION} restored to ${JSON.stringify(value)}`),
-        (err: unknown) => log(`restoring ${VIEW_OPTION} failed (game_stop restores it): ${err instanceof Error ? err.message : String(err)}`),
+        (err: unknown) => log(`restoring ${VIEW_OPTION} failed (game_stop restores it): ${errorMessage(err)}`),
       );
     }
-    if (!opts.keep) await bridge.stop().catch((err: unknown) => log(`stopping the game failed: ${err instanceof Error ? err.message : String(err)}`));
+    if (!opts.keep) await bridge.stop().catch((err: unknown) => log(`stopping the game failed: ${errorMessage(err)}`));
   }
   const table = `${markdownTable(reports)}\n\n${entry.footer}`;
   const stamp = startedAt.replace(/[:.]/g, "-");
   const jsonPath = cacheDir("bench", `${opts.suite}${opts.scenario ? `-${opts.scenario.replace(/,/g, "+")}` : ""}-${stamp}.json`);
-  await mkdir(dirname(jsonPath), { recursive: true });
   const tracePath = traces.length ? tracePathFor(jsonPath) : undefined;
   const report: BenchReport = {
     suite: opts.suite,
@@ -558,7 +559,7 @@ export async function runBench(opts: BenchOptions): Promise<BenchReport> {
     jsonPath,
     ...(tracePath ? { tracePath } : {}),
   };
-  if (tracePath) await writeFile(tracePath, `${JSON.stringify(traces)}\n`);
-  await writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`);
+  if (tracePath) await writeFileAtomic(tracePath, `${JSON.stringify(traces)}\n`);
+  await writeFileAtomic(jsonPath, `${JSON.stringify(report, null, 2)}\n`);
   return report;
 }

@@ -1,9 +1,9 @@
 import { parseArgs } from "node:util";
-import type { CliCommand } from "../../../core/cli.ts";
+import { err, out, type CliCommand } from "../../../core/cli.ts";
 import { ExitCode } from "../../../core/diagnostic.ts";
 import type { LaunchMode } from "../launcher.ts";
-import type { InputMode } from "../player.ts";
-import { BenchUsageError, DEFAULT_WAIT_S, loadScenarios, runBench, type BenchReport } from "./run.ts";
+import type { InputMode } from "../input.ts";
+import { DEFAULT_WAIT_S, loadScenarios, runBench } from "./run.ts";
 import { parseStances } from "./stance.ts";
 import { parseViews } from "./view.ts";
 
@@ -31,7 +31,7 @@ export const bench: CliCommand = {
       },
     });
     if (values.list) {
-      for (const s of await loadScenarios()) process.stdout.write(`${s.suite}/${s.name} (${s.runs} runs): ${s.summary}\n`);
+      for (const s of await loadScenarios()) out(`${s.suite}/${s.name} (${s.runs} runs): ${s.summary}`);
       return ExitCode.ok;
     }
     const suite = positionals[0];
@@ -50,28 +50,22 @@ export const bench: CliCommand = {
       (values.stance !== undefined && !stances) ||
       !(Number.isFinite(waitS) && waitS > 0)
     ) {
-      process.stderr.write(`usage: sculk ${USAGE}\n`);
+      err(`usage: sculk ${USAGE}`);
       return ExitCode.usage;
     }
-    let report: BenchReport;
-    try {
-      report = await runBench({
-        suite,
-        input,
-        waitS,
-        ...(values.scenario ? { scenario: values.scenario } : {}),
-        ...(runs !== undefined ? { runs } : {}),
-        ...(display ? { display } : {}),
-        ...(views ? { views } : {}),
-        ...(stances ? { stances } : {}),
-        ...(values.keep ? { keep: true } : {}),
-      });
-    } catch (err) {
-      if (!(err instanceof BenchUsageError)) throw err;
-      process.stderr.write(`${err.message}\n`);
-      return ExitCode.usage;
-    }
-    process.stdout.write(values.json ? `${JSON.stringify(report, null, 2)}\n` : `${report.table}\n\nJSON: ${report.jsonPath}\n${report.tracePath ? `Trace: ${report.tracePath}\n` : ""}`);
+    // A setup the options cannot work in throws `UsageError`: the dispatcher prints it and exits 2.
+    const report = await runBench({
+      suite,
+      input,
+      waitS,
+      ...(values.scenario ? { scenario: values.scenario } : {}),
+      ...(runs !== undefined ? { runs } : {}),
+      ...(display ? { display } : {}),
+      ...(views ? { views } : {}),
+      ...(stances ? { stances } : {}),
+      ...(values.keep ? { keep: true } : {}),
+    });
+    out(values.json ? JSON.stringify(report, null, 2) : `${report.table}\n\nJSON: ${report.jsonPath}${report.tracePath ? `\nTrace: ${report.tracePath}` : ""}`);
     return report.reports.every((r) => r.summary.successes === r.summary.runs) ? ExitCode.ok : ExitCode.findings;
   },
 };

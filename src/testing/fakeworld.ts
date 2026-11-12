@@ -4,15 +4,40 @@
  * and walkable positions. It answers every `TaskEnv` call the way the game's agent and helper pack shape their answers.
  * Test-only: nothing outside the tests imports it.
  */
-import type { EngineFailure, EngineResult } from "../runtime/engine/engine.ts";
-import type { ItemSlot, PlayerInventory, Slot } from "../runtime/engine/inventory.ts";
+import type { EngineFailure, EngineResult } from "../runtime/engine/failure.ts";
+import type { PlayerInventory } from "../runtime/engine/inventory.ts";
+import type { ItemSlot, Slot } from "../runtime/engine/slot.ts";
 import type { ScreenKind, ScreenSlotRef, ScreenState, TradeOffer } from "../runtime/engine/workstation.ts";
-import type { Clock, Vec3 } from "../runtime/client/player.ts";
-import { fuelValue, matches, namespaced, type Recipe, type RecipeIndex } from "../runtime/client/tasks/recipes.ts";
-import type { BlockInfo, TaskEnv } from "../runtime/client/tasks/types.ts";
+import type { Clock } from "../runtime/client/clock.ts";
+import type { Vec3 } from "../runtime/client/types.ts";
+import { namespaced } from "../runtime/client/tasks/ids.ts";
+import { fuelValue, matches, parseRecipe, RecipeIndex, type Recipe } from "../runtime/client/tasks/recipes.ts";
+import { armorSlotOf, runTaskStep } from "../runtime/client/tasks/steps.ts";
+import type { BlockInfo, TaskEnv, TaskStep, TaskStepResult } from "../runtime/client/tasks/types.ts";
+import { drive, fakeClock } from "./faketime.ts";
 
 const GROUND_Y = 64;
 const SMELT_MS = 10_000;
+
+/** A shaped recipe in the behavior pack's recipe format, for a test's recipe index. */
+export function shapedRecipe(id: string, pattern: string[], key: Record<string, object>, result: object, tags = ["crafting_table"]): string {
+  return JSON.stringify({ format_version: "1.20.10", "minecraft:recipe_shaped": { description: { identifier: id }, tags, pattern, key, result } });
+}
+
+/** A furnace recipe in the behavior pack's recipe format. */
+export function furnaceRecipe(id: string, input: string, output: string, tags = ["furnace"]): string {
+  return JSON.stringify({ format_version: "1.20.10", "minecraft:recipe_furnace": { description: { identifier: id }, tags, input, output } });
+}
+
+/** A world on the fake clock whose recipe index holds these recipe texts. */
+export function fakeTaskWorld(recipes: readonly string[]): FakeWorld {
+  return new FakeWorld(fakeClock, new RecipeIndex(recipes.map((text) => parseRecipe(text, "vanilla")).filter((recipe): recipe is Recipe => !!recipe), "the test recipes"));
+}
+
+/** Run a task step in the world, advancing the fake clock (fake timers on) until it ends. */
+export function runFakeStep(world: FakeWorld, step: TaskStep): Promise<TaskStepResult> {
+  return drive(runTaskStep(step, world.env()), 100, 300_000);
+}
 
 export function stack(item: string, count = 1, contents?: Slot[]): ItemSlot {
   return { item: namespaced(item), count, enchantments: [], ...(contents ? { contents } : {}) };
@@ -136,10 +161,6 @@ export class FakeWorld {
     this.recipes = recipes;
   }
 
-  /* ------------------------------------------------------------------------------------------------------------ */
-  /* Setup                                                                                                          */
-  /* ------------------------------------------------------------------------------------------------------------ */
-
   give(item: string, count: number, where: "hotbar" | "inventory" = "inventory"): void {
     const list = where === "hotbar" ? this.inventory.hotbar : this.inventory.inventory;
     const free = list.findIndex((slot) => !slot);
@@ -175,10 +196,6 @@ export class FakeWorld {
   blockAt(at: Vec3): FakeBlock | undefined {
     return this.blocks.get(key(at));
   }
-
-  /* ------------------------------------------------------------------------------------------------------------ */
-  /* The furnace                                                                                                    */
-  /* ------------------------------------------------------------------------------------------------------------ */
 
   #smeltsTo(item: string): string | undefined {
     for (const recipe of this.recipes?.smeltingFrom(item) ?? []) return recipe.result.item;
@@ -221,10 +238,6 @@ export class FakeWorld {
       }
     }
   }
-
-  /* ------------------------------------------------------------------------------------------------------------ */
-  /* Screens                                                                                                        */
-  /* ------------------------------------------------------------------------------------------------------------ */
 
   /** The slot array and index a reference names in the open screen, or why it names none. */
   #resolve(ref: ScreenSlotRef): { slots: Slot[]; index: number; role: string } | string {
@@ -326,7 +339,7 @@ export class FakeWorld {
     if (there && there.item !== moving.item) return refused(`${to.container}:${to.slot} holds ${there.item}`);
     if (target.role === "output") return refused("nothing can be put into a furnace's output");
     if (target.role === "fuel" && fuelValue(moving.item) === undefined) return refused(`${moving.item} is not a fuel`);
-    if (target.role === "armor" && !/_(helmet|chestplate|leggings|boots)$/.test(moving.item)) return refused(`${moving.item} cannot be worn`);
+    if (target.role === "armor" && armorSlotOf(moving.item) === undefined) return refused(`${moving.item} cannot be worn`);
     if (target.role === "offhand" && moving.item !== "minecraft:shield") return refused(`${moving.item} cannot go in the off hand`);
     const n = Math.min(count ?? moving.count, moving.count, 64 - (there?.count ?? 0));
     source.slots[source.index] = moving.count > n ? { ...moving, count: moving.count - n } : null;
@@ -377,10 +390,6 @@ export class FakeWorld {
     }
     return undefined;
   }
-
-  /* ------------------------------------------------------------------------------------------------------------ */
-  /* The env                                                                                                        */
-  /* ------------------------------------------------------------------------------------------------------------ */
 
   env(extra: { recipesNote?: string; noLookAt?: boolean } = {}): TaskEnv {
     return {

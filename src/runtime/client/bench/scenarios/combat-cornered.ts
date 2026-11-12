@@ -1,4 +1,4 @@
-import type { Vec3 } from "../../player.ts";
+import type { Vec3 } from "../../types.ts";
 import { fillBox } from "../arena.ts";
 import { combat } from "../kit.ts";
 

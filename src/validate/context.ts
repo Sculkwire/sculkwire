@@ -4,12 +4,29 @@
  */
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
-import type { Diagnostic, Range } from "../core/diagnostic.ts";
+import type { Diagnostic, DiagnosticSource, Range } from "../core/diagnostic.ts";
 import type { PackInfo, PackKind } from "../core/project.ts";
-import { classifyFile, type FileKind } from "./classify.ts";
 import { type JsonDocument, LineIndex, parseJson, rangeAtPointer } from "./jsonc.ts";
 
 const SKIP_DIRS: Record<string, true> = { ".git": true, node_modules: true, ".regolith": true, __pycache__: true };
+
+/** A diagnostic as a check reports it: `source` defaults to the one its code names (`sourceOf`). */
+export type Finding = Omit<Diagnostic, "source"> & { source?: DiagnosticSource };
+
+/** Code prefix -> source, where the two differ. */
+const SOURCE_OF_PREFIX: Record<string, DiagnosticSource> = { ts: "typescript", regolith: "manifest" };
+
+/** The `source` of a validator code: its prefix (`schema.required` -> `schema`), with the exceptions above. */
+function sourceOf(code: string): DiagnosticSource {
+  const prefix = code.slice(0, code.indexOf("."));
+  return SOURCE_OF_PREFIX[prefix] ?? (prefix as DiagnosticSource);
+}
+
+/** The diagnostic of a finding, `source` placed after the code. */
+export function toDiagnostic(f: Finding): Diagnostic {
+  const { severity, code, ...rest } = f;
+  return { severity, code, source: f.source ?? sourceOf(code), ...rest };
+}
 
 export interface Pack {
   kind: PackKind;
@@ -73,11 +90,6 @@ export async function loadPack(
   return pack;
 }
 
-export interface FileRef {
-  pack: Pack;
-  rel: string;
-}
-
 export class Context {
   readonly root: string;
   readonly packs: Pack[];
@@ -103,10 +115,6 @@ export class Context {
   /** Project-relative display path of a pack file. */
   label(pack: Pack, rel: string): string {
     return pack.displayDir ? `${pack.displayDir}/${rel}` : rel;
-  }
-
-  kind(pack: Pack, rel: string): FileKind {
-    return classifyFile(pack.kind, rel);
   }
 
   /** File text (BOM kept), or undefined when unreadable. */
@@ -148,6 +156,12 @@ export class Context {
     return doc ? rangeAtPointer(doc, pointer, key) : undefined;
   }
 
+  /** Lines of a text file without line endings, each without a leading BOM; undefined when unreadable. */
+  async lines(pack: Pack, rel: string): Promise<string[] | undefined> {
+    const t = await this.text(pack, rel);
+    return t?.split("\n").map((line) => line.replace(/\r$/, "").replace(/^\uFEFF/, ""));
+  }
+
   /** Range of a 1-based line in a text file. */
   async lineRange(pack: Pack, rel: string, line: number): Promise<Range | undefined> {
     const t = await this.text(pack, rel);
@@ -158,8 +172,8 @@ export class Context {
    * Report a diagnostic located in a pack file. For Regolith build output the path is the source path; when
    * the file was generated or changed by filters the message says so (positions then refer to the build).
    */
-  async add(pack: Pack, rel: string, d: Omit<Diagnostic, "file">): Promise<void> {
-    const out: Diagnostic = { ...d, file: this.label(pack, rel) };
+  async add(pack: Pack, rel: string, d: Omit<Finding, "file">): Promise<void> {
+    const out: Finding = { ...d, file: this.label(pack, rel) };
     if (pack.sourceDir) {
       const note = await this.buildNote(pack, rel);
       if (note) out.message = `${out.message} ${note}`;
@@ -172,20 +186,21 @@ export class Context {
     pack: Pack,
     rel: string,
     pointer: string,
-    d: Omit<Diagnostic, "file" | "range" | "pointer">,
+    d: Omit<Finding, "file" | "range" | "pointer">,
     key = false,
   ): Promise<void> {
     const range = await this.range(pack, rel, pointer, key);
-    const full: Omit<Diagnostic, "file"> = { ...d, pointer };
+    const full: Omit<Finding, "file"> = { ...d, pointer };
     if (range) full.range = range;
     await this.add(pack, rel, full);
   }
 
-  push(d: Diagnostic): void {
+  /** Report a diagnostic with a project-relative `file` (or none); a repeat of one already reported is dropped. */
+  push(d: Finding): void {
     const k = `${d.file}|${d.range?.start.line}:${d.range?.start.column}|${d.code}|${d.message}`;
     if (this.seen.has(k)) return;
     this.seen.add(k);
-    this.diagnostics.push(d);
+    this.diagnostics.push(toDiagnostic(d));
   }
 
   private async buildNote(pack: Pack, rel: string): Promise<string | undefined> {

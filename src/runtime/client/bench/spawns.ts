@@ -2,9 +2,9 @@
  * Which entities are a scenario's spawned mobs, and how many of them the player killed. Pure, so the tests check
  * them on hand-built entity lists and death logs.
  */
-import type { EntityInfo, Vec3 } from "../player.ts";
+import type { EntityInfo, Vec3 } from "../types.ts";
 import type { Death } from "../skills/play.ts";
-import { typeId } from "./arena.ts";
+import { namespaced } from "../tasks/ids.ts";
 import type { MobSpawn, Offset } from "./types.ts";
 
 /** How often the runner looks for the summoned mobs, and for how long at most after the summons were sent. */
@@ -27,7 +27,7 @@ export function claimSpawned(spawns: readonly MobSpawn[], at: (o: Offset) => Vec
   return spawns.map((m, i) => {
     const had = found[i];
     if (had) return had;
-    const t = typeId(m.type);
+    const t = namespaced(m.type);
     const p = at(m.at);
     const pick = list
       .filter((e) => e.typeId === t && !claimed.has(e.id))
@@ -51,7 +51,7 @@ export function countKills(spawns: readonly MobSpawn[], found: readonly (Spawned
   let unresolved = 0;
   spawns.forEach((m, i) => {
     if (found[i]) return;
-    const k = spare.findIndex((d) => d.typeId === typeId(m.type));
+    const k = spare.findIndex((d) => d.typeId === namespaced(m.type));
     if (k < 0) return;
     spare.splice(k, 1);
     unresolved++;

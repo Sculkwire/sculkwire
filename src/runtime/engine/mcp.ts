@@ -7,12 +7,13 @@
 import { readFile } from "node:fs/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { ok, type ToolResult } from "../../core/mcp.ts";
+import { DIFFICULTIES, GAME_TYPES, type Difficulty } from "../../gamefiles/worlds.ts";
+import type { EngineDeps } from "./deps.ts";
 import {
-  GAME_TYPES,
   SETTING_TYPES,
   defaultScreenshotPath,
   engine,
-  type EngineFailure,
   type EnginePlayerState,
   ENGINE_STATUS_DIAGNOSTICS,
   type EngineStatus,
@@ -20,48 +21,18 @@ import {
   type WorldChange,
   type WorldState,
 } from "./engine.ts";
-import { DIFFICULTIES, type Difficulty } from "../../gamefiles/worlds.ts";
-import { KEYBOARD_LOCK_NOTE, LOCK_MODES, lockText } from "./lock.ts";
+import { failureSchema } from "./failure.ts";
 import { registerInventoryTools } from "./inventory.ts";
-import { registerWorkstationTools } from "./workstation.ts";
+import { KEYBOARD_LOCK_NOTE, LOCK_MODES, lockText } from "./lock.ts";
 import { changeText, getSetting, listSettings, setSetting } from "./settings.ts";
+import { failureResult, invalidParamsResult, prerequisiteResult } from "./toolresult.ts";
 import { UI_BUTTONS, UI_CONTROL_TYPES, UI_KEY_ACTIONS, uiControlsText, uiScreenText } from "./ui.ts";
+import { registerWorkstationTools } from "./workstation.ts";
+import { isPlainObject } from "./wire.ts";
 import { getWorldSettings, setWorldSettings } from "./world.ts";
-
-type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
-type ToolResult = { content: Content[]; structuredContent?: Record<string, unknown>; isError?: boolean };
-
-function ok(text: string, structured: object): ToolResult {
-  return { content: [{ type: "text", text }], structuredContent: { ...structured } };
-}
-
-function failure(f: EngineFailure): ToolResult {
-  const anchor = f.anchor ? ` anchor ${f.anchor}` : "";
-  const text = `${f.reason} (${f.code})${anchor}: ${f.message}`;
-  return { content: [{ type: "text", text }], structuredContent: { ...f }, isError: true };
-}
-
-/** Attach errors carry no RPC code. They are always a prerequisite the caller can fix. */
-function failed(err: unknown): ToolResult {
-  const text = err instanceof Error ? err.message : String(err);
-  return { content: [{ type: "text", text }], structuredContent: { ok: false, reason: "prerequisite", message: text }, isError: true };
-}
-
-/** Arguments this tool can see are wrong before anything is sent, in the shape the engine's own -32602 answers use. */
-function invalidParams(message: string): ToolResult {
-  return failure({ ok: false, code: -32602, reason: "invalid_params", message });
-}
 
 /** Output schemas, built from the zod sculkwire depends on. Exported so tests check real agent answers against them. */
 export function schemas() {
-  const failureSchema = {
-    ok: z.boolean(),
-    code: z.number().optional(),
-    reason: z.string().optional(),
-    anchor: z.string().optional(),
-    message: z.string().optional(),
-  };
-
   const statusSchema = {
     ...failureSchema,
     build: z.string().optional(),
@@ -217,8 +188,8 @@ export function schemas() {
  * became of the click before) and `sent` (messages sent). Only these fields: the answer's `screen` is a bare name.
  */
 function delivery(value: unknown): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
-  const answer = value as Record<string, unknown>;
+  if (!isPlainObject(value)) return {};
+  const answer = value;
   const picked: Record<string, unknown> = {};
   if (answer.route === "window" || answer.route === "gameinput") picked.route = answer.route;
   if (answer.via === "child" || answer.via === "class") picked.via = answer.via;
@@ -271,9 +242,9 @@ function worldText(s: WorldState, source: string): string {
   return parts.join(", ");
 }
 
-export function register(server: McpServer): void {
+export function register(server: McpServer, deps: EngineDeps): void {
   const { statusSchema, commandSchema, tickSchema, screenshotSchema, playerSchema, lockSchema, settingsSchema, worldSchema, uiSchema } = schemas();
-  registerInventoryTools(server);
+  registerInventoryTools(server, deps.script);
   registerWorkstationTools(server);
 
   server.registerTool(
@@ -293,7 +264,7 @@ export function register(server: McpServer): void {
         const status = await engine.attach();
         return ok(statusText(status), { ok: true, ...status });
       } catch (err) {
-        return failed(err);
+        return prerequisiteResult(err);
       }
     },
   );
@@ -310,7 +281,7 @@ export function register(server: McpServer): void {
     },
     async () => {
       const result = await engine.status();
-      return result.ok ? ok(statusText(result.value), { ok: true, ...result.value }) : failure(result);
+      return result.ok ? ok(statusText(result.value), { ok: true, ...result.value }) : failureResult(result);
     },
   );
 
@@ -329,7 +300,7 @@ export function register(server: McpServer): void {
     },
     async ({ command }) => {
       const result = await engine.command(command);
-      if (!result.ok) return failure(result);
+      if (!result.ok) return failureResult(result);
       const { success, message } = result.value;
       const text = `${success === false ? "failed" : success ? "ok" : "no output"}${message ? `: ${message}` : ""}`;
       return ok(text, { ok: true, command, success, message });
@@ -348,7 +319,7 @@ export function register(server: McpServer): void {
     },
     async () => {
       const result = await engine.playerState();
-      return result.ok ? ok(playerText(result.value), { ok: true, ...result.value }) : failure(result);
+      return result.ok ? ok(playerText(result.value), { ok: true, ...result.value }) : failureResult(result);
     },
   );
 
@@ -373,7 +344,7 @@ export function register(server: McpServer): void {
         ...(step !== undefined ? { step } : {}),
         ...(scale !== undefined ? { scale } : {}),
       });
-      return result.ok ? ok(tickText(result.value), { ok: true, ...result.value }) : failure(result);
+      return result.ok ? ok(tickText(result.value), { ok: true, ...result.value }) : failureResult(result);
     },
   );
 
@@ -391,9 +362,9 @@ export function register(server: McpServer): void {
     },
     async ({ path }) => {
       const result = await engine.screenshot(path ?? defaultScreenshotPath());
-      if (!result.ok) return failure(result);
+      if (!result.ok) return failureResult(result);
       const text = result.value.bytes === undefined ? result.value.path : `${result.value.path} (${result.value.bytes} bytes)`;
-      const content: Content[] = [];
+      const content: ToolResult["content"] = [];
       try {
         const mimeType = result.value.format === "jpeg" ? "image/jpeg" : "image/png";
         content.push({ type: "image", data: (await readFile(result.value.path)).toString("base64"), mimeType });
@@ -426,7 +397,7 @@ export function register(server: McpServer): void {
       const result = await engine.lock.request(mode);
       if (!result.ok) {
         const keyboard = result.reason === "not_attached" ? { ...result, message: `${result.message}. ${KEYBOARD_LOCK_NOTE}` } : result;
-        return failure(keyboard);
+        return failureResult(keyboard);
       }
       // Report the desktop focus watcher so a focus failure can be told apart.
       const focusWatch = engine.focusWatch();
@@ -457,20 +428,20 @@ export function register(server: McpServer): void {
       try {
         if (action === "list") {
           const result = await listSettings(filter ?? id);
-          if (!result.ok) return failure(result);
+          if (!result.ok) return failureResult(result);
           const { source, settings } = result.value;
           return ok(`${settings.length} setting(s) from ${source}`, { ok: true, source, settings });
         }
         const key = id?.trim();
-        if (!key) return failure({ ok: false, code: -32602, reason: "invalid_params", message: `${action} needs id` });
+        if (!key) return invalidParamsResult(`${action} needs id`);
         if (action === "get") {
           const result = await getSetting(key);
-          if (!result.ok) return failure(result);
+          if (!result.ok) return failureResult(result);
           return ok(settingText(key, result.value.setting.value, result.value.source), { ok: true, ...result.value });
         }
-        if (value === undefined) return failure({ ok: false, code: -32602, reason: "invalid_params", message: "set needs value" });
+        if (value === undefined) return invalidParamsResult("set needs value");
         const result = await setSetting(key, value);
-        if (!result.ok) return failure(result);
+        if (!result.ok) return failureResult(result);
         const change = result.value;
         return ok(changeText(change), {
           ok: true,
@@ -481,7 +452,7 @@ export function register(server: McpServer): void {
           ...(change.saved !== undefined ? { saved: change.saved } : {}),
         });
       } catch (err) {
-        return failed(err);
+        return prerequisiteResult(err);
       }
     },
   );
@@ -512,8 +483,8 @@ export function register(server: McpServer): void {
     async ({ action, world, gamerules, difficulty, gameType, time, weather }) => {
       try {
         if (action === "get") {
-          const result = await getWorldSettings(world);
-          if (!result.ok) return failure(result);
+          const result = await getWorldSettings(world, { loaded: deps.script.loadedWorld });
+          if (!result.ok) return failureResult(result);
           return ok(worldText(result.value.settings, result.value.source), { ok: true, ...result.value });
         }
         const change: WorldChange = {
@@ -523,11 +494,11 @@ export function register(server: McpServer): void {
           ...(time !== undefined ? { time } : {}),
           ...(weather !== undefined ? { weather } : {}),
         };
-        const result = await setWorldSettings(change, world);
-        if (!result.ok) return failure(result);
+        const result = await setWorldSettings(change, world, { loaded: deps.script.loadedWorld });
+        if (!result.ok) return failureResult(result);
         return ok(worldText(result.value.settings, result.value.source), { ok: true, ...result.value });
       } catch (err) {
-        return failed(err);
+        return prerequisiteResult(err);
       }
     },
   );
@@ -561,47 +532,43 @@ export function register(server: McpServer): void {
       outputSchema: uiSchema,
     },
     async ({ action, name, filter, key: chord, keyAction, text, x, y, button, delta }) => {
-      try {
-        if (action === "screen") {
-          const result = await engine.uiScreen();
-          return result.ok ? ok(uiScreenText(result.value), { ok: true, screen: result.value }) : failure(result);
-        }
-        if (action === "controls") {
-          const result = await engine.uiControls(filter);
-          if (!result.ok) return failure(result);
-          return ok(uiControlsText(result.value, filter), { ok: true, controls: result.value });
-        }
-        if (action === "press") {
-          const control = name?.trim();
-          if (!control) return invalidParams("press needs name: the control as `controls` lists it");
-          const result = await engine.uiPress(control);
-          return result.ok ? ok(`pressed ${control}`, { ok: true, pressed: control }) : failure(result);
-        }
-        if (action === "key") {
-          const sent = chord?.trim();
-          if (!sent) return invalidParams("key needs key, e.g. Escape or ctrl+a");
-          const result = await engine.uiKey(sent, keyAction);
-          return result.ok
-            ? ok(`sent ${sent}${keyAction ? ` (${keyAction})` : ""}`, { ok: true, key: sent, ...(keyAction ? { keyAction } : {}), ...delivery(result.value) })
-            : failure(result);
-        }
-        if (action === "text") {
-          if (!text) return invalidParams("text needs the text to type");
-          const result = await engine.uiText(text);
-          return result.ok ? ok(`typed ${text.length} character(s)`, { ok: true, typed: text.length, ...delivery(result.value) }) : failure(result);
-        }
-        if (x === undefined || y === undefined) return invalidParams(`${action} needs x and y in client pixels`);
-        if (action === "click") {
-          const result = await engine.uiClick(x, y, button);
-          const at = { x, y, button: button ?? "left" };
-          return result.ok ? ok(`clicked ${at.button} at ${x},${y}`, { ok: true, click: at, ...delivery(result.value) }) : failure(result);
-        }
-        if (delta === undefined) return invalidParams("scroll needs delta: whole notches, positive up");
-        const result = await engine.uiScroll(x, y, delta);
-        return result.ok ? ok(`scrolled ${delta} at ${x},${y}`, { ok: true, scroll: { x, y, delta }, ...delivery(result.value) }) : failure(result);
-      } catch (err) {
-        return failed(err);
+      if (action === "screen") {
+        const result = await engine.uiScreen();
+        return result.ok ? ok(uiScreenText(result.value), { ok: true, screen: result.value }) : failureResult(result);
       }
+      if (action === "controls") {
+        const result = await engine.uiControls(filter);
+        if (!result.ok) return failureResult(result);
+        return ok(uiControlsText(result.value, filter), { ok: true, controls: result.value });
+      }
+      if (action === "press") {
+        const control = name?.trim();
+        if (!control) return invalidParamsResult("press needs name: the control as `controls` lists it");
+        const result = await engine.uiPress(control);
+        return result.ok ? ok(`pressed ${control}`, { ok: true, pressed: control }) : failureResult(result);
+      }
+      if (action === "key") {
+        const sent = chord?.trim();
+        if (!sent) return invalidParamsResult("key needs key, e.g. Escape or ctrl+a");
+        const result = await engine.uiKey(sent, keyAction);
+        return result.ok
+          ? ok(`sent ${sent}${keyAction ? ` (${keyAction})` : ""}`, { ok: true, key: sent, ...(keyAction ? { keyAction } : {}), ...delivery(result.value) })
+          : failureResult(result);
+      }
+      if (action === "text") {
+        if (!text) return invalidParamsResult("text needs the text to type");
+        const result = await engine.uiText(text);
+        return result.ok ? ok(`typed ${text.length} character(s)`, { ok: true, typed: text.length, ...delivery(result.value) }) : failureResult(result);
+      }
+      if (x === undefined || y === undefined) return invalidParamsResult(`${action} needs x and y in client pixels`);
+      if (action === "click") {
+        const result = await engine.uiClick(x, y, button);
+        const at = { x, y, button: button ?? "left" };
+        return result.ok ? ok(`clicked ${at.button} at ${x},${y}`, { ok: true, click: at, ...delivery(result.value) }) : failureResult(result);
+      }
+      if (delta === undefined) return invalidParamsResult("scroll needs delta: whole notches, positive up");
+      const result = await engine.uiScroll(x, y, delta);
+      return result.ok ? ok(`scrolled ${delta} at ${x},${y}`, { ok: true, scroll: { x, y, delta }, ...delivery(result.value) }) : failureResult(result);
     },
   );
 }

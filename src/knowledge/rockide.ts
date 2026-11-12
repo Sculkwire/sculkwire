@@ -3,44 +3,31 @@
  * per `format_version`. Fetched at runtime into `cacheDir('knowledge','rockide')` and kept on the newest release.
  *
  * Cache (`tracked.ts`): one directory per release tag (`<tag>/`, the source tarball of the tag with `schema/` and
- * `scripts/compile.ts`, which the validator parses for routing) plus `current.json` naming the release in use. The
+ * `scripts/compile.ts`, whose entry tables `rockideRoutes` reads for the validator) plus `current.json` naming the
+ * release in use. The
  * release asset `schemas.tar.gz` is not used: it holds only compiled bundles. The tags are re-checked at most once a
  * day (`git ls-remote --tags`), or on `refresh` (`sculk knowledge update`); offline and failed checks keep the last copy.
  */
 import { existsSync } from "node:fs";
 import { readdir, readFile, rm } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
-import { parse as parseJsonc } from "jsonc-parser";
 import { x as untar } from "tar";
-import { cacheDir } from "../core/paths.ts";
+import { errorMessage } from "../core/errors.ts";
 import { writeFileAtomic } from "../core/fs.ts";
+import { memoAsync } from "../core/memo.ts";
+import { cacheDir } from "../core/paths.ts";
+import type { PackKind } from "../core/project.ts";
+import { compareDotted } from "../core/version.ts";
+import { readSchemaJson } from "./metadata.ts";
 import { httpBytes, runOk } from "./net.ts";
-import { CHECK_INTERVAL_MS, ensureTracked, type Marker, readTracked, type ReleaseFetcher, resetTrackedBackoff, type TrackedSpec } from "./tracked.ts";
+import { ensureTracked, type Marker, readTracked, type ReleaseFetcher, type TrackedCopy, type TrackedSpec } from "./tracked.ts";
 
 export const ROCKIDE_REPO = "https://github.com/rockide/schemas";
-/** The release tags are re-checked at most this often. */
-export const ROCKIDE_REFRESH_MS = CHECK_INTERVAL_MS;
 
 export interface RockideRelease {
   /** Release tag (`0.1.4`). */
   version: string;
   commit: string;
-}
-
-export interface RockideCheckout {
-  /** Directory holding `schema/` and `scripts/compile.ts`. */
-  root: string;
-  /** Release tag in use. */
-  release: string;
-  commit: string;
-  /** When this release was downloaded. */
-  fetchedAt: string;
-  /** When the release tags were last checked. */
-  checkedAt: string;
-  /** Newest release seen upstream. */
-  latest: string;
-  /** Set when the check for a newer release failed and the cached copy is used. */
-  stale?: string;
 }
 
 export type RockideFetcher = ReleaseFetcher<RockideRelease>;
@@ -57,7 +44,7 @@ export function newestRelease(lsRemote: string): RockideRelease | undefined {
   let best: { tag: string; version: string } | undefined;
   for (const tag of commits.keys()) {
     const version = STABLE_TAG.exec(tag)?.[1];
-    if (version && (!best || compareVersions(version, best.version) > 0)) best = { tag, version };
+    if (version && (!best || compareDotted(version, best.version) > 0)) best = { tag, version };
   }
   return best ? { version: best.tag, commit: commits.get(best.tag) as string } : undefined;
 }
@@ -70,7 +57,7 @@ const githubFetcher: RockideFetcher = {
     return release;
   },
   async download(release, dest) {
-    const bytes = await httpBytes(`https://codeload.github.com/rockide/schemas/tar.gz/${release.commit}`);
+    const bytes = await httpBytes(`${ROCKIDE_REPO.replace("://github.com/", "://codeload.github.com/")}/tar.gz/${release.commit}`);
     const archive = join(dest, ".schemas.tar.gz");
     await writeFileAtomic(archive, bytes);
     await untar({ file: archive, cwd: dest, strip: 1 });
@@ -104,31 +91,47 @@ export interface EnsureRockideOptions {
 }
 
 /**
- * The cached rockide/schemas release, downloading or switching to a newer release when due. Throws only when no
- * copy exists and one cannot be fetched (offline, network failure); a failed update falls back to the cached copy (`stale`).
+ * The cached rockide/schemas release (its `root` holds `schema/` and `scripts/compile.ts`), downloading or switching
+ * to a newer release when due. Throws only when no copy exists and one cannot be fetched (offline, network failure);
+ * a failed update falls back to the cached copy (`stale`).
  */
-export async function ensureRockideSchemas(opts: EnsureRockideOptions = {}): Promise<RockideCheckout> {
-  const c = await ensureTracked(SPEC, githubFetcher, opts);
-  const out: RockideCheckout = { root: c.root, release: c.release.version, commit: c.release.commit, fetchedAt: c.fetchedAt, checkedAt: c.checkedAt, latest: c.latest };
-  if (c.stale) out.stale = c.stale;
-  return out;
+export function ensureRockideSchemas(opts: EnsureRockideOptions = {}): Promise<TrackedCopy<RockideRelease>> {
+  return ensureTracked(SPEC, githubFetcher, opts);
 }
 
 /** The copy in use without any network or download, for status reports. */
-export async function rockideStatus(): Promise<{ release: string; commit: string; fetchedAt: string; checkedAt: string; latest: string; error?: string } | undefined> {
-  const m = await readTracked(SPEC);
-  if (!m) return undefined;
-  const out = { release: m.release.version, commit: m.release.commit, fetchedAt: m.fetchedAt, checkedAt: m.checkedAt, latest: m.latest ?? m.release.version };
-  return m.error ? { ...out, error: m.error } : out;
+export function rockideStatus(): Promise<Marker<RockideRelease> | undefined> {
+  return readTracked(SPEC);
 }
 
-/** Test hook: forget the per-process failure back-off. */
-export function resetRockideBackoff(): void {
-  resetTrackedBackoff("rockide");
+/** One entry of rockide's own file -> schema routing: globs relative to a pack root and the schema they select. */
+export interface RockideRoute {
+  packKind: PackKind;
+  /** VS Code `fileMatch` globs; a leading `!` excludes. */
+  fileMatch: string[];
+  /** Absolute schema file. */
+  file: string;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Component lookup
+/** Rockide's routing, parsed from the BP/RP/SP entry tables of its `scripts/compile.ts`. */
+export async function rockideRoutes(root: string): Promise<RockideRoute[]> {
+  const src = await readFile(join(root, "scripts", "compile.ts"), "utf8");
+  const routes: RockideRoute[] = [];
+  for (const [constName, packKind] of [
+    ["BP_ENTRIES", "behavior"],
+    ["RP_ENTRIES", "resource"],
+    ["SP_ENTRIES", "skin"],
+  ] as [string, PackKind][]) {
+    const block = new RegExp(`const ${constName}[^=]*=\\s*\\[([\\s\\S]*?)\\n\\];`).exec(src)?.[1];
+    if (!block) continue;
+    for (const m of block.matchAll(/fileMatch:\s*(\[[^\]]*\]|"[^"]*"),\s*url:\s*"([^"]+)"/g)) {
+      const raw = m[1] as string;
+      const fileMatch = (raw.startsWith("[") ? JSON.parse(raw.replace(/,\s*\]/, "]")) : [JSON.parse(raw)]) as string[];
+      routes.push({ packKind, fileMatch, file: join(root, m[2] as string) });
+    }
+  }
+  return routes;
+}
 
 type Json = Record<string, unknown>;
 
@@ -197,27 +200,6 @@ const VERSION_DIR = /^\d+(?:\.\d+)+$/;
 const ENUM_CAP = 50;
 const TEXT_ENUM_CAP = 12;
 
-function compareVersions(a: string, b: string): number {
-  const x = a.split(".").map(Number);
-  const y = b.split(".").map(Number);
-  for (let i = 0; i < Math.max(x.length, y.length); i++) {
-    const d = (x[i] ?? 0) - (y[i] ?? 0);
-    if (d) return d;
-  }
-  return 0;
-}
-
-const fileCache = new Map<string, Promise<unknown>>();
-
-function readSchema(path: string): Promise<unknown> {
-  let p = fileCache.get(path);
-  if (!p) {
-    p = readFile(path, "utf8").then((t) => parseJsonc(t) as unknown);
-    fileCache.set(path, p);
-  }
-  return p;
-}
-
 const isObj = (v: unknown): v is Json => !!v && typeof v === "object" && !Array.isArray(v);
 
 function atPointer(doc: unknown, pointer: string): unknown {
@@ -235,49 +217,43 @@ function splitRef(ref: string, fromFile: string): { file: string; pointer: strin
   return { file: path ? join(dirname(fromFile), path) : fromFile, pointer };
 }
 
-const indexMemo = new Map<string, Promise<Map<string, IndexEntry[]>>>();
+const indexMemo = memoAsync<Map<string, IndexEntry[]>>();
 
 /** id -> every `<area>/<kind>/<version>/<group>/_index.json` entry naming it. */
 function componentIndex(root: string): Promise<Map<string, IndexEntry[]>> {
-  let p = indexMemo.get(root);
-  if (!p) {
-    p = (async () => {
-      const out = new Map<string, IndexEntry[]>();
-      const base = join(root, "schema", "bedrock");
-      const dirs = async (d: string) =>
-        (await readdir(d, { withFileTypes: true }).catch(() => [])).filter((e) => e.isDirectory()).map((e) => e.name).sort();
-      for (const area of await dirs(base)) {
-        for (const kind of await dirs(join(base, area))) {
-          for (const version of (await dirs(join(base, area, kind))).filter((v) => VERSION_DIR.test(v))) {
-            for (const group of await dirs(join(base, area, kind, version))) {
-              const indexFile = join(base, area, kind, version, group, "_index.json");
-              if (!existsSync(indexFile)) continue;
-              let index: unknown;
-              try {
-                index = await readSchema(indexFile);
-              } catch {
-                continue;
-              }
-              const props = isObj(index) && isObj(index.properties) ? index.properties : {};
-              for (const [id, node] of Object.entries(props)) {
-                if (!id.includes(":") || !isObj(node)) continue;
-                const { file, pointer } =
-                  typeof node.$ref === "string" ? splitRef(node.$ref, indexFile) : { file: indexFile, pointer: `/properties/${id.replace(/~/g, "~0").replace(/\//g, "~1")}` };
-                const entry: IndexEntry = { scope: `${area}/${kind}/${group}`, version, indexFile, node, target: posix(root, file, pointer) };
-                const list = out.get(id) ?? [];
-                list.push(entry);
-                out.set(id, list);
-              }
+  return indexMemo(root, async () => {
+    const out = new Map<string, IndexEntry[]>();
+    const base = join(root, "schema", "bedrock");
+    const dirs = async (d: string) =>
+      (await readdir(d, { withFileTypes: true }).catch(() => [])).filter((e) => e.isDirectory()).map((e) => e.name).sort();
+    for (const area of await dirs(base)) {
+      for (const kind of await dirs(join(base, area))) {
+        for (const version of (await dirs(join(base, area, kind))).filter((v) => VERSION_DIR.test(v))) {
+          for (const group of await dirs(join(base, area, kind, version))) {
+            const indexFile = join(base, area, kind, version, group, "_index.json");
+            if (!existsSync(indexFile)) continue;
+            let index: unknown;
+            try {
+              index = await readSchemaJson(indexFile);
+            } catch {
+              continue;
+            }
+            const props = isObj(index) && isObj(index.properties) ? index.properties : {};
+            for (const [id, node] of Object.entries(props)) {
+              if (!id.includes(":") || !isObj(node)) continue;
+              const { file, pointer } =
+                typeof node.$ref === "string" ? splitRef(node.$ref, indexFile) : { file: indexFile, pointer: `/properties/${id.replace(/~/g, "~0").replace(/\//g, "~1")}` };
+              const entry: IndexEntry = { scope: `${area}/${kind}/${group}`, version, indexFile, node, target: posix(root, file, pointer) };
+              const list = out.get(id) ?? [];
+              list.push(entry);
+              out.set(id, list);
             }
           }
         }
       }
-      return out;
-    })();
-    p.catch(() => indexMemo.delete(root));
-    indexMemo.set(root, p);
-  }
-  return p;
+    }
+    return out;
+  });
 }
 
 /** Every component id rockide knows (for suggestions). */
@@ -292,7 +268,7 @@ async function deref(node: unknown, file: string, depth = 0): Promise<{ node: Js
   const { file: f, pointer } = splitRef(node.$ref, file);
   let target: unknown;
   try {
-    target = atPointer(await readSchema(f), pointer);
+    target = atPointer(await readSchemaJson(f), pointer);
   } catch {
     return { node, file };
   }
@@ -385,8 +361,8 @@ export async function rockideComponent(root: string, id: string, gameVersion: st
   for (const e of entries) byScope.set(e.scope, [...(byScope.get(e.scope) ?? []), e]);
   const out: RockideComponent[] = [];
   for (const [scope, list] of [...byScope].sort(([a], [b]) => a.localeCompare(b))) {
-    list.sort((a, b) => compareVersions(a.version, b.version));
-    const fit = list.filter((e) => compareVersions(e.version, game) <= 0);
+    list.sort((a, b) => compareDotted(a.version, b.version));
+    const fit = list.filter((e) => compareDotted(e.version, game) <= 0);
     const sel = (fit.at(-1) ?? list.at(-1)) as IndexEntry;
     const changes: RockideComponent["changes"] = [];
     for (const e of list) if (changes.at(-1)?.file !== e.target) changes.push({ formatVersion: e.version, file: e.target });
@@ -411,22 +387,22 @@ export async function rockideComponent(root: string, id: string, gameVersion: st
 
 /** Fail-open lookup for `component_lookup`: no cached copy (or offline without one) yields a note, never an error. */
 export async function lookupRockide(id: string, gameVersion: string, opts: EnsureRockideOptions = {}): Promise<RockideLookup> {
-  let checkout: RockideCheckout;
+  let checkout: TrackedCopy<RockideRelease>;
   try {
     checkout = await ensureRockideSchemas(opts);
   } catch (err) {
-    return { repo: ROCKIDE_REPO, gameVersion, matches: [], note: `rockide/schemas unavailable: ${err instanceof Error ? err.message : String(err)}` };
+    return { repo: ROCKIDE_REPO, gameVersion, matches: [], note: `rockide/schemas unavailable: ${errorMessage(err)}` };
   }
   const r: RockideLookup = {
     repo: ROCKIDE_REPO,
-    release: checkout.release,
-    commit: checkout.commit,
+    release: checkout.release.version,
+    commit: checkout.release.commit,
     latest: checkout.latest,
     root: checkout.root,
     gameVersion,
     matches: await rockideComponent(checkout.root, id, gameVersion),
   };
-  if (checkout.stale) r.note = `using cached release ${checkout.release}; update failed: ${checkout.stale}`;
+  if (checkout.stale) r.note = `using cached release ${checkout.release.version}; update failed: ${checkout.stale}`;
   return r;
 }
 

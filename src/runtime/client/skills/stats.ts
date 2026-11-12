@@ -5,7 +5,7 @@
  * for its per-run trace.
  */
 import type { PlayerController } from "../player.ts";
-import type { FightStats } from "./types.ts";
+import type { Counters, FightStats } from "./types.ts";
 
 /** One mob as a fight tick saw it. */
 export interface TraceMob {
@@ -59,19 +59,7 @@ export interface TraceFrame {
   room?: number;
 }
 
-export interface CombatStats {
-  /** Attack clicks the skills sent. */
-  swings: number;
-  /** Swings that struck the target or another hostile mob. */
-  hits: number;
-  /** Swings that struck nothing (or nothing hostile): `swings === hits + misses` once every swing is judged. */
-  misses: number;
-  crits: number;
-  /** Health drops the fight saw, and the health they took. */
-  hitsTaken: number;
-  damageTaken: number;
-  /** Hits the raised shield took (the off-hand item's durability went up while it was raised). */
-  blocked: number;
+export interface CombatStats extends Counters {
   /** Entity id -> type of everything a swing struck. */
   struck: Map<string, string>;
   /** Entities a `use_on` skill hit. */
@@ -102,7 +90,7 @@ export interface CombatStats {
 }
 
 /** Lines kept in `events`. */
-export const MAX_EVENTS = 1200;
+const MAX_EVENTS = 1200;
 /** Frames kept in `trace` (200 s of fighting at 40 ticks a second). */
 export const MAX_TRACE_FRAMES = 8000;
 
@@ -112,7 +100,7 @@ const TRACING = new WeakSet<PlayerController>();
 /** When (the hands' clock) tracing started for a stats object: frame time 0. */
 const TRACE_SINCE = new WeakMap<CombatStats, number>();
 
-export function newStats(): CombatStats {
+function newStats(): CombatStats {
   return { swings: 0, hits: 0, misses: 0, crits: 0, hitsTaken: 0, damageTaken: 0, blocked: 0, struck: new Map(), usedOn: new Map(), events: [], nextAttack: new Map(), struckAt: new Map(), creepers: new Map(), spears: new Set() };
 }
 

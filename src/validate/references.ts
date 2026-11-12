@@ -4,6 +4,7 @@
  * range of the referencing JSON value.
  */
 import type { Severity } from "../core/diagnostic.ts";
+import { IMAGE_EXT, SOUND_EXT } from "./classify.ts";
 import type { Context, Pack } from "./context.ts";
 import { pointerJoin } from "./jsonc.ts";
 
@@ -37,8 +38,6 @@ export type Index = Map<RefKind, Map<string, { pack: Pack; rel: string }[]>>;
 /** Vanilla names per kind (serializable). */
 export type VanillaNames = Partial<Record<RefKind | "biome" | "effect" | "enchantment" | "feature" | "dimension", Set<string>>>;
 
-const IMAGE_EXT = /\.(png|tga|jpe?g)$/i;
-const SOUND_EXT = /\.(ogg|wav|fsb|mp3)$/i;
 const BUILTIN_TEXTURES: Record<string, true> = { "atlas.terrain": true, "atlas.items": true, "textures/misc/missing_texture": true };
 const LOOT_PATH = /^loot_tables\/.+\.json$/;
 const TRADE_PATH = /^trading\/.+\.json$/;
@@ -271,7 +270,6 @@ export class ReferenceChecker {
       await this.ctx.at(pack, rel, pointer, {
         severity: "error",
         code: `reference.${SLUG[kind]}-missing`,
-        source: "reference",
         message: `${LABEL[kind]} '${name}' exists but the game cannot load it (see its JSON errors)`,
       });
       return;
@@ -287,7 +285,6 @@ export class ReferenceChecker {
     const d = {
       severity: sev,
       code: `reference.${SLUG[kind]}-missing`,
-      source: "reference" as const,
       message: `${prefix}${LABEL[kind]} '${name}' not found in ${where}`,
     };
     await this.ctx.at(
@@ -357,7 +354,6 @@ export class ReferenceChecker {
           await this.ctx.at(w.pack, w.rel, pointer, {
             severity,
             code: `reference.duplicate-${SLUG[kind]}`,
-            source: "reference",
             message: `${LABEL[kind]} '${name}' is also defined in ${firstLabel}`,
           });
         }
@@ -366,7 +362,7 @@ export class ReferenceChecker {
   }
 
   async mcfunction(pack: Pack, rel: string): Promise<void> {
-    const lines = ((await this.ctx.text(pack, rel)) ?? "").split(/\r?\n/);
+    const lines = (await this.ctx.lines(pack, rel)) ?? [];
     for (let n = 0; n < lines.length; n++) {
       const line = lines[n] as string;
       if (line.trimStart().startsWith("#")) continue;
@@ -433,7 +429,6 @@ export class ReferenceChecker {
         await this.ctx.at(pack, rel, `${base}/scripts/animate/${i}`, {
           severity: "error",
           code: "reference.animate-undeclared",
-          source: "reference",
           message: `animate entry '${name}' is not a key of description.animations`,
         });
       }
@@ -456,7 +451,6 @@ export class ReferenceChecker {
       await this.ctx.at(pack, rel, `${base}/identifier`, {
         severity: "warning",
         code: "reference.client-entity-missing",
-        source: "reference",
         message: `entity '${ident}' has no client entity in the resource pack (it will render invisible)`,
       });
     }
@@ -464,7 +458,6 @@ export class ReferenceChecker {
       await this.ctx.at(pack, rel, `${base}/identifier`, {
         severity: "warning",
         code: "lang.key-missing",
-        source: "lang",
         message: `lang key 'entity.${ident}.name' missing from texts/en_US.lang`,
         hint: `add 'entity.${ident}.name=<Name>' to texts/en_US.lang`,
       });
@@ -497,7 +490,6 @@ export class ReferenceChecker {
       await this.ctx.at(pack, rel, "/minecraft:item/description/identifier", {
         severity: "warning",
         code: "lang.key-missing",
-        source: "lang",
         message: `lang key 'item.${ident}' missing from texts/en_US.lang and no minecraft:display_name`,
       });
     }
@@ -539,7 +531,6 @@ export class ReferenceChecker {
       await this.ctx.at(pack, rel, "/minecraft:block/description/identifier", {
         severity: "warning",
         code: "lang.key-missing",
-        source: "lang",
         message: `lang key 'tile.${ident}.name' missing from texts/en_US.lang and no minecraft:display_name`,
       });
     }
@@ -663,7 +654,6 @@ export class ReferenceChecker {
       await this.ctx.at(pack, rel, `${base}/identifier`, {
         severity: "warning",
         code: "reference.entity-missing",
-        source: "reference",
         message: `client entity '${ident}' has no behavior-pack entity in the add-on${this.opts.vanilla ? " or vanilla" : ""}`,
       });
     }

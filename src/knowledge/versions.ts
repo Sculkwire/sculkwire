@@ -4,7 +4,6 @@
  * Pins older than a day are re-resolved in the background by `getPins` (the call returns the cached pins at once);
  * a failed refresh keeps them, so new samples tags, npm builds, BDS builds and changelogs are picked up within a day.
  */
-import { readFile } from "node:fs/promises";
 import { cacheDir } from "../core/paths.ts";
 import {
   type Channel,
@@ -14,13 +13,14 @@ import {
   type GameVersion,
   parseGameVersion,
 } from "../core/version.ts";
-import { writeJsonAtomic } from "../core/fs.ts";
+import { errorMessage } from "../core/errors.ts";
+import { readJsonOr, writeJsonAtomic } from "../core/fs.ts";
 import { httpJson, OfflineMissingError, progress, runOk, single } from "./net.ts";
-import { CHECK_INTERVAL_MS, RETRY_AFTER_FAILURE_MS } from "./tracked.ts";
+import { CHECK_INTERVAL_MS, upstreamBackoff } from "./tracked.ts";
 
 export const SAMPLES_REPO = "https://github.com/Mojang/bedrock-samples";
-export const BDS_LINKS_URL = "https://net-secondary.web.minecraft-services.net/api/v1.0/download/links";
-export const ZENDESK_SECTIONS: Record<Channel, string> = { stable: "360001186971", preview: "360001185332" };
+const BDS_LINKS_URL = "https://net-secondary.web.minecraft-services.net/api/v1.0/download/links";
+const ZENDESK_SECTIONS: Record<Channel, string> = { stable: "360001186971", preview: "360001185332" };
 export const zendeskArticlesUrl = (channel: Channel): string =>
   `https://feedback.minecraft.net/api/v2/help_center/en-us/sections/${ZENDESK_SECTIONS[channel]}/articles.json`;
 
@@ -38,9 +38,6 @@ export const TYPINGS_PACKAGES = [
   "@minecraft/diagnostics",
   "@minecraft/server-graphics",
 ] as const;
-
-// ---------------------------------------------------------------------------------------------
-// npm prerelease mapping
 
 export type NpmKind = "release" | "beta" | "rc" | "preview" | "other";
 
@@ -160,9 +157,6 @@ export function pickNpmVersion(
   return release ?? previewBeta ?? stableBeta;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Changelog titles
-
 /**
  * Game version from a feedback.minecraft.net changelog title, or undefined for non-Bedrock (Java) articles.
  * Marketing numbers (`26.62`, `26.70.23`) map to internal `1.26.62`, `1.26.70.23`.
@@ -176,9 +170,6 @@ export function changelogTitleVersion(title: string): string | undefined {
   while (nums.length < 3) nums.push(0);
   return nums.slice(0, 4).join(".");
 }
-
-// ---------------------------------------------------------------------------------------------
-// Pins
 
 export interface SamplesTag {
   tag: string;
@@ -218,18 +209,9 @@ export interface VersionPins {
 export const pinsPath = (): string => cacheDir("knowledge", "versions.json");
 
 export async function readPins(): Promise<VersionPins | undefined> {
-  try {
-    const pins = JSON.parse(await readFile(pinsPath(), "utf8")) as VersionPins;
-    return pins.schema === 1 ? pins : undefined;
-  } catch {
-    return undefined;
-  }
+  const pins = await readJsonOr<VersionPins>(pinsPath());
+  return pins?.schema === 1 ? pins : undefined;
 }
-
-/** Pins older than this are re-resolved in the background. */
-export const PINS_REFRESH_MS = CHECK_INTERVAL_MS;
-let pinsFailure = 0;
-let pinsRefresh: Promise<unknown> | undefined;
 
 export interface GetPinsOptions {
   offline?: boolean;
@@ -246,16 +228,13 @@ export async function getPins(opts: GetPinsOptions = {}): Promise<VersionPins> {
   const pins = await readPins();
   if (pins) {
     const now = opts.now ?? Date.now();
-    const due = !(now - Date.parse(pins.updatedAt) < PINS_REFRESH_MS) && now - pinsFailure >= RETRY_AFTER_FAILURE_MS;
-    if (!opts.offline && due && !pinsRefresh) {
-      pinsRefresh = updatePins(opts)
-        .catch((err: unknown) => {
-          pinsFailure = now;
-          progress(`version pins refresh failed (${err instanceof Error ? err.message : String(err)}); keeping pins from ${pins.updatedAt}`);
-        })
-        .finally(() => {
-          pinsRefresh = undefined;
-        });
+    if (!opts.offline && !(now - Date.parse(pins.updatedAt) < CHECK_INTERVAL_MS)) {
+      upstreamBackoff.background(
+        "pins",
+        () => updatePins(opts),
+        (reason) => `version pins refresh failed (${reason}); keeping pins from ${pins.updatedAt}`,
+        now,
+      );
     }
     return pins;
   }
@@ -265,8 +244,8 @@ export async function getPins(opts: GetPinsOptions = {}): Promise<VersionPins> {
 
 /** Test hook: wait for a background refresh `getPins` started, and forget the failure back-off. */
 export async function settlePinsRefresh(): Promise<void> {
-  await pinsRefresh;
-  pinsFailure = 0;
+  await upstreamBackoff.running("pins");
+  upstreamBackoff.reset("pins");
 }
 
 const TAG_RE = /^v(\d+\.\d+\.\d+\.\d+)(-preview)?$/;
@@ -328,9 +307,14 @@ export interface PinsUpstream {
   branchVersion(channel: Channel): Promise<{ latest?: { version: string; date: string } }>;
 }
 
+/** Mojang's BDS download links (every channel and platform). */
+export function fetchBdsLinks(): Promise<BdsLinks> {
+  return httpJson<BdsLinks>(BDS_LINKS_URL);
+}
+
 const liveUpstream: PinsUpstream = {
   samples: async () => parseSamplesRemote((await runOk("git", ["ls-remote", "--tags", "--heads", SAMPLES_REPO])).stdout),
-  bdsLinks: () => httpJson<BdsLinks>(BDS_LINKS_URL),
+  bdsLinks: fetchBdsLinks,
   packument: fetchPackument,
   changelogs: (c) => httpJson<ZendeskList>(`${zendeskArticlesUrl(c)}?per_page=10&sort_by=created_at&sort_order=desc`),
   branchVersion: (c) =>
@@ -349,7 +333,7 @@ async function settle<T>(what: string, p: Promise<T>): Promise<T | undefined> {
   try {
     return await p;
   } catch (err) {
-    progress(`warning: ${what}: ${err instanceof Error ? err.message : String(err)}`);
+    progress(`warning: ${what}: ${errorMessage(err)}`);
     return undefined;
   }
 }

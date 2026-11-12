@@ -2,20 +2,18 @@
  * Script API lookups. Signatures and docs come from the channel's `@minecraft/*` typings; the module version
  * that introduced each symbol comes from bedrock-samples `metadata/script_modules` (engine-generated).
  */
-import { readdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { readJsonOr, writeJsonAtomic } from "../core/fs.ts";
+import { memoAsync } from "../core/memo.ts";
 import { cacheDir } from "../core/paths.ts";
-import type { Channel } from "../core/version.ts";
+import { type Channel, compareDotted } from "../core/version.ts";
 import { type DtsSymbol, parsePackage } from "./dts.ts";
-import { writeJsonAtomic } from "../core/fs.ts";
-import { single } from "./net.ts";
+import { readScriptModuleFiles } from "./metadata.ts";
 import { ensureBedrockSamples } from "./samples.ts";
 import { suggestNames } from "./suggest.ts";
 import { ensureTypings } from "./typings.ts";
 import { TYPINGS_PACKAGES } from "./versions.ts";
-
-// ---------------------------------------------------------------------------------------------
-// "since" index from engine metadata
 
 interface ModuleSince {
   /** Stable module versions in ascending order. */
@@ -48,19 +46,8 @@ interface MetaModule {
   constants?: MetaMember[];
 }
 
-function semverKey(v: string): number[] {
-  return v.replace(/-.*$/, "").split(".").map(Number);
-}
-
-function compareSemver(a: string, b: string): number {
-  const ka = semverKey(a);
-  const kb = semverKey(b);
-  for (let i = 0; i < 3; i++) {
-    const d = (ka[i] ?? 0) - (kb[i] ?? 0);
-    if (d) return d;
-  }
-  return 0;
-}
+/** Module versions by their `x.y.z`, ignoring a prerelease suffix (`2.1.0-beta`). */
+const compareModuleVersions = (a: string, b: string): number => compareDotted(a.replace(/-.*$/, ""), b.replace(/-.*$/, ""));
 
 function metaSymbols(mod: MetaModule): string[] {
   const out: string[] = [];
@@ -78,28 +65,23 @@ function metaSymbols(mod: MetaModule): string[] {
   return out;
 }
 
-async function buildSinceIndex(metadataDir: string): Promise<SinceIndex> {
-  const dir = join(metadataDir, "script_modules", "@minecraft");
-  const files = (await readdir(dir)).filter((f) => f.endsWith(".json"));
-  const byModule = new Map<string, { version: string; file: string }[]>();
-  for (const file of files) {
-    const m = /^(.+?)_(\d+\.\d+\.\d+(?:-[\w.]+)?)\.json$/.exec(file);
-    if (!m?.[1] || !m[2]) continue;
-    const name = `@minecraft/${m[1].replace(/-bindings$/, "")}`;
-    const list = byModule.get(name) ?? [];
-    list.push({ version: m[2], file });
-    byModule.set(name, list);
+async function buildSinceIndex(samplesRoot: string): Promise<SinceIndex> {
+  const byModule = new Map<string, { version: string; path: string }[]>();
+  for (const { module, version, path } of await readScriptModuleFiles(samplesRoot)) {
+    const list = byModule.get(module) ?? [];
+    list.push({ version, path });
+    byModule.set(module, list);
   }
   const index: SinceIndex = {};
   for (const [name, list] of byModule) {
     // A module version may exist as a thin wrapper plus a `-bindings` file; keep whichever has content.
     const contents = new Map<string, MetaModule>();
-    for (const { version, file } of list) {
-      const mod = JSON.parse(await readFile(join(dir, file), "utf8")) as MetaModule;
+    for (const { version, path } of list) {
+      const mod = JSON.parse(await readFile(path, "utf8")) as MetaModule;
       if (metaSymbols(mod).length || !contents.has(version)) contents.set(version, mod);
     }
-    const versions = [...contents.keys()].filter((v) => !v.includes("-")).sort(compareSemver);
-    const beta = [...contents.keys()].filter((v) => v.includes("-")).sort(compareSemver).at(-1);
+    const versions = [...contents.keys()].filter((v) => !v.includes("-")).sort(compareModuleVersions);
+    const beta = [...contents.keys()].filter((v) => v.includes("-")).sort(compareModuleVersions).at(-1);
     const since: Record<string, string> = {};
     for (const v of versions) for (const s of metaSymbols(contents.get(v)!)) since[s] ??= v;
     if (beta) for (const s of metaSymbols(contents.get(beta)!)) since[s] ??= "beta";
@@ -110,29 +92,19 @@ async function buildSinceIndex(metadataDir: string): Promise<SinceIndex> {
   return index;
 }
 
-const sinceCache = new Map<string, Promise<{ tag: string; index: SinceIndex }>>();
+const sinceMemo = memoAsync<{ tag: string; index: SinceIndex }>();
 
 async function sinceIndex(channel: Channel, offline?: boolean): Promise<{ tag: string; index: SinceIndex }> {
   const samples = await ensureBedrockSamples({ channel, offline, parts: ["metadata"] });
-  const cached = sinceCache.get(samples.tag);
-  if (cached) return cached;
-  const p = single(`since:${samples.tag}`, async () => {
+  return sinceMemo(samples.tag, async () => {
     const path = cacheDir("knowledge", "derived", samples.tag, "script-since.json");
-    try {
-      return { tag: samples.tag, index: JSON.parse(await readFile(path, "utf8")) as SinceIndex };
-    } catch {
-      const index = await buildSinceIndex(join(samples.root, "metadata"));
-      await writeJsonAtomic(path, index);
-      return { tag: samples.tag, index };
-    }
+    const cached = await readJsonOr<SinceIndex>(path);
+    if (cached) return { tag: samples.tag, index: cached };
+    const index = await buildSinceIndex(samples.root);
+    await writeJsonAtomic(path, index);
+    return { tag: samples.tag, index };
   });
-  sinceCache.set(samples.tag, p);
-  p.catch(() => sinceCache.delete(samples.tag));
-  return p;
 }
-
-// ---------------------------------------------------------------------------------------------
-// Typings symbol tables
 
 interface SymbolTable {
   packages: Record<string, string>;
@@ -141,14 +113,11 @@ interface SymbolTable {
   all: DtsSymbol[];
 }
 
-const tableCache = new Map<string, Promise<SymbolTable>>();
+const tableMemo = memoAsync<SymbolTable>();
 
 async function symbolTable(channel: Channel, beta: boolean, offline?: boolean): Promise<SymbolTable> {
   const install = await ensureTypings({ channel, beta, offline });
-  const key = install.nodeModulesDir;
-  const cached = tableCache.get(key);
-  if (cached) return cached;
-  const p = (async () => {
+  return tableMemo(install.nodeModulesDir, async () => {
     const all: DtsSymbol[] = [];
     for (const pkg of TYPINGS_PACKAGES) {
       if (!install.packages[pkg]) continue;
@@ -161,14 +130,8 @@ async function symbolTable(channel: Channel, beta: boolean, offline?: boolean): 
       byName.set(s.name, list);
     }
     return { packages: install.packages, version: install.version, byName, all };
-  })();
-  tableCache.set(key, p);
-  p.catch(() => tableCache.delete(key));
-  return p;
+  });
 }
-
-// ---------------------------------------------------------------------------------------------
-// Lookup
 
 export interface ApiEntry {
   module: string;

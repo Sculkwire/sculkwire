@@ -11,10 +11,12 @@ import { existsSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { GameVersion } from "../core/version.ts";
+import { roamingDir } from "../core/paths.ts";
 import { formatGameVersion } from "../core/version.ts";
-import { gameDirCandidates, isPreviewGameDir } from "./detect.ts";
-import { launcherGameDirs, prefixOf, wineAppDataDirs } from "./wine.ts";
+import { findOnPath } from "../core/which.ts";
+import { appxToGameVersion, gameDirCandidates, isPreviewGameDir, readManifest } from "./detect.ts";
+import { GAME_EXE, installerRoot } from "./gdk.ts";
+import { launcherGameDirs, wineAppDataDirs, winePrefix } from "./wine.ts";
 
 export type InstallKind = "custom" | "mcbe-gdk-installer" | "windows" | "wine-prefix";
 
@@ -22,7 +24,7 @@ export interface ClientInstall {
   kind: InstallKind;
   /** Human-readable origin, e.g. `mcbe-gdk-installer`, `Windows (Preview)`, the prefix path. */
   label: string;
-  /** Directory holding Minecraft.Windows.exe, when known. */
+  /** Directory holding the game executable (`GAME_EXE`), when known. */
   gameDir?: string;
   /** The `Minecraft Bedrock` (or `Minecraft Bedrock Preview`) data folder: Users/, logs/. */
   appData: string;
@@ -33,14 +35,11 @@ export interface ClientInstall {
   logsDir: string;
   /**
    * Launch command (argv). `{uri}` becomes the world deeplink (`minecraft://` or `minecraft-preview://`), appended
-   * when absent; `{args}` expands to `-key value` activation arguments (and is dropped when there are none).
-   * Absent: sculkwire cannot start the game and the user starts it.
+   * when absent. Absent: sculkwire cannot start the game and the user starts it.
    */
   launch?: string[];
   /** Stop command (argv). Absent: the game process is terminated directly. */
   stop?: string[];
-  /** The launch command passes `{args}` to Minecraft.Windows.exe, so `-key value` activation arguments work. */
-  passesArgs: boolean;
   /** Runs under Wine/Proton on Linux: headless gamescope mode is available. */
   wine: boolean;
   preview: boolean;
@@ -52,20 +51,11 @@ export interface ClientInstall {
 /** What a detector knows before the data folder is read. */
 type InstallBase = Omit<ClientInstall, "appData" | "sharedComMojang" | "userComMojang" | "logsDir" | "preview">;
 
-/** `1.26.6030.0` (appx Identity) → `1.26.60.30`. */
-export function appxToGameVersion(appx: string): GameVersion | undefined {
-  const m = /^(\d+)\.(\d+)\.(\d+)\.\d+$/.exec(appx.trim());
-  if (!m) return undefined;
-  const packed = Number(m[3]);
-  return { major: Number(m[1]), minor: Number(m[2]), patch: Math.floor(packed / 100), build: packed % 100 };
-}
-
-async function readVersion(gameDir: string | undefined): Promise<string | undefined> {
+function readVersion(gameDir: string | undefined): string | undefined {
   if (!gameDir) return undefined;
   try {
-    const xml = await readFile(join(gameDir, "appxmanifest.xml"), "utf8");
-    const m = /<Identity\b[^>]*\bVersion="([^"]+)"/.exec(xml);
-    const v = m?.[1] ? appxToGameVersion(m[1]) : undefined;
+    const appx = readManifest(gameDir).appxVersion;
+    const v = appx ? appxToGameVersion(appx) : undefined;
     return v ? formatGameVersion(v) : undefined;
   } catch {
     return undefined;
@@ -137,7 +127,7 @@ async function fromAppData(
     logsDir: join(appData, "logs"),
     preview: /Preview$/i.test(appData.replace(/[\\/]+$/, "")),
   };
-  const version = await readVersion(base.gameDir);
+  const version = readVersion(base.gameDir);
   if (version) install.version = version;
   return install;
 }
@@ -158,7 +148,6 @@ async function fromEnv(): Promise<ClientInstall | undefined> {
   const base: InstallBase = {
     kind: "custom",
     label: `custom (${appData})`,
-    passesArgs: launch?.includes("{args}") ?? false,
     wine: process.platform !== "win32" && /drive_c/i.test(appData),
   };
   if (launch) base.launch = launch;
@@ -167,14 +156,10 @@ async function fromEnv(): Promise<ClientInstall | undefined> {
   return fromAppData(appData, base);
 }
 
-export function installerRoot(): string {
-  return process.env.SCULKWIRE_GDK_ROOT ?? join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "mcbe-gdk-linux");
-}
-
+/** `~/.local/bin/mcbe-gdk-linux` (where the installer puts it, often not on PATH), else the one on PATH. */
 function findInstallerLauncher(): string | undefined {
-  const candidates = [join(homedir(), ".local", "bin", "mcbe-gdk-linux")];
-  for (const p of (process.env.PATH ?? "").split(":")) if (p) candidates.push(join(p, "mcbe-gdk-linux"));
-  return candidates.find((c) => existsSync(c));
+  const local = join(homedir(), ".local", "bin", "mcbe-gdk-linux");
+  return existsSync(local) ? local : findOnPath("mcbe-gdk-linux");
 }
 
 async function fromGdkInstaller(): Promise<ClientInstall | undefined> {
@@ -186,21 +171,18 @@ async function fromGdkInstaller(): Promise<ClientInstall | undefined> {
   } catch {
     return undefined;
   }
-  if (!existsSync(join(gameDir, "Minecraft.Windows.exe"))) return undefined;
+  if (!existsSync(join(gameDir, GAME_EXE))) return undefined;
   const appData = join(root, "profile", "compatdata", "pfx", "drive_c", "users", "steamuser", "AppData", "Roaming", "Minecraft Bedrock");
   const launcher = findInstallerLauncher();
   const base: InstallBase = {
     kind: "mcbe-gdk-installer",
     label: "mcbe-gdk-installer",
     gameDir,
-    passesArgs: true,
     wine: true,
     launchLock: join(root, "profile", ".desktop-launch.lock"),
   };
   if (launcher) {
-    // `{uri}` last: the installer passes every argument to Minecraft.Windows.exe, and the deeplink must be the
-    // first non-dash one, after any `-key value` activation arguments.
-    base.launch = [launcher, "launch", "{args}", "{uri}"];
+    base.launch = [launcher, "launch", "{uri}"];
     base.stop = [launcher, "stop"];
   }
   return fromAppData(appData, base);
@@ -213,8 +195,8 @@ async function fromGdkInstaller(): Promise<ClientInstall | undefined> {
  */
 async function fromWindows(): Promise<ClientInstall[]> {
   if (process.platform !== "win32") return [];
-  const roaming = process.env.APPDATA ?? join(homedir(), "AppData", "Roaming");
-  const hasGame = (d: string | undefined): d is string => !!d && existsSync(join(d, "Minecraft.Windows.exe"));
+  const roaming = roamingDir();
+  const hasGame = (d: string | undefined): d is string => !!d && existsSync(join(d, GAME_EXE));
   const found = gameDirCandidates().filter(hasGame);
   const out: ClientInstall[] = [];
   for (const preview of [false, true]) {
@@ -227,7 +209,6 @@ async function fromWindows(): Promise<ClientInstall[]> {
       label: preview ? "Windows (Preview)" : "Windows",
       // `start` hands the URI to the registered protocol handler; the empty string is start's window title.
       launch: ["cmd", "/c", "start", '""', "{uri}"],
-      passesArgs: false,
       wine: false,
     };
     if (gameDir) base.gameDir = gameDir;
@@ -247,8 +228,9 @@ async function fromWinePrefixes(): Promise<ClientInstall[]> {
     wineAppDataDirs(homedir())
       .filter((a) => !a.startsWith(gdk))
       .map(async (appData) => {
-        const prefix = prefixOf(appData);
-        const base: InstallBase = { kind: "wine-prefix", label: prefix, passesArgs: false, wine: true };
+        // wineAppDataDirs only returns folders under a `drive_c`.
+        const prefix = winePrefix(appData) ?? appData;
+        const base: InstallBase = { kind: "wine-prefix", label: prefix, wine: true };
         const gameDir = launcherGameDirs(prefix)[0];
         if (gameDir) base.gameDir = gameDir;
         return fromAppData(appData, base);
@@ -269,7 +251,11 @@ export async function findInstalls(): Promise<ClientInstall[]> {
 
 /** The install to use; `SCULKWIRE_CLIENT` picks by kind or label substring. Throws with setup help when none. */
 export async function findInstall(): Promise<ClientInstall> {
-  const all = await findInstalls();
+  return pickInstall(await findInstalls());
+}
+
+/** `findInstall` over installs already found by `findInstalls`. */
+export function pickInstall(all: readonly ClientInstall[]): ClientInstall {
   const want = process.env.SCULKWIRE_CLIENT;
   const pick = want ? all.find((i) => i.kind === want || i.label.toLowerCase().includes(want.toLowerCase())) : all[0];
   if (pick) return pick;

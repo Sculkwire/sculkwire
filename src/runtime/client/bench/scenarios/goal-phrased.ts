@@ -3,9 +3,12 @@
  * and some do not on purpose: the success rate measures what the grammar understands (a phrasing it does not ends in
  * seconds with `goal_unknown`).
  */
-import { COMBAT_AREA, FIGHTER, wall } from "../kit.ts";
-import { distanceTo, planExtras } from "../plankit.ts";
-import type { Offset, Scenario } from "../types.ts";
+import { xyz } from "../../geometry.ts";
+import { wall } from "../arena.ts";
+import { COMBAT_AREA, FIGHTER } from "../kit.ts";
+import { distanceTo, phrased, planExtras } from "../plankit.ts";
+import { num, type Offset } from "../types.ts";
+import zombies3 from "./combat-zombies3.ts";
 
 /** Three zombies as in `combat/zombies3`. */
 export const KILL_PHRASINGS = [
@@ -52,27 +55,19 @@ const NEXT_TO = 2.5;
 const GOLD: Offset = { dx: 0, dy: 0, dz: 12 };
 const GOLD_TWO_STEP: Offset = { dx: 8, dy: 0, dz: -8 };
 
-const killPhrased: Scenario = {
+/** `combat/zombies3`'s arena, player and mobs, judged on the plan instead of the fight. */
+const killPhrased = phrased({
+  ...zombies3,
   name: "kill-phrased",
   suite: "goal",
   summary: "3 zombies at night as combat/zombies3, the kill goal in ten phrasings; success: 3 kills and goal_done within 60 s",
-  runs: 10,
   timeoutMs: 60_000,
-  area: COMBAT_AREA,
-  build: (ctx) => wall(ctx.origin),
-  player: FIGHTER,
-  mobs: [
-    { type: "zombie", at: { dx: -3, dy: 0, dz: 10 } },
-    { type: "zombie", at: { dx: 0, dy: 0, dz: 11 } },
-    { type: "zombie", at: { dx: 3, dy: 0, dz: 10 } },
-  ],
   goals: KILL_PHRASINGS,
-  action: () => ({ action: "play", goal: KILL_PHRASINGS[0] as string, durationMs: 60_000 }),
   measure: (_ctx, o) => ({ ...planExtras(o.play), cleared: o.kills === 3 }),
   success: (o) => o.kills === 3 && o.ok && o.deaths === 0 && o.durationMs < 60_000,
-};
+});
 
-const reachPhrased: Scenario = {
+const reachPhrased = phrased({
   name: "reach-phrased",
   suite: "goal",
   summary: "a gold block 12 blocks away by day, the reach goal in ten phrasings; success: within 2.5 blocks of it and goal_done",
@@ -82,29 +77,23 @@ const reachPhrased: Scenario = {
   build: (ctx) => [`setblock ${xyz(ctx.at(GOLD))} gold_block`],
   player: { gameMode: "survival", time: "day" },
   goals: REACH_PHRASINGS,
-  action: () => ({ action: "play", goal: REACH_PHRASINGS[0] as string, durationMs: 30_000 }),
   measure: (ctx, o) => ({ ...planExtras(o.play), distance: distanceTo(ctx, o, GOLD) }),
-  success: (o, extra) => o.ok && typeof extra.distance === "number" && extra.distance <= NEXT_TO,
-};
+  success: (o, extra) => o.ok && num(extra, "distance") <= NEXT_TO,
+});
 
-const twoStep: Scenario = {
+const twoStep = phrased({
   name: "two-step",
   suite: "goal",
   summary: "one zombie at night and a gold block 11 blocks away, \"kill the zombie then go to the gold block\" in ten phrasings; success: both",
   runs: 10,
   timeoutMs: 60_000,
   area: COMBAT_AREA,
-  build: (ctx) => [...wall(ctx.origin), `setblock ${xyz(ctx.at(GOLD_TWO_STEP))} gold_block`],
+  build: (ctx) => [...wall(ctx.origin, COMBAT_AREA.radius), `setblock ${xyz(ctx.at(GOLD_TWO_STEP))} gold_block`],
   player: FIGHTER,
   mobs: [{ type: "zombie", at: { dx: 0, dy: 0, dz: 9 } }],
   goals: TWO_STEP_PHRASINGS,
-  action: () => ({ action: "play", goal: TWO_STEP_PHRASINGS[0] as string, durationMs: 60_000 }),
   measure: (ctx, o) => ({ ...planExtras(o.play), distance: distanceTo(ctx, o, GOLD_TWO_STEP) }),
-  success: (o, extra) => o.ok && o.kills === 1 && o.deaths === 0 && typeof extra.distance === "number" && extra.distance <= NEXT_TO,
-};
-
-function xyz(v: { x: number; y: number; z: number }): string {
-  return `${Math.floor(v.x)} ${Math.floor(v.y)} ${Math.floor(v.z)}`;
-}
+  success: (o, extra) => o.ok && o.kills === 1 && o.deaths === 0 && num(extra, "distance") <= NEXT_TO,
+});
 
 export const scenarios = [killPhrased, reachPhrased, twoStep];

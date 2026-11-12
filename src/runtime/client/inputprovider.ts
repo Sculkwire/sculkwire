@@ -14,7 +14,51 @@
  */
 import { onShutdown } from "../../core/shutdown.ts";
 import type { LaunchMode } from "./launcher.ts";
-import type { EngineInput } from "./player.ts";
+import type { MoveVector } from "./input.ts";
+
+/** The engine route's input methods as the controller needs them. Every method throws on failure. */
+export interface EngineInput {
+  /** Connect and start the motion stream. Throws when the engine route cannot be used now or the stream sent nothing yet. */
+  prepare(): Promise<void>;
+  /** The provider answers right now. */
+  reachable(): Promise<boolean>;
+  look(pitch: number, yaw: number): Promise<void>;
+  move(move: MoveVector): Promise<void>;
+  release(): Promise<void>;
+  /** One attack through the game mode, as a click. Returns the struck entity's id (the script `Entity.id`) or null. */
+  attack(): Promise<string | null>;
+  /**
+   * Press (true) or let go of (false) the use button with the held item: throws, draws, eats, places. A press is held
+   * while it is repeated: the engine route repeats it every 300 ms.
+   */
+  use(down: boolean): Promise<void>;
+  /**
+   * Press (true) or let go of (false) the attack button and keep it held, which breaks the block under the crosshair in
+   * survival (`mine`). A press is held while it is repeated: the engine route repeats it every 300 ms. Optional:
+   * without it `mine` needs the keyboard route.
+   */
+  attackHold?(down: boolean): Promise<void>;
+  /**
+   * Press (true) or let go of (false) one key on the game's own keyboard, by its xdotool name (`1`, `e`, `F5`): the
+   * hotbar keys of `select_slot` and the keys `hold` names. Optional: without it those keys need the keyboard route.
+   */
+  key?(key: string, down: boolean): Promise<void>;
+  /** The provider's input lock: the user can take control with F9 while an action runs. */
+  takeover?: InputTakeover;
+}
+
+/** The user's side of the input provider's input lock. */
+export interface InputTakeover {
+  /** The user pressed F9 to take control and has not given it back. */
+  readonly userHasControl: boolean;
+  /** `listener` runs each time the user takes control. Returns the function that removes it. */
+  onTakeover(listener: () => void): () => void;
+  /** Resolves once the user gave control back (at once when they do not hold it), or when `signal` aborts. */
+  untilControl(signal?: AbortSignal): Promise<void>;
+}
+
+/** An action the user interrupted with F9 ends with this message. */
+export const TAKEOVER_MESSAGE = "the user took control (F9)";
 
 /** Player motion as the provider streams it. Position is the feet, velocity in blocks per tick. */
 export interface ProviderMotion {

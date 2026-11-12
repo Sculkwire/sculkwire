@@ -22,7 +22,7 @@ export interface Tactic {
 /** A score at or above this is an emergency (a creeper about to blow, near death next to a mob): it preempts the running tactic at once. */
 const EMERGENCY = 0.9;
 /** A new tactic must beat the running one by this much, so the player does not flip between two close options. */
-export const HYSTERESIS = 0.08;
+const HYSTERESIS = 0.08;
 /** A creeper's fuse that has burned this long, this close, means get away now. */
 const CREEPER_RUN_MS = 500;
 const CREEPER_RUN_DISTANCE = 5;
@@ -41,7 +41,7 @@ function round1(n: number): string {
   return n.toFixed(1).replace(/\.0$/, "");
 }
 
-export interface ScoreContext {
+interface ScoreContext {
   /** Entity id -> type of everything `use_on` hit. */
   usedOn?: ReadonlyMap<string, string>;
   allowed?: ReadonlySet<TacticKind>;

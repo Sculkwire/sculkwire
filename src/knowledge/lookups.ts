@@ -2,9 +2,11 @@
  * Exact lookups over bedrock-samples `metadata/` (commands, Molang, components, vanilla data ids) and the
  * vanilla packs (usage examples), plus component definitions from rockide/schemas (newest release, checked daily).
  */
-import { readdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
-import type { Channel } from "../core/version.ts";
+import { memoAsync } from "../core/memo.ts";
+import { type Channel, compareDotted } from "../core/version.ts";
+import { listEngineSchemas, listFiles, type RawCommand, readCommands, readVanillaData } from "./metadata.ts";
 import { lookupRockide, type RockideLookup, rockideComponentIds } from "./rockide.ts";
 import { ensureBedrockSamples, type SamplesCheckout, type SamplesPart } from "./samples.ts";
 import { suggestNames } from "./suggest.ts";
@@ -13,30 +15,10 @@ async function readJson<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(path, "utf8")) as T;
 }
 
-async function listFiles(dir: string, ext: string): Promise<string[]> {
-  try {
-    const entries = await readdir(dir, { withFileTypes: true, recursive: true });
-    return entries
-      .filter((e) => e.isFile() && e.name.endsWith(ext))
-      .map((e) => join(e.parentPath, e.name))
-      .sort();
-  } catch {
-    return [];
-  }
-}
-
 /** Per-tag memo: derived tables are pure functions of the checkout. */
 function memo<T>(build: (s: SamplesCheckout) => Promise<T>): (s: SamplesCheckout) => Promise<T> {
-  const cache = new Map<string, Promise<T>>();
-  return (s) => {
-    let p = cache.get(s.tag);
-    if (!p) {
-      p = build(s);
-      cache.set(s.tag, p);
-      p.catch(() => cache.delete(s.tag));
-    }
-    return p;
-  };
+  const cache = memoAsync<T>();
+  return (s) => cache(s.tag, () => build(s));
 }
 
 export interface SourceTag {
@@ -47,22 +29,6 @@ export interface SourceTag {
 
 const tagOf = (s: SamplesCheckout): SourceTag => ({ channel: s.channel, version: s.version, samplesTag: s.tag });
 
-// ---------------------------------------------------------------------------------------------
-// Commands
-
-interface RawCommand {
-  name: string;
-  description: string;
-  aliases: { name: string }[] | string[];
-  permission_level: number;
-  requires_cheats: boolean;
-  overloads: { name: string; params: { name: string; is_optional: boolean; type: { name: string } }[] }[];
-}
-interface RawCommands {
-  commands: RawCommand[];
-  command_enums: { name: string; values: { value: string }[] }[];
-}
-
 export interface CommandInfo {
   name: string;
   description: string;
@@ -72,7 +38,7 @@ export interface CommandInfo {
   overloads: { syntax: string; params: { name: string; type: string; optional: boolean; values?: string[] }[] }[];
 }
 
-const commandTable = memo(async (s) => readJson<RawCommands>(join(s.root, "metadata", "command_modules", "mojang-commands.json")));
+const commandTable = memo((s) => readCommands(s.root));
 
 export async function commandLookup(opts: { name: string; channel: Channel; offline?: boolean }): Promise<
   SourceTag & { query: string; commands: CommandInfo[]; suggestions: string[] }
@@ -113,9 +79,6 @@ export async function commandLookup(opts: { name: string; channel: Channel; offl
   const suggestions = commands.length ? [] : suggestNames(q, raw.commands.flatMap((c) => [c.name, ...aliasNames(c)]));
   return { ...tagOf(samples), query: opts.name, commands, suggestions };
 }
-
-// ---------------------------------------------------------------------------------------------
-// Molang
 
 interface RawMolang {
   queries: {
@@ -174,9 +137,6 @@ export async function molangLookup(opts: { name: string; channel: Channel; offli
       );
   return { ...tagOf(samples), query: opts.name, exact: exact.length > 0, entries };
 }
-
-// ---------------------------------------------------------------------------------------------
-// Components
 
 interface DocNode {
   name?: string;
@@ -255,31 +215,17 @@ export interface ComponentSchemaRef {
 
 const engineSchemas = memo(async (s) => {
   const out = new Map<string, ComponentSchemaRef[]>();
-  const base = join(s.root, "metadata", "json_schemas");
-  const files = await listFiles(base, ".json");
   const byKey = new Map<string, { id: string; scope: string; versions: { fv: string; path: string }[] }>();
-  for (const file of files) {
-    const rel = relative(base, file).split("\\").join("/");
-    const parts = rel.split("/");
-    if (parts.length !== 4) continue;
-    const [side, kind, fv, name] = parts as [string, string, string, string];
+  for (const { scope, formatVersion, name, rel } of await listEngineSchemas(join(s.root, "metadata", "json_schemas"))) {
     if (!name.startsWith("minecraft_")) continue;
     const id = `minecraft:${name.slice("minecraft_".length, -".json".length)}`;
-    const key = `${id}|${side}/${kind}`;
-    const entry = byKey.get(key) ?? { id, scope: `${side}/${kind}`, versions: [] };
-    entry.versions.push({ fv, path: `metadata/json_schemas/${rel}` });
+    const key = `${id}|${scope}`;
+    const entry = byKey.get(key) ?? { id, scope, versions: [] };
+    entry.versions.push({ fv: formatVersion, path: `metadata/json_schemas/${rel}` });
     byKey.set(key, entry);
   }
-  const fvKey = (fv: string) => (fv === "beta" ? [Number.MAX_SAFE_INTEGER] : fv.split(".").map(Number));
-  const cmp = (a: string, b: string) => {
-    const ka = fvKey(a);
-    const kb = fvKey(b);
-    for (let i = 0; i < Math.max(ka.length, kb.length); i++) {
-      const d = (ka[i] ?? 0) - (kb[i] ?? 0);
-      if (d) return d;
-    }
-    return 0;
-  };
+  // `beta` sorts after every numbered folder.
+  const cmp = (a: string, b: string) => (a === "beta" || b === "beta" ? Number(a === "beta") - Number(b === "beta") : compareDotted(a, b));
   for (const e of byKey.values()) {
     e.versions.sort((a, b) => cmp(a.fv, b.fv));
     const stable = e.versions.filter((v) => v.fv !== "beta");
@@ -338,20 +284,10 @@ export async function componentLookup(opts: { id: string; channel: Channel; offl
   return result;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Vanilla data ids
-
-interface RawVanillaData {
-  vanilla_data_type?: string;
-  data_items: { name: string; [k: string]: unknown }[];
-}
-
 const vanillaData = memo(async (s) => {
   const out = new Map<string, { type: string; data: Record<string, unknown> }[]>();
-  for (const file of await listFiles(join(s.root, "metadata", "vanilladata_modules"), ".json")) {
-    const raw = await readJson<RawVanillaData>(file);
-    const type = raw.vanilla_data_type ?? file.replace(/^.*mojang-|\.json$/g, "");
-    for (const item of raw.data_items ?? []) {
+  for (const { type, items } of await readVanillaData(s.root)) {
+    for (const item of items) {
       const list = out.get(item.name) ?? [];
       list.push({ type, data: item });
       out.set(item.name, list);
@@ -359,9 +295,6 @@ const vanillaData = memo(async (s) => {
   }
   return out;
 });
-
-// ---------------------------------------------------------------------------------------------
-// Vanilla examples
 
 export interface VanillaExample {
   /** Path relative to the samples root (`behavior_pack/entities/wolf.json`). */

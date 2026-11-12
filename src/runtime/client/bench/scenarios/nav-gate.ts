@@ -1,4 +1,4 @@
-import { blocks, course } from "./nav-kit.ts";
+import { blocks, course } from "../navkit.ts";
 import type { BenchContext } from "../types.ts";
 
 const AREA = { radius: 12, height: 6 };

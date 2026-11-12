@@ -13,6 +13,8 @@ import type { GameBuild } from "./detect.ts";
 
 export type PackKind = "behavior" | "resource";
 export const PACK_KINDS: readonly PackKind[] = ["behavior", "resource"];
+/** The kind `extract` and `game_extract_pack` use when none is given. */
+export const DEFAULT_PACK_KIND: PackKind = "behavior";
 
 export interface PackInfo {
   kind: PackKind;

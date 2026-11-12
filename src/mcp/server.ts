@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
@@ -7,6 +8,7 @@ import { runShutdown } from "../core/shutdown.ts";
 import { loadExtensions, registerExtension } from "../extensions/index.ts";
 import { FEATURES, wireFeatures } from "../features.ts";
 import { autoUpdate } from "../update/auto.ts";
+import { detectRunning, markInUse } from "../update/layout.ts";
 
 /** The server with every built-in feature, then the tools of every installed extension (`src/extensions/`). */
 export async function createServer(): Promise<McpServer> {
@@ -79,9 +81,12 @@ export async function serveStdio(): Promise<void> {
   setBackgroundDownloads(true);
   const transport = new AnsweringStdioTransport();
   await server.connect(transport);
+  const running = detectRunning();
+  // A managed install's `sculk update` (here or in another process) must not prune the version this server runs.
+  if (running.managed) markInUse(join(running.managed.layout.versions, running.managed.version));
   // A managed install checks for an update in the background (at most once a day). Never awaited: startup and tool
   // calls do not wait for the network, and the running session keeps its version.
-  void autoUpdate({ notify: (data) => server.server.sendLoggingMessage({ level: "notice", logger: "sculkwire", data }) });
+  void autoUpdate({ running, notify: (data) => server.server.sendLoggingMessage({ level: "notice", logger: "sculkwire", data }) });
   // The agent client went away: stop anything sculkwire started (the game, BDS) before exiting.
   const exit = () => void runShutdown().finally(() => process.exit(0));
   let closing = false;

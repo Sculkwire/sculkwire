@@ -1,7 +1,7 @@
 /**
  * Client content log (`%APPDATA%/Minecraft Bedrock/logs/ContentLog<date>_1.txt`, lines `HH:MM:SS[Area][level]-msg`):
  * incremental reads from a byte offset, client path normalisation, and mapping to Diagnostics (source `client`)
- * against the project's packs, using the shared BDS log mapper.
+ * against the project's packs, using the shared log mapper (`runtime/gamelog`).
  */
 import { open, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -47,22 +47,15 @@ async function endOf(logsDir: string, pattern: RegExp): Promise<LogPosition | un
   return { file, offset: (await stat(file)).size };
 }
 
-/** Newest `ContentLog*.txt` in the logs directory (one per launch). */
-export async function latestContentLog(logsDir: string): Promise<string | undefined> {
-  return latestLog(logsDir, CONTENT_LOG);
-}
-
 /** Current end of the newest content log: entries after this position are "new". */
 export async function logEnd(logsDir: string): Promise<LogPosition | undefined> {
   return endOf(logsDir, CONTENT_LOG);
 }
 
-/** `Debug_Log<date>.txt`, one per launch: the engine log, which carries network and level-transition lines the content log does not. */
-export async function latestDebugLog(logsDir: string): Promise<string | undefined> {
-  return latestLog(logsDir, DEBUG_LOG);
-}
-
-/** Current end of the newest engine log (`Debug_Log*.txt`). */
+/**
+ * Current end of the newest engine log (`Debug_Log<date>.txt`, one per launch), which carries network and
+ * level-transition lines the content log does not.
+ */
 export async function debugLogEnd(logsDir: string): Promise<LogPosition | undefined> {
   return endOf(logsDir, DEBUG_LOG);
 }

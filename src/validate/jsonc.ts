@@ -45,10 +45,6 @@ export class LineIndex {
     if (end > start && this.text[end - 1] === "\r") end--;
     return this.range(start, end - start);
   }
-
-  get lineCount(): number {
-    return this.starts.length;
-  }
 }
 
 export interface JsonProblem {
@@ -78,10 +74,6 @@ export function escapePointerSegment(segment: string | number): string {
 
 export function pointerJoin(base: string, segment: string | number): string {
   return `${base}/${escapePointerSegment(segment)}`;
-}
-
-export function pointerFromPath(path: readonly (string | number)[]): string {
-  return path.map((p) => `/${escapePointerSegment(p)}`).join("");
 }
 
 export function parsePointer(pointer: string): string[] {

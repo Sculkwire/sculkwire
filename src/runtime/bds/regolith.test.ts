@@ -3,7 +3,8 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { bdsCheck, indexProject, projectPacks } from "./check.ts";
+import { bdsCheck } from "./check.ts";
+import { indexProject, projectPacks } from "./project.ts";
 import { runGameTests } from "./gametest.ts";
 import { entriesToDiagnostics, parseConsole } from "../gamelog/logparse.ts";
 

@@ -8,15 +8,15 @@
  * Item, block and mob names stay as written for the task steps' own name resolution (`tasks/names.ts`), except a mob,
  * which the kill and reach checks need as a type id.
  */
-import { bareId } from "../tasks/recipes.ts";
+import { bareId } from "../tasks/ids.ts";
 import type { TaskStep } from "../tasks/types.ts";
 import { findMob, GOAL_RADIUS, HOSTILE_WORDS, mobType, NUMBERS, parseGoal, type Goal } from "./goal.ts";
 import type { Stance } from "./pack.ts";
 
 /** A goal the built-in checks verify (kill, reach coordinates, hit every X once). */
-export type CheckedGoal = Exclude<Goal, { kind: "free" }>;
+type CheckedGoal = Exclude<Goal, { kind: "free" }>;
 
-export type PlanAction =
+type PlanAction =
   | CheckedGoal
   /** A fetch with `all` ("get the diamonds") takes every one the containers near hold. */
   | TaskStep
@@ -30,7 +30,7 @@ export type PlanKind = PlanAction["kind"];
 /** One step of a plan: what to do, and the clause it came from. */
 export type PlanStep = PlanAction & { clause: string };
 
-export interface StandingOrders {
+interface StandingOrders {
   /** The fights' shield stance (`guard`: shield up, `kite`: keep away, no shield). */
   stance?: Stance;
 }
@@ -40,7 +40,7 @@ export interface Plan {
   orders: StandingOrders;
 }
 
-export const TASK_KINDS: ReadonlySet<PlanKind> = new Set(["craft", "smelt", "trade", "fetch", "equip", "reach_block", "reach_entity"]);
+const TASK_KINDS: ReadonlySet<PlanKind> = new Set(["craft", "smelt", "trade", "fetch", "equip", "reach_block", "reach_entity"]);
 
 export function isTaskStep(step: PlanAction): step is TaskStep {
   return TASK_KINDS.has(step.kind);
@@ -85,7 +85,7 @@ const KITE = /,?\s*(?:while\s+|and\s+)?\b(?:keep(?:ing)? (?:your|a safe|some) di
 const GUARD = /,?\s*(?:while\s+|and\s+)?\b(?:with (?:the|your) shield (?:up|raised)|behind (?:the|your) shield|shield up|block(?:ing)? with (?:the|your) shield|tank(?:ing)?(?: (?:it|them|the hits))?)\b/;
 
 /** Standing orders from keywords, and the text without them. A "no shield" phrase wins over a "shield up" one. */
-export function readOrders(text: string): { text: string; orders: StandingOrders } {
+function readOrders(text: string): { text: string; orders: StandingOrders } {
   let t = text;
   const orders: StandingOrders = {};
   for (const [re, stance] of [
@@ -102,7 +102,7 @@ export function readOrders(text: string): { text: string; orders: StandingOrders
 const HARD_SPLIT = /\s*(?:;|,?\s*\band then\b|,?\s*\bthen\b|,?\s*\bafter that\b|,?\s*\bafterwards\b|,?\s*\band finally\b|,?\s*\bonce (?:that is|that's|it is|it's|you are|you're) done\b)\s*,?\s*/;
 
 /** The clauses of a goal, in the order they are to be done. */
-export function splitClauses(text: string): string[] {
+function splitClauses(text: string): string[] {
   const out: string[] = [];
   for (const raw of text.split(HARD_SPLIT)) {
     const piece = stripFillers(raw);

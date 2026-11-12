@@ -5,7 +5,10 @@
  * polls with `player_job`. Only one job runs at a time because they share the player's keys and mouse. Every other
  * action sequence takes the request's abort signal, so a cancelled or timed-out call lets go of the keys at once.
  */
-import type { ActionResult, InputTakeover, PlayerAction, PlayerController } from "./player.ts";
+import { errorMessage } from "../../core/errors.ts";
+import type { InputTakeover } from "./inputprovider.ts";
+import type { PlayerController } from "./player.ts";
+import type { ActionResult, PlayerAction } from "./types.ts";
 import type { PlayResult, PlayStep } from "./skills/play.ts";
 
 export type JobStatus = "running" | "done" | "stopped" | "failed";
@@ -132,7 +135,7 @@ export class PlayJobs {
         });
         job.status = job.controller.signal.aborted ? "stopped" : "done";
       } catch (err) {
-        job.error = err instanceof Error ? err.message : String(err);
+        job.error = errorMessage(err);
         job.status = job.controller.signal.aborted ? "stopped" : "failed";
       } finally {
         job.finishedAt = Date.now();

@@ -5,15 +5,17 @@
  * search that comes back empty asks once more with the wider radius (the helper's `entities` query reaches 256).
  * Results are sorted by distance to the player.
  */
-import type { Vec3 } from "../player.ts";
+import { errorMessage } from "../../../core/errors.ts";
+import { blockCenter, distance, xyz } from "../geometry.ts";
+import type { Vec3 } from "../types.ts";
 import type { BlockInfo, EntitySeen, TaskEnv } from "./types.ts";
 
 /** The helper's `blocks` cube reaches at most this far from its centre (`helper-pack/scripts/main.js`). */
-export const CUBE_RADIUS = 16;
+const CUBE_RADIUS = 16;
 /** How far a search reaches by default once the first lookup came back empty. */
-export const SEARCH_REACH = 48;
+const SEARCH_REACH = 48;
 /** At most this many `blocks` cubes per search, the first one included. */
-export const MAX_CUBES = 12;
+const MAX_CUBES = 12;
 
 export interface SearchOptions {
   /** Radius of the first lookup around the player (default the env's radius, else 16). */
@@ -71,14 +73,6 @@ export function ringCubes(me: Vec3, firstRadius: number, reach: number): RingCub
   return out.sort((a, b) => a.near - b.near || a.order - b.order).map(({ center, near }) => ({ center, near }));
 }
 
-function blockCenter(at: Vec3): Vec3 {
-  return { x: Math.floor(at.x) + 0.5, y: Math.floor(at.y), z: Math.floor(at.z) + 0.5 };
-}
-
-function distance(a: Vec3, b: Vec3): number {
-  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
-}
-
 /**
  * Blocks of any of `types`, nearest to the player first. The first query is the player's own cube of `radius`, as
  * before; only when it finds none do the ring's cubes follow, each skipped when the block at its centre does not
@@ -101,7 +95,7 @@ export async function findBlocks(env: TaskEnv, types: readonly string[], options
     try {
       return await env.query.blocks(types, at ? CUBE_RADIUS : radius, at);
     } catch (err) {
-      errors.push(`blocks${at ? ` around ${Math.floor(at.x)} ${Math.floor(at.y)} ${Math.floor(at.z)}` : ""}: ${messageOf(err)}`);
+      errors.push(`blocks${at ? ` around ${xyz(at)}` : ""}: ${errorMessage(err)}`);
       return [];
     }
   };
@@ -140,7 +134,7 @@ export async function findEntities(env: TaskEnv, types: readonly string[], optio
         try {
           return await env.query.entities(type, r);
         } catch (err) {
-          errors.push(`entities ${type} within ${r}: ${messageOf(err)}`);
+          errors.push(`entities ${type} within ${r}: ${errorMessage(err)}`);
           return [] as EntitySeen[];
         }
       }),
@@ -154,9 +148,6 @@ export async function findEntities(env: TaskEnv, types: readonly string[], optio
   return result(await ask(reach), `${reach} blocks`, 2);
 }
 
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
 
 /** Why a search found nothing, for a step's message: what was asked, how far, and the helper's errors. */
 export function notFoundText(what: string, search: Found<unknown>, asked: readonly string[]): string {

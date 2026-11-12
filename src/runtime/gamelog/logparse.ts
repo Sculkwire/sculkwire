@@ -259,6 +259,29 @@ function namedPack(message: string, packs: readonly IndexedPack[]): IndexedPack 
   );
 }
 
+interface PackLookup {
+  files: Set<string>;
+  /** Pack-relative paths of at least 5 characters, with their lowercase form. */
+  lowerFiles: [rel: string, lower: string][];
+  identifiers: [matcher: RegExp, rel: string][];
+}
+
+const lookups = new WeakMap<IndexedPack, PackLookup>();
+
+/** The pack's lookup tables for `mapMessage`, built once per indexed pack. */
+function lookupOf(p: IndexedPack): PackLookup {
+  let l = lookups.get(p);
+  if (!l) {
+    l = {
+      files: new Set(p.files),
+      lowerFiles: p.files.filter((rel) => rel.length >= 5).map((rel) => [rel, rel.toLowerCase()]),
+      identifiers: [...p.identifiers].map(([ident, rel]) => [new RegExp(`(?<![\\w:.])${ident.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w.])`), rel]),
+    };
+    lookups.set(p, l);
+  }
+  return l;
+}
+
 const BP_CATEGORIES = /^(Scripting|Commands|Recipes|Entity|Item|Block|Loot|Spawning|Feature|Biome|Trading|Molang|Json|Function|GameTest)/i;
 
 /** Resolve a message to a pack file (and range when one can be located). */
@@ -269,7 +292,7 @@ export function mapMessage(message: string, packs: readonly IndexedPack[], categ
   // World paths: worlds/<level>/behavior_packs/<folder>/<rel>
   for (const m of message.matchAll(/(?:behavior|resource)_packs\/([^/\s]+)\/([^\s|,;:'")\]]+)/g)) {
     const p = packs.find((x) => x.folder === m[1]);
-    if (p && p.files.includes(m[2]!)) return { pack: p, rel: m[2]! };
+    if (p && lookupOf(p).files.has(m[2]!)) return { pack: p, rel: m[2]! };
   }
 
   // Script frames: (main.js:7) relative to scripts/.
@@ -277,7 +300,8 @@ export function mapMessage(message: string, packs: readonly IndexedPack[], categ
     const candidates = [frame.file, `scripts/${frame.file.replace(/^\.?\//, "")}`];
     const order = named ? [named, ...packs.filter((p) => p !== named)] : packs;
     for (const p of order) {
-      const rel = candidates.find((c) => p.files.includes(c));
+      const files = lookupOf(p).files;
+      const rel = candidates.find((c) => files.has(c));
       if (rel) return { pack: p, rel, range: lineRange(frame.line, frame.column ?? 1) };
     }
   }
@@ -285,8 +309,8 @@ export function mapMessage(message: string, packs: readonly IndexedPack[], categ
   // Longest pack-relative path mentioned.
   let best: Location | undefined;
   for (const p of packs) {
-    for (const rel of p.files) {
-      if (rel.length < 5 || !low.includes(rel.toLowerCase())) continue;
+    for (const [rel, lower] of lookupOf(p).lowerFiles) {
+      if (!low.includes(lower)) continue;
       const better =
         !best ||
         rel.length > best.rel.length ||
@@ -298,18 +322,17 @@ export function mapMessage(message: string, packs: readonly IndexedPack[], categ
 
   for (const m of message.matchAll(/\bFunction\s+'?([\w./-]+)'?/g)) {
     const rel = `functions/${m[1]!.replace(/\.mcfunction$/, "")}.mcfunction`;
-    const p = packs.find((x) => x.files.includes(rel));
+    const p = packs.find((x) => lookupOf(x).files.has(rel));
     if (p) return { pack: p, rel };
   }
 
   for (const p of named ? [named, ...packs.filter((x) => x !== named)] : packs) {
-    for (const [ident, rel] of p.identifiers) {
-      const re = new RegExp(`(?<![\\w:.])${ident.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w.])`);
+    for (const [re, rel] of lookupOf(p).identifiers) {
       if (re.test(message)) return { pack: p, rel };
     }
   }
 
-  if (named && named.files.includes("manifest.json")) return { pack: named, rel: "manifest.json" };
+  if (named && lookupOf(named).files.has("manifest.json")) return { pack: named, rel: "manifest.json" };
   return undefined;
 }
 

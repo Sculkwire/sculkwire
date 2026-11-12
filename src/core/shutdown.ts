@@ -2,6 +2,8 @@
  * Cleanup that must run when the MCP server goes away (the client closed stdin, or a signal). Features register
  * hooks; `serveStdio` runs them once before exiting. A game or server sculkwire started must not outlive it.
  */
+import { errorMessage } from "./errors.ts";
+
 const hooks = new Set<() => Promise<unknown> | unknown>();
 
 export function onShutdown(hook: () => Promise<unknown> | unknown): void {
@@ -17,7 +19,7 @@ export function runShutdown(): Promise<void> {
       try {
         await hook();
       } catch (err) {
-        process.stderr.write(`sculkwire: shutdown hook failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`sculkwire: shutdown hook failed: ${errorMessage(err)}\n`);
       }
     }
   })();

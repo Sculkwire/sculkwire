@@ -8,12 +8,14 @@
  */
 import { cp, rm } from "node:fs/promises";
 import { formatDiagnostic, type Diagnostic } from "../../core/diagnostic.ts";
+import { errorMessage } from "../../core/errors.ts";
+import { summarizeProfile, type ProfileSummary } from "../debugger/profile.ts";
 import { DebuggerSession, connectTo } from "../debugger/session.ts";
-import { disposeBuild, indexProject, prepareInstance, projectPacks, writeRawLog, type BdsRunOptions, type ProjectPacks } from "./check.ts";
-import { disposeInstance, freeTcpPort, type BdsInstance } from "./instance.ts";
 import { entriesToDiagnostics, mergeEntries, parseConsole, type IndexedPack } from "../gamelog/logparse.ts";
-import { BdsServer, type ConsoleLine } from "./server.ts";
-import { collectLogs } from "./template.ts";
+import { freeTcpPort, type BdsInstance } from "./instance.ts";
+import { disposeBuild, disposeRun, indexProject, prepareInstance, projectPacks, type BdsRunOptions, type ProjectPacks } from "./project.ts";
+import { finishRun, runLabel } from "./run.ts";
+import { BdsServer, START_TIMEOUT_MS, type ConsoleLine } from "./server.ts";
 
 export interface BdsSession {
   id: string;
@@ -49,7 +51,11 @@ export interface SessionInfo {
 
 const sessions = new Map<string, BdsSession>();
 
-export function info(s: BdsSession): SessionInfo {
+export function sessionPacks(indexed: readonly IndexedPack[]): SessionInfo["packs"] {
+  return indexed.map((p) => ({ name: p.pack.name ?? p.pack.uuid ?? p.folder ?? "", kind: p.pack.kind, path: p.pack.relDir || "." }));
+}
+
+function info(s: BdsSession): SessionInfo {
   const dbg: SessionInfo["debugger"] = { attached: !!s.debugger && !s.debugger.closed, port: s.debuggerPort };
   if (s.debugger?.info) dbg.protocolVersion = s.debugger.info.version;
   if (s.debuggerError) dbg.error = s.debuggerError;
@@ -61,19 +67,20 @@ export function info(s: BdsSession): SessionInfo {
     instanceDir: s.instance.dir,
     port: s.instance.port,
     debugger: dbg,
-    packs: s.indexed.map((p) => ({ name: p.pack.name ?? p.pack.uuid ?? p.folder ?? "", kind: p.pack.kind, path: p.pack.relDir || "." })),
+    packs: sessionPacks(s.indexed),
     startedAt: new Date(s.startedAt).toISOString(),
   };
 }
 
-export function getSession(id: string): BdsSession {
+function getSession(id: string): BdsSession {
   const s = sessions.get(id);
   if (!s) throw new Error(`no BDS session ${id}; running: ${[...sessions.keys()].join(", ") || "none"}`);
   return s;
 }
 
-export function listSessions(): SessionInfo[] {
-  return [...sessions.values()].map(info);
+function requireDebugger(s: BdsSession): DebuggerSession {
+  if (!s.debugger || s.debugger.closed) throw new Error(`session ${s.id} has no attached script debugger${s.debuggerError ? `: ${s.debuggerError}` : ""}`);
+  return s.debugger;
 }
 
 export interface StartOptions extends BdsRunOptions {
@@ -117,26 +124,26 @@ export async function startSession(path: string, opts: StartOptions = {}): Promi
     keep: opts.keep ?? false,
   };
   sessions.set(session.id, session);
-  const timeoutMs = opts.startTimeoutMs ?? 180_000;
+  const timeoutMs = opts.startTimeoutMs ?? START_TIMEOUT_MS;
+  const attaching = new AbortController();
   const attach = wantDebugger
-    ? connectTo("127.0.0.1", debuggerPort, { timeoutMs }).then(
+    ? connectTo("127.0.0.1", debuggerPort, { timeoutMs, signal: attaching.signal }).then(
         (d) => {
           session.debugger = d;
         },
         (err: unknown) => {
-          session.debuggerError = err instanceof Error ? err.message : String(err);
+          session.debuggerError = errorMessage(err);
         },
       )
     : Promise.resolve();
   try {
     await server.started(timeoutMs);
   } catch (err) {
+    attaching.abort();
     sessions.delete(session.id);
     await server.stop(5000);
-    const tail = server.lines.slice(-30).map((l) => l.text).join("\n");
-    if (!opts.keep) await disposeInstance(instance);
-    await disposeBuild(project, opts.keep);
-    throw new Error(`BDS session did not start: ${err instanceof Error ? err.message : String(err)}\n${tail}`);
+    await disposeRun(project, instance, opts.keep);
+    throw new Error(`BDS session did not start: ${errorMessage(err)}\n${server.tail()}`);
   }
   await attach;
   // Let the post-start banner (telemetry notice) flush so it does not land in the first command's output.
@@ -145,14 +152,26 @@ export async function startSession(path: string, opts: StartOptions = {}): Promi
   return info(session);
 }
 
+/** Print every console line of the session, past and future; resolves when the server exits. */
+export function followSession(id: string, onLine: (line: ConsoleLine) => void): Promise<number | null> {
+  const { server } = getSession(id);
+  for (const l of server.lines) onLine(l);
+  server.on("line", onLine);
+  return server.exited;
+}
+
 export interface CommandResult {
   lines: ConsoleLine[];
   via: "console" | "debugger";
 }
 
+const RELOAD_RE = /^\/?reload(\s+all)?\s*$/;
+
 /**
  * Run a command. Console (stdin) by default; output = console lines until it goes quiet. `via: "debugger"`
  * runs it through the script debugger as `minecraftCommand` (output arrives as `[Scripting]` console lines).
+ * `reload` (functions + scripts) and `reload all` (also rejoins the world and reloads all packs) on the console
+ * rebuild a Regolith session first, so the reload loads the edited sources.
  */
 export async function sessionCommand(
   id: string,
@@ -161,10 +180,15 @@ export async function sessionCommand(
 ): Promise<CommandResult> {
   const s = getSession(id);
   if (opts.via === "debugger") {
-    if (!s.debugger || s.debugger.closed) throw new Error(`session ${id} has no attached script debugger${s.debuggerError ? `: ${s.debuggerError}` : ""}`);
+    const dbg = requireDebugger(s);
     const from = s.server.lines.length;
-    s.debugger.command(command, opts.dimension);
+    dbg.command(command, opts.dimension);
     return { lines: await s.server.quiet(from, { quietMs: opts.quietMs, maxMs: opts.maxMs, needOutput: true }), via: "debugger" };
+  }
+  const reload = RELOAD_RE.exec(command);
+  if (reload) {
+    await rebuild(s);
+    return { lines: await s.server.command(reload[1] ? "reload all" : "reload", { quietMs: 800, maxMs: 15_000 }), via: "console" };
   }
   return { lines: await s.server.command(command, opts), via: "console" };
 }
@@ -179,9 +203,10 @@ export interface LogsResult {
 /** Console lines with `seq > since` (max `limit`, oldest first) and the diagnostics they contain. */
 export function sessionLogs(id: string, since = 0, limit = 500): LogsResult {
   const s = getSession(id);
-  const lines = s.server.lines.filter((l) => l.seq > since).slice(0, limit);
+  // `seq` is the 1-based index of a line, so the lines after `since` start at index `since`.
+  const lines = s.server.lines.slice(since, since + limit);
   const entries = mergeEntries(parseConsole(lines.map((l) => l.text)));
-  const diagnostics = entriesToDiagnostics(entries, s.indexed, { baseline: s.baseline, label: `BDS ${s.server.serverVersion ?? ""}`.trim() });
+  const diagnostics = entriesToDiagnostics(entries, s.indexed, { baseline: s.baseline, label: runLabel(s.server, s.instance) });
   return { lines, next: lines.at(-1)?.seq ?? since, diagnostics };
 }
 
@@ -208,13 +233,28 @@ async function rebuild(s: BdsSession): Promise<void> {
   s.indexed = await indexProject(s.project, s.instance.packs);
 }
 
+export type ProfileResult = { action: "start" } | ({ action: "capture" | "stop" } & ProfileSummary);
+
 /**
- * `reload` (functions + scripts) or `reload all` (also rejoins the world and reloads all packs). A Regolith
- * session is rebuilt first, so the reload loads the edited sources.
+ * The script profiler over the session's debugger: `start`, `stop` (the top `limit` functions), or `capture`
+ * (start, run `command`, wait `durationMs`, stop).
  */
-export async function reloadSession(id: string, all = false): Promise<CommandResult> {
-  await rebuild(getSession(id));
-  return sessionCommand(id, all ? "reload all" : "reload", { quietMs: 800, maxMs: 15_000 });
+export async function sessionProfile(
+  id: string,
+  opts: { action: "capture" | "start" | "stop"; durationMs: number; command?: string; limit: number },
+): Promise<ProfileResult> {
+  const dbg = requireDebugger(getSession(id));
+  if (opts.action === "start") {
+    dbg.startProfiler();
+    return { action: "start" };
+  }
+  if (opts.action === "capture") {
+    dbg.startProfiler();
+    if (opts.command) dbg.command(opts.command);
+    await new Promise((r) => setTimeout(r, opts.durationMs));
+  }
+  const capture = await dbg.stopProfiler();
+  return { action: opts.action, ...summarizeProfile(capture.profile, opts.limit) };
 }
 
 export interface StopResult {
@@ -227,13 +267,13 @@ export async function stopSession(id: string): Promise<StopResult> {
   const s = getSession(id);
   sessions.delete(id);
   s.debugger?.close();
-  const exitCode = await s.server.stop();
-  const { contentLog, entries } = await collectLogs(s.instance, s.server);
-  const diagnostics = entriesToDiagnostics(entries, s.indexed, { baseline: s.baseline, label: `BDS ${s.server.serverVersion ?? ""}`.trim() });
-  const rawLogPath = await writeRawLog(s.instance.id, s.server, contentLog);
-  if (!s.keep) await disposeInstance(s.instance);
-  await disposeBuild(s.project, s.keep);
-  return { exitCode, rawLogPath, diagnostics };
+  try {
+    const exitCode = await s.server.stop();
+    const { diagnostics, rawLogPath } = await finishRun(s, s.server);
+    return { exitCode, rawLogPath, diagnostics };
+  } finally {
+    await disposeRun(s.project, s.instance, s.keep);
+  }
 }
 
 /** Stop every running session (MCP server shutdown). */

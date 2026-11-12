@@ -5,12 +5,15 @@
  * order of repairs (another slot, the missing item fetched, another station, giving up). It records what it did, in
  * order, in `actions`. The screen it opened is always closed (`close`), whatever ends the step.
  */
-import type { EngineFailure, EngineResult } from "../../engine/engine.ts";
-import type { PlayerInventory, Slot } from "../../engine/inventory.ts";
+import type { EngineFailure, EngineResult } from "../../engine/failure.ts";
+import type { PlayerInventory } from "../../engine/inventory.ts";
+import type { Slot } from "../../engine/slot.ts";
 import type { BlockFace, ScreenKind, ScreenSlotRef, ScreenState } from "../../engine/workstation.ts";
-import type { Vec3 } from "../player.ts";
+import { EYE_HEIGHT } from "../bedrock.ts";
+import { blockCenter, distance, xyz } from "../geometry.ts";
+import type { Vec3 } from "../types.ts";
+import { bareId, namespaced } from "./ids.ts";
 import {
-  bareId,
   FURNACE_STATIONS,
   fitsInventoryGrid,
   fuelRank,
@@ -20,7 +23,6 @@ import {
   ingredientText,
   inTag,
   matches,
-  namespaced,
   type Ingredient,
   type Recipe,
   type Station,
@@ -29,7 +31,6 @@ import { carriedStacks, countOf, countsIn, countsOf, refText, slotsOf, stationKe
 import { findBlocks, findEntities, notFoundText, type Found } from "./search.ts";
 import {
   cellOf,
-  EYE_HEIGHT,
   facesToward,
   MS_PER_TARGET,
   sameCell,
@@ -43,7 +44,7 @@ import {
 import type { BlockInfo, EntitySeen, InventoryCounts, TaskEnv, TaskFailure } from "./types.ts";
 
 /** Sub-goals go this deep (an ingredient of an ingredient of an ingredient). */
-export const MAX_DEPTH = 3;
+const MAX_DEPTH = 3;
 /** Stations of one type tried before giving up on that type. */
 const STATIONS_TRIED = 3;
 /** Arrive this close to a station (blocks, horizontally from its center): well inside the reach to use it. */
@@ -51,7 +52,7 @@ export const STATION_RADIUS = 2;
 /** The most items one screen move or one act may take: one stack. */
 const STACK = 64;
 /** A furnace smelts one item in 10 s, a blast furnace or smoker in 5 s; polled this often. */
-const SMELT_MS: Record<string, number> = { furnace: 10_000, blast_furnace: 5_000, smoker: 5_000 };
+const SMELT_MS: Record<string, number> & { furnace: number } = { furnace: 10_000, blast_furnace: 5_000, smoker: 5_000 };
 const POLL_MS = 500;
 /** After the inventory key, the screen is read every 100 ms until it shows its crafting grid, for at most 2 s. */
 const INVENTORY_WAIT_MS = 2_000;
@@ -70,7 +71,7 @@ const PLACE_CELLS = 4;
 const SHULKER_COLORS = ["undyed", "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray", "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black"];
 
 /** Containers a fetch looks in (vanilla block ids). */
-export const CONTAINER_BLOCKS: readonly string[] = [
+const CONTAINER_BLOCKS: readonly string[] = [
   "minecraft:chest",
   "minecraft:trapped_chest",
   "minecraft:barrel",
@@ -96,7 +97,10 @@ const FURNACE_INPUT_ENUM: Record<string, string> = {
 };
 const CHEST_ENUM: Record<string, string> = { chest: "LevelEntityContainer", barrel: "BarrelContainer", shulker_box: "ShulkerBoxContainer" };
 
-export function isShulkerBox(id: string): boolean {
+/** The entities a trade step deals with: villagers and wandering traders only. */
+const TRADERS: readonly string[] = ["minecraft:villager_v2", "minecraft:villager", "minecraft:wandering_trader"];
+
+function isShulkerBox(id: string): boolean {
   return /shulker_box$/.test(id);
 }
 
@@ -134,16 +138,14 @@ function failOf(failure: EngineFailure, what: string): StepFail {
   return new StepFail(reason, `${what}: ${failure.message}`);
 }
 
-function xyz(at: Vec3): string {
-  return `${Math.floor(at.x)} ${Math.floor(at.y)} ${Math.floor(at.z)}`;
+/** The standing spots of one try-from-spots loop (`Run.toSpot`), looked up once when the first is needed. */
+interface SpotWalk {
+  found?: Vec3[];
 }
 
-function distance(a: Vec3, b: Vec3): number {
-  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
-}
-
-function center(at: Vec3): Vec3 {
-  return { x: Math.floor(at.x) + 0.5, y: Math.floor(at.y), z: Math.floor(at.z) + 0.5 };
+/** How a use-from-spots loop ended: the uses, the spots and what each try met. */
+function usesText(uses: number, walk: SpotWalk, tried: readonly string[]): string {
+  return `tried ${uses} use${uses === 1 ? "" : "s"} from ${1 + (walk.found?.length ?? 0)} spot${walk.found?.length ? "s" : ""}: ${tried.join("; ")}`;
 }
 
 /** A container read through `container.get`, with where it stands. */
@@ -220,10 +222,6 @@ export class Run {
     return countsOf(await this.inventory());
   }
 
-  /* ------------------------------------------------------------------------------------------------------------ */
-  /* Names                                                                                                          */
-  /* ------------------------------------------------------------------------------------------------------------ */
-
   /** Every item id known: the registry, the recipe index and the inventory. */
   async universe(): Promise<Set<string>> {
     if (this.#universe) return this.#universe;
@@ -234,10 +232,6 @@ export class Run {
     this.#universe = ids;
     return ids;
   }
-
-  /* ------------------------------------------------------------------------------------------------------------ */
-  /* Screens and stations                                                                                           */
-  /* ------------------------------------------------------------------------------------------------------------ */
 
   async state(): Promise<ScreenState> {
     return this.call("reading the screen", this.env.engine.screenState());
@@ -299,7 +293,7 @@ export class Run {
   /** Walk next to a block; the walk's failure message when the way is not found. */
   async walkToBlock(block: BlockInfo): Promise<string | undefined> {
     this.check();
-    const walk = await this.env.controller.walkTo(center(block.location), STATION_RADIUS, this.signal);
+    const walk = await this.env.controller.walkTo(blockCenter(block.location), STATION_RADIUS, this.signal);
     this.check();
     if (!walk.ok) return walk.message;
     this.actions.push(`walked to the ${bareId(block.typeId)} at ${xyz(block.location)}`);
@@ -364,6 +358,22 @@ export class Run {
   }
 
   /**
+   * Spot `s` of a loop that tries a target from where the player stands (spot 0), then from each standable spot around
+   * `around()`, nearest first: `end` once they are used up, `skip` when the walk onto the spot failed (noted in
+   * `tried`), else `here` with the player on it.
+   */
+  async toSpot(s: number, walk: SpotWalk, around: () => Vec3 | Promise<Vec3>, what: string, tried: string[]): Promise<"here" | "skip" | "end"> {
+    if (s === 0) return "here";
+    walk.found ??= await this.standSpots(await around());
+    const spot = walk.found[s - 1];
+    if (!spot) return "end";
+    const walked = await this.stepTo(spot, what);
+    if (!walked) return "here";
+    tried.push(`from ${xyz(spot)}: the walk failed (${walked})`);
+    return "skip";
+  }
+
+  /**
    * Open a block's screen from where the player can: where it stands (the nearest point, then each face the eye is on
    * the side of), then from up to `SPOTS_PER_TARGET` standable spots around it, nearest first, the same faces again.
    * Stops at the first screen of the right kind at the right position; gives up after `USES_PER_TARGET` uses or
@@ -375,18 +385,11 @@ export class Run {
     const started = this.env.clock.now();
     const tried: string[] = [];
     let uses = 0;
-    let spots: Vec3[] | undefined;
+    const walk: SpotWalk = {};
     for (let s = 0; ; s++) {
-      if (s > 0) {
-        spots ??= await this.standSpots(cell);
-        const spot = spots[s - 1];
-        if (!spot) break;
-        const walked = await this.stepTo(spot, what);
-        if (walked) {
-          tried.push(`from ${xyz(spot)}: the walk failed (${walked})`);
-          continue;
-        }
-      }
+      const at = await this.toSpot(s, walk, () => cell, what, tried);
+      if (at === "end") break;
+      if (at === "skip") continue;
       const me = await this.env.controller.position();
       const eye = { ...me, y: me.y + EYE_HEIGHT };
       for (const face of [undefined, ...facesToward(eye, cell)]) {
@@ -404,7 +407,7 @@ export class Run {
         }
       }
     }
-    throw new StationRefused(`tried ${uses} use${uses === 1 ? "" : "s"} from ${1 + (spots?.length ?? 0)} spot${spots?.length ? "s" : ""}: ${tried.join("; ")}`);
+    throw new StationRefused(usesText(uses, walk, tried));
   }
 
   /** Where an entity stands now (it may have walked), or undefined when the helper no longer lists it. */
@@ -426,19 +429,12 @@ export class Run {
     const started = this.env.clock.now();
     const tried: string[] = [];
     let uses = 0;
-    let spots: Vec3[] | undefined;
+    const walk: SpotWalk = {};
     for (let s = 0; ; s++) {
       const now = (await this.entityNow(entity)) ?? entity;
-      if (s > 0) {
-        spots ??= await this.standSpots(now.location);
-        const spot = spots[s - 1];
-        if (!spot) break;
-        const walked = await this.stepTo(spot, what);
-        if (walked) {
-          tried.push(`from ${xyz(spot)}: the walk failed (${walked})`);
-          continue;
-        }
-      }
+      const at = await this.toSpot(s, walk, () => now.location, what, tried);
+      if (at === "end") break;
+      if (at === "skip") continue;
       if (uses >= USES_PER_TARGET || this.env.clock.now() - started > MS_PER_TARGET) {
         tried.push(`stopped after ${uses} uses in ${Math.round((this.env.clock.now() - started) / 1000)} s`);
         break;
@@ -486,7 +482,7 @@ export class Run {
       this.actions.push(`opened the trade screen of ${what}`);
       return state;
     }
-    throw new StationRefused(`tried ${uses} use${uses === 1 ? "" : "s"} from ${1 + (spots?.length ?? 0)} spot${spots?.length ? "s" : ""}: ${tried.join("; ")}`);
+    throw new StationRefused(usesText(uses, walk, tried));
   }
 
   /**
@@ -530,10 +526,6 @@ export class Run {
     }
     throw new StepFail(reached ? "refused" : "unreachable", `no ${label} within ${this.radius} blocks could be used (${tried.join("; ")})`);
   }
-
-  /* ------------------------------------------------------------------------------------------------------------ */
-  /* Moves                                                                                                          */
-  /* ------------------------------------------------------------------------------------------------------------ */
 
   /**
    * The repair after the game refused a move: the first possible of another slot, fetching the missing item, another
@@ -640,10 +632,6 @@ export class Run {
     }
   }
 
-  /* ------------------------------------------------------------------------------------------------------------ */
-  /* Containers near                                                                                                */
-  /* ------------------------------------------------------------------------------------------------------------ */
-
   async containers(): Promise<ContainerSeen[]> {
     if (this.#containers) return this.#containers;
     const me = await this.env.controller.position();
@@ -655,7 +643,7 @@ export class Run {
       const at = block.location;
       const view = await this.env.engine.readContainer({ x: Math.floor(at.x), y: Math.floor(at.y), z: Math.floor(at.z) });
       this.check();
-      if (view.ok) out.push({ block: block.typeId, at, slots: view.value.slots, distance: distance(me, center(at)) });
+      if (view.ok) out.push({ block: block.typeId, at, slots: view.value.slots, distance: distance(me, blockCenter(at)) });
     }
     this.#containers = out.sort((a, b) => a.distance - b.distance);
     return out;
@@ -765,7 +753,7 @@ export class Run {
   async placeCells(avoid: Vec3): Promise<Vec3[]> {
     const me = await this.env.controller.position();
     const feet = cellOf(me);
-    const behind = center(avoid);
+    const behind = blockCenter(avoid);
     const out: Vec3[] = [];
     const around: Vec3[] = [];
     for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) if ((dx || dz) && Math.hypot(dx, dz) <= 2) around.push({ x: feet.x + dx, y: feet.y, z: feet.z + dz });
@@ -789,18 +777,11 @@ export class Run {
   async placeBox(item: string, avoid: Vec3): Promise<BlockInfo> {
     const tried: string[] = [];
     let uses = 0;
-    let spots: Vec3[] | undefined;
+    const walk: SpotWalk = {};
     for (let s = 0; uses < USES_PER_TARGET; s++) {
-      if (s > 0) {
-        spots ??= await this.standSpots(await this.env.controller.position());
-        const spot = spots[s - 1];
-        if (!spot) break;
-        const walked = await this.stepTo(spot, `a free cell for the ${bareId(item)}`);
-        if (walked) {
-          tried.push(`from ${xyz(spot)}: the walk failed (${walked})`);
-          continue;
-        }
-      }
+      const at = await this.toSpot(s, walk, () => this.env.controller.position(), `a free cell for the ${bareId(item)}`, tried);
+      if (at === "end") break;
+      if (at === "skip") continue;
       for (const cell of await this.placeCells(avoid)) {
         if (uses >= USES_PER_TARGET) break;
         uses++;
@@ -826,10 +807,6 @@ export class Run {
     }
     throw new StepFail("refused", `placing the ${bareId(item)} failed in ${uses} tries: ${tried.join("; ") || "no free cell next to the player"}`);
   }
-
-  /* ------------------------------------------------------------------------------------------------------------ */
-  /* Making things                                                                                                  */
-  /* ------------------------------------------------------------------------------------------------------------ */
 
   /** Item ids that satisfy the ingredient and that the index knows a recipe for. */
   async candidates(ingredient: Ingredient, stock: InventoryCounts): Promise<string[]> {
@@ -1107,8 +1084,8 @@ export class Run {
         }
         if (missing > 0 && !inSlot && !burning) throw new StepFail("missing_ingredient", `needs fuel for ${missing} more smelts at the furnace`);
       }
-      const perItem = SMELT_MS[state.kind] ?? 10_000;
-      const deadline = this.env.clock.now() + smelts * perItem * 1.5 + 5_000;
+      const waitMs = smelts * (SMELT_MS[state.kind] ?? SMELT_MS.furnace) * 1.5 + 5_000;
+      const deadline = this.env.clock.now() + waitMs;
       let made = 0;
       let idle = 0;
       for (;;) {
@@ -1122,7 +1099,7 @@ export class Run {
         idle = left > 0 && !burn && !slotsOf(now, fuelKey)[0] ? idle + 1 : 0;
         if (left === 0 || idle >= 4) break;
         if (this.env.clock.now() > deadline) {
-          this.actions.push(`waited ${Math.round((smelts * perItem * 1.5 + 5_000) / 1000)} s; ${made} of ${smelts} smelted`);
+          this.actions.push(`waited ${Math.round(waitMs / 1000)} s; ${made} of ${smelts} smelted`);
           break;
         }
       }
@@ -1170,10 +1147,6 @@ export class Run {
       this.actions.push(`made ${bareId(item)} at the smithing table`);
     });
   }
-
-  /* ------------------------------------------------------------------------------------------------------------ */
-  /* Trading                                                                                                        */
-  /* ------------------------------------------------------------------------------------------------------------ */
 
   /** Buy `count` of `item` from the nearest villager or wandering trader that offers it. */
   async trade(item: string, count: number): Promise<void> {
@@ -1254,8 +1227,3 @@ export class Run {
     throw new StepFail(reached ? "refused" : "unreachable", `no trader within ${this.radius} blocks could sell ${bareId(item)} (${tried.join("; ")})`);
   }
 }
-
-/** The entities a trade step deals with: villagers and wandering traders only. */
-export const TRADERS: readonly string[] = ["minecraft:villager_v2", "minecraft:villager", "minecraft:wandering_trader"];
-
-export { center, distance, xyz };

@@ -1,6 +1,7 @@
 /** MCP tools over the versioned knowledge layer. Every result names the `{channel, version}` it came from. */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { ok } from "../core/mcp.ts";
 import { searchChangelogs } from "./changelog.ts";
 import { DOCS_ATTRIBUTION, searchDocs } from "./docs.ts";
 import { commandLookup, componentLookup, molangLookup, vanillaExample } from "./lookups.ts";
@@ -15,11 +16,6 @@ const channel = z
   .describe("Release channel; results are tagged with the exact build they describe");
 const offline = z.boolean().default(false).describe("Answer from cache only, never fetch");
 const anyRecord = z.record(z.string(), z.unknown());
-
-/** Text + structured result in the shape every tool returns. */
-function reply<T extends Record<string, unknown>>(summary: string, structured: T) {
-  return { content: [{ type: "text" as const, text: summary }], structuredContent: structured };
-}
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
@@ -57,7 +53,7 @@ export function register(server: McpServer): void {
       const sources = await sourceStatus(pins);
       const s = pins.channels.stable;
       const p = pins.channels.preview;
-      return reply(
+      return ok(
         [
           `stable ${s.version} (samples ${s.samples.tag}${s.bds ? `, BDS ${s.bds.version}` : ""}); ` +
             `preview ${p.version} (samples ${p.samples.tag}${p.bds ? `, BDS ${p.bds.version}` : ""}); pinned ${pins.updatedAt}`,
@@ -104,7 +100,7 @@ export function register(server: McpServer): void {
     async (args) => {
       const r = await searchDocs(args);
       const lines = r.hits.map((h) => `- ${h.title}${h.heading ? ` › ${h.heading}` : ""} ${h.url}`);
-      return reply(
+      return ok(
         `${plural(r.hits.length, "hit")} in creator docs (${r.channel} ${r.docsVersion}). ${DOCS_ATTRIBUTION}\n${lines.join("\n")}`,
         { ...r },
       );
@@ -161,14 +157,14 @@ export function register(server: McpServer): void {
       const r = await apiLookup({ query: symbol, ...rest });
       const head = `${r.channel} ${r.version} (metadata ${r.samplesTag})`;
       if (!r.entries.length) {
-        return reply(`no Script API symbol "${symbol}" in ${head}. Near: ${r.suggestions.join(", ") || "none"}`, { ...r });
+        return ok(`no Script API symbol "${symbol}" in ${head}. Near: ${r.suggestions.join(", ") || "none"}`, { ...r });
       }
       const lines = r.entries.map(
         (e) =>
           `- ${e.module}@${e.npmVersion} ${e.kind} ${e.name}${e.beta ? " [beta]" : ""}${e.since ? ` since ${e.since}` : ""}` +
           `${e.inheritedFrom ? ` (inherited from ${e.inheritedFrom})` : ""}\n  ${e.signature}${e.summary ? `\n  ${e.summary.split("\n")[0]}` : ""}`,
       );
-      return reply(`${head}\n${lines.join("\n")}`, { ...r });
+      return ok(`${head}\n${lines.join("\n")}`, { ...r });
     },
   );
 
@@ -192,7 +188,7 @@ export function register(server: McpServer): void {
     async (args) => {
       const r = await commandLookup(args);
       const lines = r.commands.flatMap((c) => [`/${c.name}: ${c.description}`, ...c.overloads.map((o) => `  ${o.syntax}`)]);
-      return reply(
+      return ok(
         lines.length
           ? `${r.channel} ${r.version}\n${lines.join("\n")}`
           : `no command "${args.name}" in ${r.channel} ${r.version}. Near: ${r.suggestions.join(", ") || "none"}`,
@@ -221,7 +217,7 @@ export function register(server: McpServer): void {
     async (args) => {
       const r = await molangLookup(args);
       const lines = r.entries.map((e) => `- ${e.name}: ${e.description}`);
-      return reply(
+      return ok(
         `${r.exact ? "" : "no exact match; "}${plural(r.entries.length, "entry")} (${r.channel} ${r.version})\n${lines.join("\n")}`,
         { ...r, entries: r.entries.map((e) => ({ ...e })) },
       );
@@ -287,7 +283,7 @@ export function register(server: McpServer): void {
             ? `${r.id} ${r.channel} ${r.version}`
             : `no component "${r.id}" in ${r.channel} ${r.version}. Near: ${r.suggestions.join(", ") || "none"}`;
       const text = [head, ...formatRockide(r.rockide)].join("\n");
-      return reply(text, {
+      return ok(text, {
         ...r,
         docs: r.docs.map((d) => ({ ...d })),
         engineSchemas: r.engineSchemas.map((d) => ({ ...d })),
@@ -324,7 +320,7 @@ export function register(server: McpServer): void {
     async (args) => {
       const r = await vanillaExample(args);
       const lines = r.examples.map((e) => `- ${e.file}:${e.line}`);
-      return reply(
+      return ok(
         `${r.identifier} appears in ${plural(r.totalFiles, "vanilla file")} (${r.channel} ${r.version})\n${lines.join("\n")}`,
         { ...r, ids: r.ids.map((i) => ({ ...i })) },
       );
@@ -379,7 +375,7 @@ export function register(server: McpServer): void {
         !r.hits.length && r.articles
           ? r.articles.map((a) => `- ${a.date.slice(0, 10)} ${a.title} (${a.version}) ${a.url}`)
           : lines;
-      return reply(`${plural(r.hits.length, "hit")}${range} (${r.channel} changelogs up to ${r.version})\n${listed.join("\n")}`, {
+      return ok(`${plural(r.hits.length, "hit")}${range} (${r.channel} changelogs up to ${r.version})\n${listed.join("\n")}`, {
         ...r,
       });
     },

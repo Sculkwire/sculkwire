@@ -4,29 +4,25 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../client/bridge.ts", async (importOriginal) => ({
-  ...(await importOriginal<Record<string, unknown>>()),
-  bridge: { query: vi.fn() },
-}));
-
-import { bridge, HelperQueryError } from "../client/bridge.ts";
-import { EngineSession, type EngineResult } from "./engine.ts";
+import type { ScriptRoute } from "./deps.ts";
+import { EngineSession } from "./engine.ts";
+import type { EngineResult } from "./failure.ts";
 import {
   craftMatchParams,
-  enchantmentName,
   parseAttributes,
   parseContainer,
   parseCraftGrid,
   parseCraftMatch,
   parseInventory,
   parseOpenContainer,
-  parseSlot,
   readContainer,
   readPlayerInventory,
   normalizeGrid,
   craftRun,
 } from "./inventory.ts";
-import { itemSlotSchema } from "./workstation.ts";
+
+/** The helper pack's query, as `src/features.ts` hands it in. */
+const query = vi.fn<ScriptRoute["query"]>();
 
 const slot = (item: string, count = 1) => ({ item, count });
 
@@ -48,73 +44,7 @@ function detached(): EngineSession {
 }
 
 beforeEach(() => {
-  vi.mocked(bridge.query).mockReset();
-});
-
-describe("parseSlot", () => {
-  it("namespaces a bare item id and always reports enchantments", () => {
-    expect(parseSlot(slot("oak_planks", 4))).toEqual({ item: "minecraft:oak_planks", count: 4, enchantments: [] });
-  });
-
-  it("keeps an empty slot as null and rejects a slot with no item", () => {
-    expect(parseSlot(null)).toBeNull();
-    expect(parseSlot({ count: 2 })).toBeUndefined();
-    expect(parseSlot({ item: "  ", count: 2 })).toBeUndefined();
-  });
-
-  it("defaults the count and drops a count below one", () => {
-    expect(parseSlot({ item: "minecraft:stone" })).toEqual({ item: "minecraft:stone", count: 1, enchantments: [] });
-    expect(parseSlot(slot("minecraft:stone", 0))).toBeUndefined();
-    expect(parseSlot(slot("minecraft:stone", 1.5))).toBeUndefined();
-  });
-
-  it("clamps damage into the item's own maximum", () => {
-    expect(parseSlot({ item: "minecraft:diamond_pickaxe", durability: { damage: 4000, max: 1561 } })?.durability).toEqual({ damage: 1561, max: 1561 });
-    expect(parseSlot({ item: "minecraft:diamond_pickaxe", durability: { damage: -3, max: 1561 } })?.durability).toEqual({ damage: 0, max: 1561 });
-  });
-
-  it("reads both the game's and the Script API's enchantment shape", () => {
-    const both = parseSlot({
-      item: "minecraft:diamond_sword",
-      enchantments: [{ id: "sharpness", level: 5 }, { type: { id: "minecraft:unbreaking" }, level: 3 }],
-    });
-    expect(both?.enchantments).toEqual([
-      { id: "minecraft:sharpness", level: 5 },
-      { id: "minecraft:unbreaking", level: 3 },
-    ]);
-  });
-
-  it("names the game's numeric enchantment ids", () => {
-    const pick = parseSlot({ item: "minecraft:iron_pickaxe", enchantments: [{ id: 17, level: 1 }, { id: 15, level: 1 }] });
-    expect(pick?.enchantments).toEqual([
-      { id: "minecraft:unbreaking", level: 1 },
-      { id: "minecraft:efficiency", level: 1 },
-    ]);
-    expect(enchantmentName(0)).toBe("minecraft:protection");
-    expect(enchantmentName(9)).toBe("minecraft:sharpness");
-    expect(enchantmentName(37)).toBe("minecraft:swift_sneak");
-    expect(enchantmentName(40)).toBe("minecraft:breach");
-    expect(enchantmentName(99)).toBe("minecraft:unknown_99");
-    // A negative or fractional number is not an id.
-    expect(parseSlot({ item: "minecraft:stick", enchantments: [{ id: -1 }, { id: 1.5 }] })?.enchantments).toEqual([]);
-  });
-
-  it("carries a custom name, lore and the contents of a container item", () => {
-    const bundle = parseSlot({
-      item: "minecraft:bundle",
-      name: "Kit",
-      lore: ["line one"],
-      contents: [slot("minecraft:bread", 3), null],
-    });
-    expect(bundle?.name).toBe("Kit");
-    expect(bundle?.lore).toEqual(["line one"]);
-    expect(bundle?.contents).toEqual([{ item: "minecraft:bread", count: 3, enchantments: [] }, null]);
-  });
-
-  it("publishes a shulker box with empty inner slots through the output schema", () => {
-    const box = parseSlot({ item: "minecraft:shulker_box", contents: [slot("minecraft:emerald"), null, null, slot("minecraft:golden_apple", 2)] });
-    expect(itemSlotSchema.safeParse(box).success).toBe(true);
-  });
+  query.mockReset();
 });
 
 describe("parseInventory", () => {
@@ -244,39 +174,39 @@ describe("routes", () => {
       "player.inventory": { selectedSlot: 1, hotbar: [slot("minecraft:torch", 12)], inventory: [] },
       "player.attributes": { health: { current: 20, min: 0, max: 20, default: 20 } },
     });
-    const result = await readPlayerInventory(session);
+    const result = await readPlayerInventory(query, session);
     expect(result.ok).toBe(true);
     expect(result.ok && result.value.source).toBe("engine");
     expect(result.ok && result.value.inventory.selectedSlot).toBe(2);
     expect(result.ok && result.value.inventory.hotbar[0]).toEqual({ item: "minecraft:torch", count: 12, enchantments: [] });
-    expect(bridge.query).not.toHaveBeenCalled();
+    expect(query).not.toHaveBeenCalled();
   });
 
   it("falls back to the helper pack without an agent and says so", async () => {
-    vi.mocked(bridge.query).mockResolvedValue({
+    query.mockResolvedValue({
       attributes: { health: { current: 14 } },
       inventory: { selectedSlot: 0, hotbar: [slot("minecraft:bread", 2)], inventory: [] },
     });
-    const result = await readPlayerInventory(detached());
+    const result = await readPlayerInventory(query, detached());
     expect(result.ok).toBe(true);
     expect(result.ok && result.value.source).toBe("script");
     expect(result.ok && result.value.inventory.selectedSlot).toBe(1);
     expect(result.ok && result.value.attributes.health?.current).toBe(14);
-    expect(bridge.query).toHaveBeenCalledWith("inventory");
+    expect(query).toHaveBeenCalledWith("inventory");
   });
 
   it("keeps an agent failure that the helper pack cannot answer", async () => {
     const session = new EngineSession({ port: 9, timeoutMs: 100 });
     session.call = async () => ({ ok: false, code: -32002, reason: "not_in_world", message: "no world is loaded" });
-    const result = await readPlayerInventory(session);
+    const result = await readPlayerInventory(query, session);
     expect(result.ok).toBe(false);
     expect(!result.ok && result.reason).toBe("not_in_world");
-    expect(bridge.query).not.toHaveBeenCalled();
+    expect(query).not.toHaveBeenCalled();
   });
 
   it("names both routes when no agent is listening and the helper pack is not running either", async () => {
-    vi.mocked(bridge.query).mockRejectedValue(new Error("the game is not running"));
-    const result = await readPlayerInventory(detached());
+    query.mockRejectedValue(new Error("the game is not running"));
+    const result = await readPlayerInventory(query, detached());
     expect(result.ok).toBe(false);
     expect(!result.ok && result.reason).toBe("not_attached");
     expect(!result.ok && result.message).toContain("the game is not running");
@@ -290,19 +220,19 @@ describe("routes", () => {
       session.call = async () => ({ ok: false, code: -32000, reason: "disconnected", message: "cannot connect to agent on 127.0.0.1:9: connect ECONNREFUSED 127.0.0.1:9" });
       return session;
     };
-    vi.mocked(bridge.query).mockResolvedValue({ attributes: {}, inventory: { selectedSlot: 0, hotbar: [], inventory: [] } });
-    const inventory = await readPlayerInventory(gone());
+    query.mockResolvedValue({ attributes: {}, inventory: { selectedSlot: 0, hotbar: [], inventory: [] } });
+    const inventory = await readPlayerInventory(query, gone());
     expect(inventory.ok && inventory.value.source).toBe("script");
     expect(inventory.ok && inventory.value.note).toMatch(/agent did not answer \(disconnected: .*ECONNREFUSED.*\); answered from the helper pack/);
 
-    vi.mocked(bridge.query).mockResolvedValue({ block: "minecraft:chest", size: 1, slots: [null] });
-    const container = await readContainer({ x: 1, y: 64, z: -2 }, gone());
+    query.mockResolvedValue({ block: "minecraft:chest", size: 1, slots: [null] });
+    const container = await readContainer({ x: 1, y: 64, z: -2 }, query, gone());
     expect(container.ok && container.value.block).toBe("minecraft:chest");
     expect(container.ok && container.value.note).toMatch(/disconnected/);
 
     // Neither route answers: the agent's reason stays.
-    vi.mocked(bridge.query).mockRejectedValue(new Error("the game is not running"));
-    const failed = await readPlayerInventory(gone());
+    query.mockRejectedValue(new Error("the game is not running"));
+    const failed = await readPlayerInventory(query, gone());
     expect(!failed.ok && failed.reason).toBe("disconnected");
     expect(!failed.ok && failed.message).toContain("ECONNREFUSED");
   });
@@ -310,27 +240,28 @@ describe("routes", () => {
   it("reads a container from the agent, and from the helper pack without one", async () => {
     const fromAgent = await readContainer(
       { x: 1, y: 64, z: -2 },
+      query,
       answered({ "container.get": { block: "minecraft:barrel", size: 1, slots: [slot("minecraft:coal", 9)] } }),
     );
     expect(fromAgent.ok && fromAgent.value.block).toBe("minecraft:barrel");
     expect(fromAgent.ok && fromAgent.value.slots[0]).toEqual({ item: "minecraft:coal", count: 9, enchantments: [] });
 
-    vi.mocked(bridge.query).mockResolvedValue({ block: "minecraft:chest", size: 2, slots: [null, slot("minecraft:dirt", 3)] });
-    const fromScript = await readContainer({ x: 1, y: 64, z: -2 }, detached());
+    query.mockResolvedValue({ block: "minecraft:chest", size: 2, slots: [null, slot("minecraft:dirt", 3)] });
+    const fromScript = await readContainer({ x: 1, y: 64, z: -2 }, query, detached());
     expect(fromScript.ok && fromScript.value.block).toBe("minecraft:chest");
-    expect(bridge.query).toHaveBeenCalledWith("container", { x: 1, y: 64, z: -2 });
+    expect(query).toHaveBeenCalledWith("container", { x: 1, y: 64, z: -2 });
   });
 
   it("turns a block without a container into invalid_params, as the agent reports it", async () => {
-    vi.mocked(bridge.query).mockRejectedValue(new HelperQueryError("helper: minecraft:stone at 4 64 -2 has no container", "no_container"));
-    const result = await readContainer({ x: 4, y: 64, z: -2 }, detached());
+    query.mockRejectedValue(Object.assign(new Error("helper: minecraft:stone at 4 64 -2 has no container"), { reason: "no_container" }));
+    const result = await readContainer({ x: 4, y: 64, z: -2 }, query, detached());
     expect(result.ok).toBe(false);
     expect(!result.ok && result.reason).toBe("invalid_params");
     expect(!result.ok && result.code).toBe(-32602);
   });
 
   it("refuses a fractional block position before it reaches the agent", async () => {
-    const result = await readContainer({ x: 1.5, y: 64, z: 0 }, detached());
+    const result = await readContainer({ x: 1.5, y: 64, z: 0 }, query, detached());
     expect(!result.ok && result.reason).toBe("invalid_params");
   });
 
@@ -338,17 +269,17 @@ describe("routes", () => {
     for (const dimension of ["nether", "minecraft:nether", 1, " Minecraft:Nether "]) {
       const session = answered({ "container.get": { block: "minecraft:barrel", size: 0, slots: [] } });
       const call = vi.spyOn(session, "call");
-      await readContainer({ x: 1, y: 64, z: -2, dimension }, session);
+      await readContainer({ x: 1, y: 64, z: -2, dimension }, query, session);
       expect(call.mock.calls[0]?.[1]).toEqual({ x: 1, y: 64, z: -2, dimension: "nether" });
     }
-    vi.mocked(bridge.query).mockResolvedValue({ block: "minecraft:chest", size: 0, slots: [] });
-    await readContainer({ x: 1, y: 64, z: -2, dimension: "minecraft:the_end" }, detached());
-    expect(bridge.query).toHaveBeenCalledWith("container", { x: 1, y: 64, z: -2, dimension: "the_end" });
+    query.mockResolvedValue({ block: "minecraft:chest", size: 0, slots: [] });
+    await readContainer({ x: 1, y: 64, z: -2, dimension: "minecraft:the_end" }, query, detached());
+    expect(query).toHaveBeenCalledWith("container", { x: 1, y: 64, z: -2, dimension: "the_end" });
   });
 
   it("refuses a dimension the agent does not know instead of reading the overworld", async () => {
     for (const dimension of ["minecraft:aether", 3]) {
-      const result = await readContainer({ x: 1, y: 64, z: -2, dimension }, detached());
+      const result = await readContainer({ x: 1, y: 64, z: -2, dimension }, query, detached());
       expect(!result.ok && result.reason).toBe("invalid_params");
     }
   });

@@ -9,6 +9,7 @@
  * - desktop elsewhere: the install's launch command (or the user starts the game), no background input.
  * Launch state is persisted so other processes (CLI) can find it.
  */
+import { errorMessage } from "../../core/errors.ts";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { closeSync, existsSync, openSync } from "node:fs";
 import { mkdir, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
@@ -16,9 +17,10 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { dataDir } from "../../core/paths.ts";
 import { findOnPath } from "../../core/which.ts";
+import { GAME_EXE } from "../../gamefiles/gdk.ts";
 import { winePrefix } from "../../gamefiles/wine.ts";
 import type { ClientInstall } from "../../gamefiles/install.ts";
-import type { InputTakeover } from "./player.ts";
+import type { InputRoute, PlayerInput } from "./input.ts";
 import {
   belongsToInstall,
   chordKeys,
@@ -78,8 +80,10 @@ export interface LaunchOptions {
   height?: number;
   /** gamescope frame rate (window and headless modes). Default 60. */
   fps?: number;
-  extraArgs?: string[];
 }
+
+/** The game window's size when a launch does not choose one. */
+export const DEFAULT_FRAME = { width: 1280, height: 720 } as const;
 
 const statePath = () => dataDir("client", "launch.json");
 
@@ -115,7 +119,7 @@ export async function gamePids(install?: ClientInstall): Promise<number[]> {
     const { stdout } = await run("ps", ["-axo", "pid=,command="]);
     return stdout
       .split("\n")
-      .filter((l) => /Minecraft\.Windows\.exe/i.test(l) && !/\bgrep\b/.test(l))
+      .filter((l) => l.toLowerCase().includes(GAME_EXE.toLowerCase()) && !/\bgrep\b/.test(l))
       .map((l) => Number(l.trim().split(/\s+/)[0]))
       .filter((n) => n > 0);
   }
@@ -128,7 +132,7 @@ export async function gamePids(install?: ClientInstall): Promise<number[]> {
     try {
       const cmd = await readFile(`/proc/${name}/cmdline`, "utf8");
       const argv0 = cmd.split("\0")[0] ?? "";
-      if (!/Minecraft\.Windows\.exe$/i.test(argv0)) continue;
+      if (!argv0.toLowerCase().endsWith(GAME_EXE.toLowerCase())) continue;
       if (prefix) {
         const env = await readFile(`/proc/${name}/environ`, "utf8");
         const wp = /(?:^|\0)WINEPREFIX=([^\0]*)/.exec(env)?.[1];
@@ -157,22 +161,12 @@ export function worldUri(levelId: string, preview: boolean): string {
   return `${preview ? "minecraft-preview" : "minecraft"}://connect?localLevelId=${encodeURIComponent(levelId)}`;
 }
 
-/** `-key value` activation arguments for Minecraft.Windows.exe. */
-export function activationArgs(opts: Pick<LaunchOptions, "extraArgs">): string[] {
-  return [...(opts.extraArgs ?? [])];
-}
-
-/**
- * Expand the install's launch command: `{args}` → activation arguments (dropped when none), `{uri}` → world
- * deeplink (appended when the command has no `{uri}`). The deeplink must come after the `-key value` pairs: the game
- * treats the first non-dash argument as the deeplink.
- */
-export function launchArgv(template: readonly string[], args: readonly string[], uri: string | undefined): string[] {
+/** Expand the install's launch command: `{uri}` → world deeplink (appended when the command has no `{uri}`). */
+export function launchArgv(template: readonly string[], uri: string | undefined): string[] {
   const out: string[] = [];
   let usedUri = false;
   for (const part of template) {
-    if (part === "{args}") out.push(...args);
-    else if (part.includes("{uri}")) {
+    if (part.includes("{uri}")) {
       usedUri = true;
       if (uri) out.push(part.replace("{uri}", uri));
     } else out.push(part);
@@ -288,10 +282,8 @@ export async function launch(install: ClientInstall, opts: LaunchOptions): Promi
       mode = "desktop";
     } else gamescope = true;
   }
-  const width = opts.width ?? 1280;
-  const height = opts.height ?? 720;
-  const args = activationArgs(opts);
-  if (args.length && !install.passesArgs) notes.push(`this launcher cannot pass ${args.join(" ")} to the game; ignored`);
+  const width = opts.width ?? DEFAULT_FRAME.width;
+  const height = opts.height ?? DEFAULT_FRAME.height;
   const uri = opts.levelId ? worldUri(opts.levelId, install.preview) : undefined;
   const launchLog = dataDir("client", "launch.log");
   const state: LaunchState = { mode, startedAt: Date.now(), pid: 0, argv: [], launchLog, width, height, notes };
@@ -318,7 +310,7 @@ export async function launch(install: ClientInstall, opts: LaunchOptions): Promi
       throw new Error(`the installer's launch lock ${install.launchLock} stayed busy for 60 s; is another Minecraft instance starting?`);
     }
   }
-  const game = launchArgv(install.launch, install.passesArgs ? args : [], uri);
+  const game = launchArgv(install.launch, uri);
   const argv = !gamescope ? game : gamescopeArgv(gamescopeBackend(mode === "headless" ? "headless" : "window"), width, height, opts.fps ?? 60, game);
   state.argv = argv;
   const env = sessionEnv();
@@ -356,14 +348,18 @@ export async function launch(install: ClientInstall, opts: LaunchOptions): Promi
   return state;
 }
 
-/** Wait for this install's game process to exist (launchers take a few seconds; a user may take minutes). */
-export async function waitForGame(install: ClientInstall, timeoutMs: number): Promise<number> {
+/**
+ * Wait for this install's game process to exist (launchers take a few seconds; a user may take minutes). Rejects as
+ * soon as `signal` aborts.
+ */
+export async function waitForGame(install: ClientInstall, timeoutMs: number, signal?: AbortSignal): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    signal?.throwIfAborted();
     const [pid] = await gamePids(install);
     if (pid) return pid;
-    if (Date.now() > deadline) throw new Error(`Minecraft.Windows.exe did not start within ${timeoutMs} ms`);
-    await sleep(500);
+    if (Date.now() > deadline) throw new Error(`${GAME_EXE} did not start within ${timeoutMs} ms`);
+    await sleep(500, undefined, { signal });
   }
 }
 
@@ -376,7 +372,7 @@ export async function muteWindowsGame(state: LaunchState, pid: number, timeoutMs
   try {
     changed = await windowsMute([pid], true, timeoutMs);
   } catch (e) {
-    return `could not mute the game (${e instanceof Error ? e.message : String(e)}); its sound plays normally`;
+    return `could not mute the game (${errorMessage(e)}); its sound plays normally`;
   }
   if (changed < 0) return "did not mute the game: Windows has no active audio output device";
   if (changed === 0) return `could not mute the game: it opened no audio session within ${Math.round(timeoutMs / 1000)} s; its sound plays normally`;
@@ -405,7 +401,7 @@ export async function stop(install: ClientInstall): Promise<{ stopped: boolean; 
       const { stdout, stderr } = await run(install.stop[0]!, install.stop.slice(1), { timeout: 60_000, windowsHide: true });
       toolOutput = `${stdout}${stderr}`.trim();
     } catch (e) {
-      toolOutput = e instanceof Error ? e.message : String(e);
+      toolOutput = errorMessage(e);
     }
   } else {
     if (process.platform === "win32") await windowsKill(before, false);
@@ -462,10 +458,6 @@ async function gamescopeWindow(state: LaunchState): Promise<string> {
 export function hasInput(state: LaunchState): boolean {
   return !!state.xDisplay || process.platform === "win32";
 }
-
-/** Where keyboard/mouse input can go for this launch, or an explanation why it cannot. */
-/** Where `sendInput` delivers: xdotool into gamescope's own display, or SendInput on Windows. */
-export type InputRoute = "gamescope" | "windows";
 
 function inputRoute(state: LaunchState): InputRoute {
   if (state.xDisplay) return "gamescope";
@@ -545,47 +537,13 @@ export async function typeChatCommand(state: LaunchState, command: string): Prom
     return;
   }
   const window = await gamescopeWindow(state);
-  await xdotool(state, ["mousemove", "--window", window, String(Math.floor((state.width ?? 1280) / 2)), String(Math.floor((state.height ?? 720) / 2))]);
+  await xdotool(state, ["mousemove", "--window", window, String(Math.floor((state.width ?? DEFAULT_FRAME.width) / 2)), String(Math.floor((state.height ?? DEFAULT_FRAME.height) / 2))]);
   await sleep(300);
   await xdotool(state, ["key", "slash"]);
   await sleep(1200);
   await xdotool(state, ["type", "--delay", "30", text]);
   await sleep(300);
   await xdotool(state, ["key", "Return"]);
-}
-
-/**
- * Windows only: input reaches the game only while its window is in the foreground. `userHasControl` is true while it
- * is not, `onTakeover` fires on each loss and `untilControl` waits for the window to come back (the input lock
- * interface, so a play job pauses the same way as on an F9 takeover).
- */
-export interface ForegroundGate extends InputTakeover {
-  /** Bring the game window to the foreground: once when an action or job starts, never in the middle of one. */
-  activate(): Promise<void>;
-}
-
-/** Held keys, relative mouse look and mouse buttons: what a player's hands do. */
-export interface PlayerInput {
-  keyDown(key: string): Promise<void>;
-  keyUp(key: string): Promise<void>;
-  /** Relative mouse motion in pixels: +x turns right, +y looks down. */
-  look(dx: number, dy: number): Promise<void>;
-  button(button: 1 | 2 | 3, down: boolean): Promise<void>;
-  /** End the input route's helper process, if it has one (the game stopped). */
-  close?(): void;
-  /** Windows: the foreground the input depends on. Absent where input does not need it (gamescope). */
-  foreground?: ForegroundGate;
-  /** Why this game has no keyboard and mouse route (a Linux desktop window); every method then rejects with it. */
-  unavailable?: string;
-}
-
-/**
- * The keyboard and mouse route of a game that has none, for a player driven through the engine route alone: every
- * call rejects with `reason`, and `close` does nothing.
- */
-export function unavailableInput(reason: string): PlayerInput {
-  const refuse = async (): Promise<never> => Promise.reject(new Error(reason));
-  return { keyDown: refuse, keyUp: refuse, look: refuse, button: refuse, close: () => undefined, unavailable: reason };
 }
 
 /**

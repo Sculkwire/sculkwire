@@ -2,8 +2,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
+import { E, writeRockideTree } from "../testing/rockidetree.ts";
+import { validateProject } from "./index.ts";
 import { parseJson } from "./jsonc.ts";
-import { checkSchemaFile, chooseSchema, globToRegExp } from "./schema.ts";
+import { calibration, checkSchemaFile, chooseSchema, globToRegExp } from "./schema.ts";
 
 // A tiny hand-written engine-schema tree in the bedrock-samples `metadata/json_schemas` layout.
 const root = mkdtempSync(join(tmpdir(), "sculk-schema-test-"));
@@ -86,5 +88,89 @@ describe("schema errors", () => {
       calibration: { signatures: new Set([sig]) },
     });
     expect(r.diagnostics.map((d) => [d.code, d.severity])).toEqual([["schema.gap", "warning"]]);
+  });
+});
+
+describe("vanilla calibration", () => {
+  it("is keyed by the schema sources, so a new rockide release recalibrates", async () => {
+    const prevCache = process.env.SCULKWIRE_CACHE;
+    process.env.SCULKWIRE_CACHE = join(root, "cache");
+    try {
+      let runs = 0;
+      const files = async () => {
+        runs++;
+        return [];
+      };
+      await calibration("vanilla-id", { rockideSchemasDir: join(root, "rockide-v1") }, files);
+      await calibration("vanilla-id", { rockideSchemasDir: join(root, "rockide-v1") }, files);
+      expect(runs).toBe(1);
+      await calibration("vanilla-id", { rockideSchemasDir: join(root, "rockide-v2") }, files);
+      expect(runs).toBe(2);
+    } finally {
+      if (prevCache === undefined) delete process.env.SCULKWIRE_CACHE;
+      else process.env.SCULKWIRE_CACHE = prevCache;
+    }
+  });
+});
+
+const tree = join(root, "rockide");
+writeRockideTree(tree);
+const COMMIT = "1".repeat(40);
+
+describe("validator routing with rockide", () => {
+  // An engine dump that also covers entities: rockide still wins where its fileMatch routes the file.
+  const engine = join(root, "engine");
+  mkdirSync(join(engine, "server", "entity", "1.21.0"), { recursive: true });
+  writeFileSync(join(engine, "server", "entity", "1.21.0", "ActorDocument.json"), JSON.stringify({ type: "object" }));
+  const mob = (components: object) => ({ format_version: "1.26.0", "minecraft:entity": { components } });
+
+  it("prefers rockide and falls back to engine; nothing covers a file neither routes", async () => {
+    const opts = { rockideSchemasDir: tree, engineSchemasDir: engine };
+    const c = await chooseSchema("behavior", "entities/a.json", "entity", mob({}), opts);
+    expect(c?.label).toBe(`rockide ${E}/_index.json`);
+    expect((await chooseSchema("behavior", "entities/a.json", "entity", mob({}), { engineSchemasDir: engine }))?.source).toBe("engine");
+    expect(await chooseSchema("behavior", "spawn_rules/x.json", "spawn_rule", {}, opts)).toBeUndefined();
+  });
+
+  it("reports unknown components the engine dump admits", async () => {
+    const doc = parseJson(JSON.stringify(mob({ "minecraft:health": { value: 5 }, "minecraft:not_real": {} }), null, 2));
+    const r = await checkSchemaFile({ packKind: "behavior", rel: "entities/a.json", kind: "entity", doc, opts: { rockideSchemasDir: tree, engineSchemasDir: engine } });
+    expect(r.choice?.source).toBe("rockide");
+    expect(r.diagnostics.map((d) => [d.severity, d.pointer])).toEqual([["error", "/minecraft:entity/components/minecraft:not_real"]]);
+  });
+
+  it("accepts flat match_tool conditions with range_min/range_max (Mojang docs) and still rejects unknown fields", async () => {
+    const check = (condition: object) =>
+      checkSchemaFile({
+        packKind: "behavior",
+        rel: "loot_tables/blocks/x.json",
+        kind: "loot_table",
+        doc: parseJson(JSON.stringify({ pools: [{ conditions: [condition] }] })),
+        opts: { rockideSchemasDir: tree },
+      });
+    const ok = await check({ condition: "match_tool", count: 1, enchantments: [{ enchantment: "silk_touch", levels: { range_min: 1 } }] });
+    expect(ok.diagnostics).toEqual([]);
+    const bad = await check({ condition: "match_tool", enchantments: [{ enchantment: "silk_touch", levels: { range_minimum: 1 } }] });
+    expect(bad.diagnostics.length).toBeGreaterThan(0);
+  });
+
+  it("fails open when no rockide copy resolves", async () => {
+    const project = join(root, "project");
+    mkdirSync(join(project, "BP", "entities"), { recursive: true });
+    writeFileSync(
+      join(project, "BP", "manifest.json"),
+      JSON.stringify({
+        format_version: 2,
+        header: { name: "t", description: "", uuid: "11111111-1111-4111-8111-111111111111", version: [1, 0, 0], min_engine_version: [1, 21, 0] },
+        modules: [{ type: "data", uuid: "22222222-2222-4222-8222-222222222222", version: [1, 0, 0] }],
+      }),
+    );
+    writeFileSync(join(project, "BP", "entities", "a.json"), JSON.stringify(mob({ "minecraft:not_real": {} })));
+    const none = await validateProject(project, { checks: ["schema"], engineSchemasDir: engine, resolveRockide: async () => ({ note: "unavailable (offline)" }) });
+    expect(none.rockide).toEqual({ note: "unavailable (offline)" });
+    expect(none.schemaSources["BP/entities/a.json"]).toBe("engine server/entity/1.21.0/ActorDocument.json");
+    const used = await validateProject(project, { checks: ["schema"], resolveRockide: async () => ({ root: tree, commit: COMMIT }) });
+    expect(used.rockide).toEqual({ root: tree, commit: COMMIT });
+    expect(used.diagnostics.map((d) => d.code)).toContain("schema.unevaluated-properties");
   });
 });

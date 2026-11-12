@@ -5,11 +5,9 @@
  * choose what to try next.
  */
 import type { BlockFace } from "../../engine/workstation.ts";
-import type { Vec3 } from "../player.ts";
+import type { Vec3 } from "../types.ts";
 import type { BlockInfo } from "./types.ts";
 
-/** The player's eye above the feet (Bedrock, standing). */
-export const EYE_HEIGHT = 1.62;
 /** Uses tried on one block or one entity, over every spot and face, before the next one is tried. */
 export const USES_PER_TARGET = 12;
 /** Time spent on one target (walks between spots included) before the next one is tried. */
@@ -17,7 +15,7 @@ export const MS_PER_TARGET = 30_000;
 /** Standing spots tried around one target besides the one the player walked to. */
 export const SPOTS_PER_TARGET = 4;
 /** Spots are looked for within this many blocks (horizontally) of the target's cell. */
-export const SPOT_RADIUS = 2;
+const SPOT_RADIUS = 2;
 /** Arrive this close to a spot's center: the spot itself, not the next one. */
 export const SPOT_ARRIVE = 0.4;
 

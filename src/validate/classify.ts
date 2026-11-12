@@ -65,8 +65,9 @@ export type FileKind =
   | "json"
   | "other";
 
-const IMAGE_EXT = /\.(png|tga|jpe?g)$/i;
-const SOUND_EXT = /\.(ogg|wav|fsb|mp3)$/i;
+export const IMAGE_EXT = /\.(png|tga|jpe?g)$/i;
+export const SOUND_EXT = /\.(ogg|wav|fsb|mp3)$/i;
+export const SCRIPT_EXT = /\.(m?[jt]s)$/i;
 export const JSON_EXT = /\.(json|jsonc|json5|material)$/i;
 
 const BP_DIRS: Record<string, FileKind> = {
@@ -137,7 +138,7 @@ export function classifyFile(packKind: PackKind, relPath: string): FileKind {
   if (packKind === "behavior") {
     if (rel === "functions/tick.json") return "tick_json";
     if (top === "functions" && lower.endsWith(".mcfunction")) return "mcfunction";
-    if (top === "scripts" && /\.(m?[jt]s)$/i.test(rel)) return "script";
+    if (top === "scripts" && SCRIPT_EXT.test(rel)) return "script";
     if (top === "structures" && lower.endsWith(".mcstructure")) return "structure";
     if (top === "cameras" && JSON_EXT.test(rel)) return "camera_preset";
     if (rel === "crafting_item_catalog.json" || top === "item_catalog") return "crafting_catalog";
@@ -177,12 +178,4 @@ export function formatVersionOf(value: unknown): string | undefined {
 /** Numeric tuple of a dotted version (`"1.21.60"` -> [1, 21, 60]); empty when unparsable. */
 export function versionTuple(v: string): number[] {
   return /^\d+(\.\d+)*$/.test(v.trim()) ? v.trim().split(".").map(Number) : [];
-}
-
-export function compareVersionTuples(a: readonly number[], b: readonly number[]): number {
-  for (let i = 0; i < Math.max(a.length, b.length); i++) {
-    const d = (a[i] ?? 0) - (b[i] ?? 0);
-    if (d !== 0) return d;
-  }
-  return 0;
 }

@@ -6,26 +6,13 @@ import { delimiter, dirname, join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { autoUpdate, versionInfo } from "./auto.ts";
 import { runUpdate } from "./cli.ts";
+import { serverEntry } from "../setup/register.ts";
 import { readChannel, saveChannel } from "./config.ts";
-import {
-  compareTags,
-  detectRunning,
-  dueForCheck,
-  initLayout,
-  isNewer,
-  latestTarget,
-  layout,
-  type Layout,
-  newestTag,
-  readCurrent,
-  readState,
-  rollback,
-  runUnattended,
-  type Running,
-  update,
-  writeLaunchers,
-} from "./install.ts";
-import { parseClients, registerOmp, serverEntry } from "./register.ts";
+import { rollback, update } from "./install.ts";
+import { detectRunning, initLayout, layout, type Layout, readCurrent, type Running, writeLaunchers } from "./layout.ts";
+import { runUnattended } from "./process.ts";
+import { dueForCheck, readState } from "./state.ts";
+import { compareTags, isNewer, latestTarget, newestTag } from "./tags.ts";
 
 /** Answers `--help` and a minimal MCP `initialize` + `tools/list`, like the real CLI. Plain JS is valid TS. */
 const FAKE_CLI = `import { createInterface } from "node:readline";
@@ -129,15 +116,15 @@ describe("tags and channels", () => {
     await expect(latestTarget(join(base, "missing.git"), "release")).rejects.toThrow(/git ls-remote failed/);
   });
 
-  it("ignores a leftover decision section and keeps it when saving the channel", async () => {
+  it("keeps the other sections of config.json when saving the channel", async () => {
     const path = join(root, "config", "config.json");
     expect(await readChannel(path)).toBe("release");
     await mkdir(join(root, "config"), { recursive: true });
-    const legacy = { decision: { provider: "openrouter", apiKey: "sk-made-up" } };
-    await writeFile(path, JSON.stringify(legacy));
+    const other = { other: { key: "value" } };
+    await writeFile(path, JSON.stringify(other));
     expect(await readChannel(path)).toBe("release");
     await saveChannel("off", path);
-    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({ ...legacy, update: { channel: "off" } });
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({ ...other, update: { channel: "off" } });
     expect(await readChannel(path)).toBe("off");
   });
 });
@@ -292,7 +279,6 @@ describe("automatic updates", () => {
     expect(notes).toEqual(["sculkwire v1.0.0 installed, restart the session to use it"]);
     expect(lines).toHaveLength(1);
     expect(await versionInfo(running)).toMatchObject({ managed: true, current: "v1.0.0", updateReady: true, channel: "release" });
-    expect(existsSync(join(running.root, ".in-use", String(process.pid)))).toBe(true);
 
     // Within 24 h nothing is checked, even with a newer tag waiting.
     await release("v1.1.0");
@@ -319,34 +305,5 @@ describe("automatic updates", () => {
     const log = vi.fn();
     expect(await autoUpdate({ running: { root: work }, log })).toBeUndefined();
     expect(log).not.toHaveBeenCalled();
-  });
-});
-
-describe("client registration", () => {
-  it("adds sculkwire to omp's config, keeps other servers and a backup", async () => {
-    const path = join(root, "omp", "mcp.json");
-    await mkdir(join(root, "omp"), { recursive: true });
-    const original = { mcpServers: { other: { type: "stdio", command: "other" }, sculkwire: { command: "old" } }, extra: true };
-    await writeFile(path, JSON.stringify(original));
-    const entry = { type: "stdio" as const, command: "/x/bin/sculk", args: ["mcp"] };
-    expect(await registerOmp(entry, path)).toEqual({ path, backup: `${path}.bak` });
-    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({ mcpServers: { other: { type: "stdio", command: "other" }, sculkwire: entry }, extra: true });
-    expect(JSON.parse(await readFile(`${path}.bak`, "utf8"))).toEqual(original);
-  });
-
-  it("creates omp's config when missing and leaves an invalid one alone", async () => {
-    const path = join(root, "new", "mcp.json");
-    const entry = { type: "stdio" as const, command: "sculk", args: ["mcp"] };
-    expect(await registerOmp(entry, path)).toEqual({ path });
-    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({ mcpServers: { sculkwire: entry } });
-    await writeFile(path, "{ broken");
-    await expect(registerOmp(entry, path)).rejects.toThrow();
-    expect(await readFile(path, "utf8")).toBe("{ broken");
-  });
-
-  it("parses client lists", () => {
-    expect(parseClients("omp, claude,omp")).toEqual(["omp", "claude"]);
-    expect(parseClients("none")).toEqual([]);
-    expect(parseClients("cursor")).toMatch(/unknown client cursor/);
   });
 });

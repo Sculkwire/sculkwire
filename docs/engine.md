@@ -234,10 +234,11 @@ Newline-delimited JSON-RPC 2.0 over TCP on `127.0.0.1:<port>`: one object per li
 |---|---|---|
 | `ping`, `info`, `modules` | socket | Liveness; the process, image base and size; loaded modules |
 | `engine.status` | socket | `{build, hooked, attached, tick, mainThread, hooks, gameinput, port, drainReleases, resolved: {name: "0x…"}, missing: [name]}` plus the engine's own `minecraft` and `ui`; `attached` is false while the agent is still resolving right after the injection, and `engine_attach` waits for it |
-| `engine.resolve` | socket | The `engine.status` shape; the client calls it to re-check the anchors |
+| `engine.resolve` | socket | The `engine.status` shape, answered like `engine.status`; the TypeScript client does not call it |
 | `stream.subscribe {every?}` / `stream.unsubscribe` | socket | `tick` notifications, every 1 to 1200 ticks |
 | `input.lock {mode?, active?}` / `input.focus {focused}` | socket | Lock state; host focus |
 | `command {command}` | main | `{success: bool\|null, message}` |
+| `command.prime` | socket | Arms the agent so the output of the next player command, the line typed to capture a command origin, is kept out of chat |
 | `tick.pause {paused}` | main | `{paused, success}` |
 | `tick.step {count}` | main | `{paused: true, ticks}` |
 | `tick.scale {value}` | main | `{scale, success}` |
@@ -253,6 +254,7 @@ Newline-delimited JSON-RPC 2.0 over TCP on `127.0.0.1:<port>`: one object per li
 | `player.attributes`, `player.inventory` | main | `{name: {current, min, max, default, base}}` for every attribute plus `armor` and `armorToughness` as numbers (sculkwire turns them into `{current}`); `{selectedSlot, hotbar, inventory, armor: {head, chest, legs, feet}, offhand, cursor}` |
 | `container.get {x, y, z, dimension?}`, `container.open` | main | `{block, size, slots}`; `dimension` is the bare name (`overworld`, `nether`, `the_end`), which sculkwire sends whichever spelling the caller used. A block without a container is `-32602`. Open: `{screen, block, position, slots, playerSlots}` (`position` `[x, y, z]` of the block the crosshair opened, `null` with `block` for an entity's screen; `playerSlots` the 36 carried slots once) |
 | `craft.match {grid\|ingredients, table?}` | main | `{result, recipe: {id, type, tag?}}` |
+| `craft.run` | main | Legacy, kept on the wire for older clients; `screen.act {action: "craft"}` is the current route and the TypeScript client does not call it |
 | `interact.block {x, y, z, dimension?, face?}`, `interact.entity {id}` | main | `{screen: string\|null, changed}`; the game's own interact path. A screen closed just before stays on the stack under the HUD while it leaves (about 350 ms), and the game ignores a use until it is gone, so the aim waits for that first (up to 1.5 s, else `-32004`). A block is used once the crosshair's pick is on it (aims deeper into the cell until it is, else `-32602`); `changed` is a screen that opened or the block's state changing. A container screen is answered once it can take a `screen.move` (its controller and containers are there and it ran a frame with them), so what the screen does as it opens has happened: a trade screen fills the selected offer's cost from the inventory |
 | `screen.state` | main | `{screen, kind, containers: {name: [slot]}, data}`; `data` is `null` for a screen with no state of its own, else the screen's own fields ([tool reference](tools.md#screen)), or `{unavailable, anchor}` when they cannot be read now |
 | `screen.move {from: {container, slot}, to: {container, slot}, count?}` | main | `{moved}`; item stack requests, as dragging |

@@ -11,11 +11,15 @@ import { join } from "node:path";
 import { z } from "zod";
 import type { Diagnostic } from "../../core/diagnostic.ts";
 import { compareDiagnostics, ExitCode } from "../../core/diagnostic.ts";
-import { disposeBuild, prepareInstance, projectPacks, writeRawLog, type BdsRunOptions, type ProjectPacks } from "./check.ts";
-import { disposeInstance, exists } from "./instance.ts";
-import { entriesToDiagnostics, locate, sourceLocation, type IndexedPack, type SourceLocation } from "../gamelog/logparse.ts";
+import { exists } from "../../core/fs.ts";
+import { locate, sourceLocation, type IndexedPack, type SourceLocation } from "../gamelog/logparse.ts";
+import { LOGS_DIR, TEST_CONFIG } from "./files.ts";
+import { projectPacks, withInstance, type BdsRunOptions, type PreparedRun } from "./project.ts";
+import { finishRun } from "./run.ts";
 import { BdsServer } from "./server.ts";
-import { collectLogs } from "./template.ts";
+
+/** Wall-clock limit of a whole GameTest run. */
+export const GAMETEST_TIMEOUT_MS = 300_000;
 
 export type TestOutcome = "passed" | "failed" | "timed_out" | "skipped";
 
@@ -107,12 +111,9 @@ export function parseTestResults(json: unknown): GameTestSummary {
 export function parseConsoleResults(lines: readonly string[]): { results: TestResult[]; expected: number } {
   const results: TestResult[] = [];
   let expected = 0;
-  const started = new Map<string, number>();
   for (const line of lines) {
     const batch = /Running test batch .*\((\d+) tests?\)/.exec(line);
     if (batch) expected += Number(batch[1]);
-    const loaded = /onTestStructureLoaded: (\S+)/.exec(line);
-    if (loaded) started.set(loaded[1]!, Date.now());
     const pass = /onTestPassed: (\S+)/.exec(line);
     if (pass) results.push({ name: pass[1]!, result: "passed", error: "", durationMs: 0, iteration: 1 });
     const fail = /onTestFailed: (\S+?)(?: - (.*))?$/.exec(line);
@@ -128,7 +129,7 @@ export interface GameTestOptions extends BdsRunOptions {
   /** GameTest tags; default `["suite:all"]`. */
   tags?: string[];
   mode?: "automation" | "command";
-  /** Wall-clock limit for the whole run. Default 300000. */
+  /** Default `GAMETEST_TIMEOUT_MS`. */
   timeoutMs?: number;
   /** Per-run tick limit (`timeout_ticks`). */
   timeoutTicks?: number;
@@ -191,10 +192,14 @@ export function testDiagnostics(summary: GameTestSummary, packs: readonly Indexe
   return out;
 }
 
+function resultsFile(instanceDir: string): string {
+  return join(instanceDir, LOGS_DIR, "test-results-gametest.json");
+}
+
 async function automationFinished(dir: string): Promise<boolean> {
-  if (await exists(join(dir, "logs", "TestCompletion"))) return true;
+  if (await exists(join(dir, LOGS_DIR, "TestCompletion"))) return true;
   try {
-    const data: unknown = JSON.parse(await readFile(join(dir, "logs", "test-results-gametest.json"), "utf8"));
+    const data: unknown = JSON.parse(await readFile(resultsFile(dir), "utf8"));
     return !!data && typeof data === "object" && "endTime" in data && typeof data.endTime === "string" && data.endTime !== "";
   } catch {
     return false;
@@ -209,84 +214,82 @@ export async function runGameTests(path: string, opts: GameTestOptions = {}): Pr
     const diagnostics = [...project.skipped, project.failure].sort(compareDiagnostics);
     return { passed: 0, failed: 0, total: 0, results: [], runTimedOut: false, missingTags: [], mode, durationMs: Date.now() - t0, diagnostics, exitCode: ExitCode.findings };
   }
-  try {
-    return await runOnServer(project, opts, t0);
-  } finally {
-    await disposeBuild(project, opts.keep);
-  }
+  return withInstance(project, opts, (prepared) => runOnServer(prepared, opts, t0));
 }
 
-async function runOnServer(project: ProjectPacks, opts: GameTestOptions, t0: number): Promise<GameTestRunResult> {
+async function runOnServer(prepared: PreparedRun, opts: GameTestOptions, t0: number): Promise<GameTestRunResult> {
   const tags = opts.tags?.length ? opts.tags : ["suite:all"];
   const mode = opts.mode ?? "automation";
-  const timeoutMs = opts.timeoutMs ?? 300_000;
-  const { skipped } = project;
-  const { instance, baseline, indexed } = await prepareInstance(project, opts);
-  try {
-    const resultsPath = join(instance.dir, "logs", "test-results-gametest.json");
-    if (mode === "automation") {
-      const config: Record<string, unknown> = {
-        automation_gametest_tags: tags,
-        automation_repeat_count: opts.repeatCount ?? 1,
-        automation_repeat_failures_only: false,
-        automation_testbuild_id: 1,
-      };
-      if (opts.timeoutTicks) config.timeout_ticks = opts.timeoutTicks;
-      await writeFile(join(instance.dir, "test_config.json"), JSON.stringify(config, null, 2));
-    }
-    opts.log?.(`BDS ${instance.install.version}: running GameTests [${tags.join(", ")}] (${mode}) in ${instance.dir}`);
-    const server = new BdsServer(instance.dir);
-    let summary: GameTestSummary | undefined;
-    let timedOut = false;
-    const deadline = t0 + timeoutMs;
-    try {
-      await server.started(Math.max(1000, deadline - Date.now()));
-      if (mode === "automation") {
-        // BDS exits on completion. The results file exists from the start (empty `results`, empty `endTime`);
-        // completion is `logs/TestCompletion` or a filled `endTime`, in case a build keeps running afterwards.
-        while (server.state !== "exited" && Date.now() < deadline && !(await automationFinished(instance.dir))) {
-          await Promise.race([server.exited, new Promise((r) => setTimeout(r, 250))]);
-        }
-      } else {
-        for (const tag of tags) server.write(`gametest runset ${tag}`);
-        while (server.state !== "exited" && Date.now() < deadline) {
-          const { results, expected } = parseConsoleResults(server.lines.map((l) => l.text));
-          if (expected > 0 && results.length >= expected) break;
-          await new Promise((r) => setTimeout(r, 250));
-        }
-      }
-      timedOut = Date.now() >= deadline;
-    } catch {
-      timedOut = server.state !== "exited";
-    }
-    await server.stop();
-    if (await exists(resultsPath)) {
-      summary = parseTestResults(JSON.parse(await readFile(resultsPath, "utf8")));
-    } else {
-      const { results, expected } = parseConsoleResults(server.lines.map((l) => l.text));
-      const passed = results.filter((r) => r.result === "passed").length;
-      summary = { passed, failed: results.length - passed, total: Math.max(expected, results.length), results, runTimedOut: timedOut, missingTags: [] };
-    }
-    const { contentLog, entries } = await collectLogs(instance, server);
-    const serverVersion = server.serverVersion ?? instance.install.version;
-    const diagnostics = [
-      ...skipped,
-      ...entriesToDiagnostics(entries, indexed, { baseline, label: `BDS ${serverVersion}` }).filter((d) => !d.message.includes("onTest")),
-      ...testDiagnostics(summary, indexed),
-    ];
-    if (summary.total === 0 && summary.missingTags.length === 0) {
-      diagnostics.push({
-        severity: "error",
-        code: "gametest.no-tests",
-        message: `no GameTest ran for tags [${tags.join(", ")}]${server.state === "exited" && !timedOut ? "" : " (server did not finish)"}`,
-        source: "gametest",
-      });
-    }
-    diagnostics.sort(compareDiagnostics);
-    const rawLogPath = await writeRawLog(instance.id, server, contentLog);
-    const exitCode = summary.failed > 0 || summary.runTimedOut || summary.total === 0 || timedOut ? ExitCode.findings : ExitCode.ok;
-    return { ...summary, mode, serverVersion, durationMs: Date.now() - t0, diagnostics, rawLogPath, exitCode };
-  } finally {
-    if (!opts.keep) await disposeInstance(instance);
+  const timeoutMs = opts.timeoutMs ?? GAMETEST_TIMEOUT_MS;
+  const { instance, indexed } = prepared;
+  const resultsPath = resultsFile(instance.dir);
+  if (mode === "automation") {
+    const config: Record<string, unknown> = {
+      automation_gametest_tags: tags,
+      automation_repeat_count: opts.repeatCount ?? 1,
+      automation_repeat_failures_only: false,
+      automation_testbuild_id: 1,
+    };
+    if (opts.timeoutTicks) config.timeout_ticks = opts.timeoutTicks;
+    await writeFile(join(instance.dir, TEST_CONFIG), JSON.stringify(config, null, 2));
   }
+  opts.log?.(`BDS ${instance.install.version}: running GameTests [${tags.join(", ")}] (${mode}) in ${instance.dir}`);
+  const server = new BdsServer(instance.dir);
+  let summary: GameTestSummary | undefined;
+  let timedOut = false;
+  const deadline = t0 + timeoutMs;
+  try {
+    await server.started(Math.max(1000, deadline - Date.now()));
+    if (mode === "automation") {
+      // BDS exits on completion. The results file exists from the start (empty `results`, empty `endTime`);
+      // completion is `logs/TestCompletion` or a filled `endTime`, in case a build keeps running afterwards.
+      while (server.state !== "exited" && Date.now() < deadline && !(await automationFinished(instance.dir))) {
+        await Promise.race([server.exited, new Promise((r) => setTimeout(r, 250))]);
+      }
+    } else {
+      for (const tag of tags) server.write(`gametest runset ${tag}`);
+      while (server.state !== "exited" && Date.now() < deadline) {
+        const { results, expected } = parseConsoleResults(server.text());
+        if (expected > 0 && results.length >= expected) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+    timedOut = Date.now() >= deadline;
+  } catch {
+    timedOut = server.state !== "exited";
+  }
+  await server.stop();
+  if (await exists(resultsPath)) {
+    summary = parseTestResults(JSON.parse(await readFile(resultsPath, "utf8")));
+  } else {
+    const { results, expected } = parseConsoleResults(server.text());
+    const passed = results.filter((r) => r.result === "passed").length;
+    summary = { passed, failed: results.length - passed, total: Math.max(expected, results.length), results, runTimedOut: timedOut, missingTags: [] };
+  }
+  const finished = await finishRun(prepared, server);
+  const diagnostics = [
+    ...prepared.project.skipped,
+    ...finished.diagnostics.filter((d) => !d.message.includes("onTest")),
+    ...testDiagnostics(summary, indexed),
+  ];
+  if (summary.total === 0 && summary.missingTags.length === 0) {
+    diagnostics.push({
+      severity: "error",
+      code: "gametest.no-tests",
+      message: `no GameTest ran for tags [${tags.join(", ")}]${server.state === "exited" && !timedOut ? "" : " (server did not finish)"}`,
+      source: "gametest",
+    });
+  }
+  diagnostics.sort(compareDiagnostics);
+  const exitCode = summary.failed > 0 || summary.runTimedOut || summary.total === 0 || timedOut ? ExitCode.findings : ExitCode.ok;
+  return { ...summary, mode, serverVersion: finished.serverVersion, durationMs: Date.now() - t0, diagnostics, rawLogPath: finished.rawLogPath, exitCode };
+}
+
+/**
+ * `GameTest 1/2 passed, 1 failed (BDS 1.26.63.1, automation, …extra)`: the summary both front ends print.
+ * Undefined when no server ran (the Regolith build failed).
+ */
+export function describeGameTest(r: GameTestRunResult, extra: readonly string[] = []): string | undefined {
+  if (!r.serverVersion) return undefined;
+  return `GameTest ${r.passed}/${r.total} passed, ${r.failed} failed (${[`BDS ${r.serverVersion}`, r.mode, ...extra].join(", ")})`;
 }

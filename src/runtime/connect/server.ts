@@ -1,14 +1,12 @@
 /**
  * `/connect` WebSocket server. The game dials in (`/connect localhost:<port>`); several games may be connected at
- * once. Commands go through a per-client queue capped at `MAX_IN_FLIGHT` unanswered requests; events from
- * subscriptions are kept in a ring buffer and fanned out to listeners. Subscriptions are replayed to clients that
- * connect later.
+ * once. Commands go through a per-client queue capped at `MAX_IN_FLIGHT` unanswered requests.
  */
 import { EventEmitter } from "node:events";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer } from "ws";
 import type { WebSocket } from "ws";
-import { commandRequest, dataRequest, MAX_IN_FLIGHT, newRequestId, parseMessage, subscribeRequest } from "./protocol.ts";
+import { commandRequest, dataRequest, MAX_IN_FLIGHT, parseMessage } from "./protocol.ts";
 import type { DataKind, Message } from "./protocol.ts";
 import { RequestQueue } from "./queue.ts";
 
@@ -21,14 +19,6 @@ export interface CommandResult {
   ok: boolean;
   /** Full response body (extra fields such as `victim`, `levelName`). */
   body: Record<string, unknown>;
-}
-
-export interface GameEvent {
-  seq: number;
-  time: number;
-  clientId: number;
-  eventName: string;
-  body: unknown;
 }
 
 export interface ConnectClientInfo {
@@ -63,7 +53,6 @@ export interface ConnectServerOptions {
   host?: string;
   /** In-flight cap per client (default `MAX_IN_FLIGHT`). */
   maxInFlight?: number;
-  eventBuffer?: number;
 }
 
 function asRecord(v: unknown): Record<string, unknown> {
@@ -77,14 +66,11 @@ export function toCommandResult(response: Message): CommandResult {
   return { statusCode, statusMessage, ok: statusCode >= 0, body };
 }
 
-/** Events: `client` (ConnectClientInfo), `disconnect` (id), `event` (GameEvent). */
+/** Events: `client` (ConnectClientInfo), `disconnect` (id). */
 export class ConnectServer extends EventEmitter {
   #wss: WebSocketServer | undefined;
   #clients = new Map<number, ConnectClient>();
   #nextId = 1;
-  #seq = 0;
-  #events: GameEvent[] = [];
-  #subscriptions = new Set<string>();
   #opts: Required<ConnectServerOptions>;
   port = 0;
 
@@ -94,7 +80,6 @@ export class ConnectServer extends EventEmitter {
       port: opts.port ?? DEFAULT_CONNECT_PORT,
       host: opts.host ?? "127.0.0.1",
       maxInFlight: opts.maxInFlight ?? MAX_IN_FLIGHT,
-      eventBuffer: opts.eventBuffer ?? 1000,
     };
   }
 
@@ -109,7 +94,8 @@ export class ConnectServer extends EventEmitter {
     wss.once("listening", () => resolve());
     wss.once("error", reject);
     await promise;
-    wss.on("error", (err) => this.emit("serverError", err));
+    // Without a listener a later server error would crash the process.
+    wss.on("error", () => {});
     wss.on("connection", (ws, req) => this.#accept(ws, req.socket.remoteAddress ?? "?"));
     this.#wss = wss;
     const address: AddressInfo | string | null = wss.address();
@@ -127,20 +113,14 @@ export class ConnectServer extends EventEmitter {
       this.emit("disconnect", client.id);
     });
     ws.on("error", () => ws.terminate());
-    for (const name of this.#subscriptions) ws.send(JSON.stringify(subscribeRequest(name)));
     this.emit("client", this.#info(client));
   }
 
   #receive(client: ConnectClient, data: string): void {
     const msg = parseMessage(data);
     if (!msg) return;
-    if (msg.header.messagePurpose === "event") {
-      const ev: GameEvent = { seq: ++this.#seq, time: Date.now(), clientId: client.id, eventName: msg.header.eventName ?? "", body: msg.body };
-      this.#events.push(ev);
-      if (this.#events.length > this.#opts.eventBuffer) this.#events.splice(0, this.#events.length - this.#opts.eventBuffer);
-      this.emit("event", ev);
-      return;
-    }
+    // Event messages (from subscriptions) answer no request.
+    if (msg.header.messagePurpose === "event") return;
     client.queue.settle(msg.header.requestId, msg);
   }
 
@@ -168,14 +148,15 @@ export class ConnectServer extends EventEmitter {
     const existing = [...this.#clients.values()].at(-1);
     if (existing) return this.#info(existing);
     const { promise, resolve, reject } = Promise.withResolvers<ConnectClientInfo>();
-    const timer = setTimeout(() => {
-      this.off("client", resolve);
-      reject(new Error(`no game connected to /connect port ${this.port} within ${timeoutMs} ms`));
-    }, timeoutMs);
-    this.once("client", (info: ConnectClientInfo) => {
+    const onClient = (info: ConnectClientInfo): void => {
       clearTimeout(timer);
       resolve(info);
-    });
+    };
+    const timer = setTimeout(() => {
+      this.off("client", onClient);
+      reject(new Error(`no game connected to /connect port ${this.port} within ${timeoutMs} ms`));
+    }, timeoutMs);
+    this.once("client", onClient);
     return promise;
   }
 
@@ -191,26 +172,6 @@ export class ConnectServer extends EventEmitter {
     const client = this.#pick(opts.clientId);
     const response = await client.request(dataRequest(kind), opts.timeoutMs ?? 15_000, `data:${kind}`);
     return response.body;
-  }
-
-  /** Subscribe every current and future client to an event. */
-  subscribe(eventName: string): void {
-    this.#subscriptions.add(eventName);
-    for (const c of this.#clients.values()) c.ws.send(JSON.stringify(subscribeRequest(eventName, false, newRequestId())));
-  }
-
-  unsubscribe(eventName: string): void {
-    this.#subscriptions.delete(eventName);
-    for (const c of this.#clients.values()) c.ws.send(JSON.stringify(subscribeRequest(eventName, true)));
-  }
-
-  subscriptions(): string[] {
-    return [...this.#subscriptions];
-  }
-
-  /** Buffered events with `seq > since`. */
-  events(since = 0, eventName?: string): GameEvent[] {
-    return this.#events.filter((e) => e.seq > since && (!eventName || e.eventName === eventName));
   }
 
   async stop(): Promise<void> {

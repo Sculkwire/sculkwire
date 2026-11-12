@@ -1,7 +1,8 @@
 /** `sculk knowledge update|status`, `sculk docs|api|component|changelog <query>`. */
 import { parseArgs } from "node:util";
-import type { CliCommand } from "../core/cli.ts";
+import { type CliCommand, err, out } from "../core/cli.ts";
 import { ExitCode } from "../core/diagnostic.ts";
+import { errorMessage, UsageError } from "../core/errors.ts";
 import { type Channel, CHANNELS, isChannel } from "../core/version.ts";
 import { searchChangelogs } from "./changelog.ts";
 import { DOCS_ATTRIBUTION, searchDocs } from "./docs.ts";
@@ -20,8 +21,6 @@ interface Parsed {
   to?: string;
   all: boolean;
 }
-
-class UsageError extends Error {}
 
 function parse(args: string[], extra: { range?: boolean; channelAll?: boolean } = {}): Parsed {
   const { values, positionals } = parseArgs({
@@ -56,7 +55,7 @@ function parse(args: string[], extra: { range?: boolean; channelAll?: boolean } 
 }
 
 function emit(json: boolean, value: unknown, text: string): void {
-  process.stdout.write(json ? `${JSON.stringify(value, null, 2)}\n` : `${text}\n`);
+  out(json ? JSON.stringify(value, null, 2) : text);
 }
 
 /** Wrap a command body: usage errors and failures map to exit code 2 with a message on stderr. */
@@ -71,15 +70,14 @@ function command(
     summary,
     async run(args) {
       if (args.includes("-h") || args.includes("--help")) {
-        process.stdout.write(`Usage: sculk ${name} ${usage}\n${summary}\n`);
+        out(`Usage: sculk ${name} ${usage}\n${summary}`);
         return ExitCode.ok;
       }
       try {
         return await body(args);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        process.stderr.write(`sculk ${name}: ${message}\n`);
-        if (err instanceof UsageError) process.stderr.write(`Usage: sculk ${name} ${usage}\n`);
+      } catch (e) {
+        err(`sculk ${name}: ${errorMessage(e)}`);
+        if (e instanceof UsageError) err(`Usage: sculk ${name} ${usage}`);
         return ExitCode.usage;
       }
     },

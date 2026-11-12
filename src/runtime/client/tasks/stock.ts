@@ -2,7 +2,8 @@
  * What the player and the containers hold, counted per item id: the before/after counts a step's `gained` is measured
  * from, and the screen's container names a step moves items between.
  */
-import type { ItemSlot, PlayerInventory, Slot } from "../../engine/inventory.ts";
+import type { PlayerInventory } from "../../engine/inventory.ts";
+import type { ItemSlot, Slot } from "../../engine/slot.ts";
 import type { ScreenSlotRef, ScreenState } from "../../engine/workstation.ts";
 import { matches, type Ingredient } from "./recipes.ts";
 import type { InventoryCounts } from "./types.ts";
@@ -47,10 +48,6 @@ export function countOf(counts: InventoryCounts, ingredient: Ingredient): number
   for (const [id, count] of Object.entries(counts)) if (matches(ingredient, id)) total += count;
   return total;
 }
-
-/* -------------------------------------------------------------------------------------------------------------- */
-/* Screen containers                                                                                               */
-/* -------------------------------------------------------------------------------------------------------------- */
 
 /**
  * The player's own collections in a screen's `containers` (`hotbar_items`, `inventory_items`, `cursor_items`, ...),

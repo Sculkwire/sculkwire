@@ -72,7 +72,7 @@ export function parseGoal(text: string): Goal {
   return { kind: "free" };
 }
 
-export interface GoalContext {
+interface GoalContext {
   map: ThreatMap;
   /** Entity id -> type of every kill so far. */
   kills: ReadonlyMap<string, string>;

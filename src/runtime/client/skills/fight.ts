@@ -9,18 +9,24 @@
  * lighting its fuse (about 3 blocks) and gets out past 7 blocks, shield up, once it burns, shoots a creeper from range
  * when there is a bow, weaves toward archers, waits for a leaping spider to land, and moves on to the next hostile.
  */
-import { angleDiff, horizontalDistance, turnDurationMs, yawTo, type EntityInfo, type Follow, type HurtLog, type Loadout, type PlayerController } from "../player.ts";
+import { turnDurationMs } from "../camera.ts";
+import { EYE_HEIGHT, PLAYER_REACH } from "../bedrock.ts";
+import { angleDiff, horizontalDistance, yawTo } from "../geometry.ts";
+import type { Follow, PlayerController } from "../player.ts";
+import type { EntityInfo, HurtLog, Loadout, PlayerState } from "../types.ts";
 import { navigate } from "../nav/navigate.ts";
 import { CROWD_RADIUS, crowdMove, isolated, pickDuelTarget } from "./crowd.ts";
-import { clearRun, CLOSE_IN_MARGIN, CLOSE_IN_SETTLE_MS, closeInTicks, CREEPER_MARGIN, CREEPER_STANDING, creeperStandFrom, STEP_TAP_MS, STRUCK_THROW, STRUCK_THROW_MS, CREEPER_START, CREEPER_STOP, creeperMove, critSafe, crowdedCreeper, findCover, type FuseMemory, openHeading, readyInMs, spiderAirborne, trackFuse, weaveDeg } from "./defense.ts";
+import { CLOSE_IN_MARGIN, CLOSE_IN_SETTLE_MS, closeInTicks, CREEPER_MARGIN, CREEPER_STANDING, creeperStandFrom, STEP_TAP_MS, STRUCK_THROW, STRUCK_THROW_MS, CREEPER_START, CREEPER_STOP, creeperMove, critSafe, crowdedCreeper, type FuseMemory, readyInMs, spiderAirborne, trackFuse, weaveDeg } from "./defense.ts";
 import { gridFor, type GridCache } from "../nav/grid.ts";
 import { bestWeaponSlot, bowSlot, hasShield } from "./items.ts";
 import { HIT_COOLDOWN_MS, meleePlan, type PendingSwing, swingOutcome } from "./melee.ts";
-import { holdsSpear, isHostile, SPEAR_CARRIERS, MELEE_COOLDOWN_MS, meleeReach, mobInfo, shortType, type MobInfo } from "./mobs.ts";
+import { aimHeightOf, closingSpeed, holdsSpear, isHostile, SPEAR_CARRIERS, MELEE_COOLDOWN_MS, meleeReach, mobInfo, shortType, type MobInfo } from "./mobs.ts";
 import { STRIKE_AIM_DEG, AFTER_BLOCK_MS, attackInMs, attackers, ENGINE_LATENCY_MS, GUARD_STEP_OUT_MS, ROOM_NEEDED, KEYBOARD_LATENCY_MS, nextAttackMs, NO_WINDOW_MS, packMove, shieldSwingOk, type PackMob, type Stance, SPEAR_OPENING_STRIKE, strikeDistance, strikeTarget, STRIKE_DIST, STRIKE_REACH, WALKING_IN } from "./pack.ts";
 import { combatStats, fightText, logEvent, traceFrame, type CombatStats, type TraceEvent, type TraceMob } from "./stats.ts";
 import type { Death } from "./play.ts";
-import type { FightStats, SkillResult } from "./types.ts";
+import { isEntityId, typeIdOf } from "./target.ts";
+import { clearRun, findCover, openHeading } from "./steer.ts";
+import type { Counters, FightStats, SkillResult } from "./types.ts";
 
 export interface FightArgs {
   /** Entity id, or a type (`zombie`, `minecraft:zombie`). Default: the nearest hostile mob. */
@@ -31,8 +37,6 @@ export interface FightArgs {
   radius?: number;
   /** Jump for critical hits (default true). */
   crits?: boolean;
-  /** Switch to a closer mob, or the one hitting the player, mid-fight (default true). */
-  retarget?: boolean;
   /**
    * The shield against melee mobs: `auto` (default: `kite`'s footwork, the shield only boxed in), `kite` (never,
    * footwork only), `guard` (up whenever a melee mob is within about 3.6 blocks: block, strike in the cooldown,
@@ -42,9 +46,6 @@ export interface FightArgs {
   timeoutMs?: number;
 }
 
-const EYE_HEIGHT = 1.62;
-/** Melee reach in Bedrock survival, from the eye to the hitbox (navigation stops a little inside it). */
-const REACH = 3;
 /** Shortest time between two clicks, so a missed swing is not repeated every frame. */
 const MIN_SWING_GAP_MS = 150;
 /** A bow is worth drawing on a creeper this far away; closer, the sword. */
@@ -52,16 +53,8 @@ const BOW_MIN_DISTANCE = 5;
 /** Toward a standing creeper the sprint stops this far out: a sprint let go carries the player on for nearly a block. */
 const SPRINT_TO = 5;
 
-export function isEntityId(s: string): boolean {
-  return /^-?\d+$/.test(s);
-}
-
-export function typeIdOf(type: string): string {
-  return type.includes(":") ? type : `minecraft:${type}`;
-}
-
 /** The nearest fight target: of `type` when given, else hostile; never one in `skip`. */
-export async function pickTarget(pc: PlayerController, type: string | undefined, radius: number, skip: ReadonlySet<string> = new Set()): Promise<EntityInfo | undefined> {
+async function pickTarget(pc: PlayerController, type: string | undefined, radius: number, skip: ReadonlySet<string> = new Set()): Promise<EntityInfo | undefined> {
   const me = await pc.world.state(300);
   const wanted = type ? typeIdOf(type) : undefined;
   const fits = (e: EntityInfo) => !skip.has(e.id) && e.typeId !== "minecraft:player" && (wanted ? e.typeId === wanted : isHostile(e.typeId));
@@ -83,10 +76,10 @@ async function hurtLog(pc: PlayerController, since: number): Promise<HurtLog | u
 
 /** A melee mob that hurts the player from this far or more (and not past `SPEAR_LEARN_MAX`) is taken to hold a spear. */
 export const SPEAR_LEARN_DIST = 2.3;
-export const SPEAR_LEARN_MAX = 3.5;
+const SPEAR_LEARN_MAX = 3.5;
 
 /** A hostile mob the fight has struck still alive within this many blocks keeps a fight over `all` going. */
-export const FOUGHT_RADIUS = 24;
+const FOUGHT_RADIUS = 24;
 
 /**
  * The nearest mob the fight struck that is still alive within `FOUGHT_RADIUS`, even one set aside as gone (a spear
@@ -103,8 +96,7 @@ async function foughtNear(pc: PlayerController, struck: ReadonlyMap<string, unkn
   return e;
 }
 
-/** Hold the hardest-hitting weapon in the hotbar. */
-export async function equipWeapon(pc: PlayerController, signal?: AbortSignal, loadout?: Loadout): Promise<string | undefined> {
+async function equipWeapon(pc: PlayerController, signal?: AbortSignal, loadout?: Loadout): Promise<string | undefined> {
   const l = loadout ?? (await pc.world.loadout?.().catch(() => undefined));
   const best = l ? bestWeaponSlot(l.hotbar) : undefined;
   if (!best) return undefined;
@@ -188,7 +180,7 @@ async function deathLog(pc: PlayerController, since: number): Promise<{ tick: nu
 }
 
 /** The counters a fight reports, read so the fight can report its own share of a `play` run's shared stats. */
-function counters(s: CombatStats) {
+function counters(s: CombatStats): Counters {
   return { swings: s.swings, hits: s.hits, misses: s.misses, crits: s.crits, hitsTaken: s.hitsTaken, damageTaken: s.damageTaken, blocked: s.blocked };
 }
 
@@ -203,7 +195,6 @@ interface Pending extends PendingSwing {
 interface FightContext {
   readonly deadline: number;
   readonly crits: boolean;
-  readonly retarget: boolean;
   readonly stance: Stance;
   readonly all: boolean;
   /** The type the fight is after (`all` moves on only to these), undefined for any hostile. */
@@ -259,7 +250,6 @@ export async function fight(pc: PlayerController, args: FightArgs, signal?: Abor
   const ctx: FightContext = {
     deadline: started + (args.timeoutMs ?? 60_000),
     crits: args.crits ?? true,
-    retarget: args.retarget ?? true,
     stance: args.stance ?? "auto",
     all: args.all ?? !byId,
     ...(type ? { wanted: typeIdOf(type) } : {}),
@@ -436,8 +426,7 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
   let target = first;
   let info: MobInfo = mobInfo(target.typeId);
   let exploder = info.kind === "exploder";
-  // Aim at the middle of the body: low for spiders and other small mobs, chest height for zombies and skeletons.
-  let aimHeight = info.climbs ? 0.45 : 1.0;
+  let aimHeight = aimHeightOf(info);
   /** Each creeper's fuse as the fight takes it, shared with the later duels of this `play` run. */
   const fuseOf = (id: string): FuseMemory => {
     let m = stats.creepers.get(id);
@@ -461,7 +450,7 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
     target = next;
     info = mobInfo(next.typeId);
     exploder = info.kind === "exploder";
-    aimHeight = info.climbs ? 0.45 : 1.0;
+    aimHeight = aimHeightOf(info);
     fuse = fuseOf(next.id);
     hits = 0;
     facing = undefined;
@@ -526,6 +515,25 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
     if (on) ctx.guardSince = h.now();
     await h.move({ sneak: on });
   };
+  /**
+   * Walking in on the target: note headway, jump after a while without it, and when the straight walk stays blocked
+   * (a wall, a ledge, a hole) find a way over the blocks, then fight on. `lowerShield` lets go of the shield first.
+   */
+  const unstick = async (s: PlayerState, e: EntityInfo, now: number, lowerShield: boolean): Promise<void> => {
+    if (!(Math.hypot(s.location.x - moved.x, s.location.z - moved.z) < 0.3)) moved = { at: now, x: s.location.x, z: s.location.z };
+    else if (now - moved.at > 600 && s.onGround) {
+      await h.jump(120);
+      ev?.push("jump");
+    }
+    const ledge = Math.abs(e.location.y - s.location.y) > 1.2;
+    if (pc.world.query && now - moved.at > (ledge ? 700 : 1500) && now - lastPath > 2500) {
+      lastPath = now;
+      if (lowerShield) await block(false);
+      await navigate(pc, { entity: target.id }, { radius: PLAYER_REACH - 0.2, timeoutMs: Math.min(8000, Math.max(1000, ctx.deadline - now)) }, signal);
+      h.track(f, aimHeight, 10);
+      moved = { at: h.now(), x: Number.NaN, z: Number.NaN };
+    }
+  };
   const fits = (m: EntityInfo) => !ctx.skip.has(m.id) && (ctx.wanted ? m.typeId === ctx.wanted : isHostile(m.typeId)) && (m.health === undefined || m.health.current > 0);
   try {
     for (;;) {
@@ -580,7 +588,7 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
       const eyeDist = Math.hypot(e.location.x - s.location.x, e.location.y + aimHeight - s.location.y - EYE_HEIGHT, e.location.z - s.location.z);
       // The reported velocity is instant (blocks per tick); the follow's estimate smooths over 0.6 s.
       const vel = e.velocity ?? f.velocity();
-      const closing = dist > 0.01 ? ((vel.x * (s.location.x - e.location.x) + vel.z * (s.location.z - e.location.z)) / dist) * 20 : 0;
+      const closing = closingSpeed(s.location, e.location, vel, dist);
       if (s.onGround) delete ctx.airborneSince;
       else ctx.airborneSince ??= now;
       if (nav && now - ctx.navScan > 5000) {
@@ -602,7 +610,7 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
         if (m.id === target.id || mobInfo(m.typeId).kind !== "exploder") continue;
         const d = horizontalDistance(s.location, m.location);
         const v = m.velocity;
-        const c = v && d > 0.01 ? ((v.x * (s.location.x - m.location.x) + v.z * (s.location.z - m.location.z)) / d) * 20 : 0;
+        const c = closingSpeed(s.location, m.location, v, d);
         trackFuse(fuseOf(m.id), now, d, c, m.ignited, mobInfo(m.typeId).fuseMs, v ? Math.hypot(v.x, v.z) * 20 : Math.abs(c), m.fuseTicks !== undefined ? m.fuseTicks * 50 + (m.ageMs ?? 0) + now - ctx.crowdAt : undefined);
       }
       // Where the game shows the view (engine: the streamed rotation, a tick old; keyboard: the predicted one) and how far
@@ -626,7 +634,7 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
           // angle (150 to 450 ms), plus the view's latency.
           const turnMs = Math.abs(off) > STRIKE_AIM_DEG ? turnDurationMs(Math.abs(off), 10) + pc.camera.latencyMs : 0;
           // The tolerance the swing uses: the mob's half width at its distance from the eye.
-          const eyeD = Math.hypot(d, m.location.y + (mi.climbs ? 0.45 : 1.0) - s.location.y - EYE_HEIGHT);
+          const eyeD = Math.hypot(d, m.location.y + aimHeightOf(mi) - s.location.y - EYE_HEIGHT);
           const tol = Math.max(5, (Math.atan2(0.4, eyeD) * 180) / Math.PI);
           const aimed = m.id === target.id ? targetAim <= tol : Math.abs(angleDiff(shownYaw, bearing)) <= tol;
           return {
@@ -638,7 +646,7 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
             offViewDeg: off,
             mobReach: meleeReach(mi, dx, dz),
             strikeInMs: Math.max(hittableMs, turnMs),
-            closing: v && d > 0.01 ? ((v.x * dx + v.z * dz) / d) * 20 : 0,
+            closing: closingSpeed(s.location, m.location, v, d),
             speed: mi.speed,
             dueMs: Math.max(0, (nextAttack.get(m.id) ?? Number.NEGATIVE_INFINITY) - now),
             ...(nextAttack.has(m.id) ? { overdueMs: Math.max(0, now - (nextAttack.get(m.id) as number)) } : {}),
@@ -682,7 +690,7 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
         }
         if (lost > 0) logEvent(stats, `hurt ${lost.toFixed(1)} -> ${s.health} fighting ${shortType(target.typeId)}, credited ${by.map((id) => shortType(near.find((n) => n.id === id)?.m.typeId ?? "?")).join(", ") || "none"}`, ...ctx.frames.map((fr) => `  ${fr.at - now} ${fr.line}`));
       }
-      if (ctx.retarget && mobs.length > 1) {
+      if (mobs.length > 1) {
         const lit = new Set([...stats.creepers].filter(([, c]) => c.fuseSince !== undefined).map(([id]) => id));
         const pick = pickDuelTarget(s.location, target.id, mobs, now - ctx.hurtAt < HURT_MS, lit);
         const picked = pick !== target.id ? mobs.find((m) => m.id === pick) : undefined;
@@ -874,22 +882,8 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
           h.track(f, aimHeight, 10);
         }
         await h.walk(mv.heading, mv.sprint && !ctx.blocking, mv.speed);
-        if (mv.foot === "advance") {
-          if (!(Math.hypot(s.location.x - moved.x, s.location.z - moved.z) < 0.3)) moved = { at: now, x: s.location.x, z: s.location.z };
-          else if (now - moved.at > 600 && s.onGround) {
-            await h.jump(120);
-            ev?.push("jump");
-          }
-          // The straight walk is blocked (a wall, a ledge, a hole): find a way over the blocks, then fight on.
-          const ledge = Math.abs(e.location.y - s.location.y) > 1.2;
-          if (pc.world.query && now - moved.at > (ledge ? 700 : 1500) && now - lastPath > 2500) {
-            lastPath = now;
-            await block(false);
-            await navigate(pc, { entity: target.id }, { radius: REACH - 0.2, timeoutMs: Math.min(8000, Math.max(1000, ctx.deadline - now)) }, signal);
-            h.track(f, aimHeight, 10);
-            moved = { at: h.now(), x: Number.NaN, z: Number.NaN };
-          }
-        } else moved = { at: now, x: s.location.x, z: s.location.z };
+        if (mv.foot === "advance") await unstick(s, e, now, true);
+        else moved = { at: now, x: s.location.x, z: s.location.z };
       } else {
         // Standing within the strike distance, walking in again only past it plus `HOLD_BAND`, so the feet do not flip
         // between the two every tick at the edge.
@@ -897,7 +891,7 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
         foot = standing ? "hold" : "advance";
         await block(false);
         ctx.disciplined = false;
-        if (dist > REACH + 0.5) {
+        if (dist > PLAYER_REACH + 0.5) {
           // From cover to cover toward an archer when the blocks around give some, else weave so its arrows miss.
           const grid = nav;
           if (grid && dist > 6) {
@@ -917,18 +911,7 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
           } else cover = undefined;
           const heading = cover ? yawTo(s.location, cover) : toward + weaveDeg(now, dist, info) + (blockedLine ? 60 : 0);
           await h.walk(heading, dist > 3.5 && !blockedLine && Math.abs(angleDiff(view, heading)) < 40);
-          if (!(Math.hypot(s.location.x - moved.x, s.location.z - moved.z) < 0.3)) moved = { at: now, x: s.location.x, z: s.location.z };
-          else if (now - moved.at > 600 && s.onGround) {
-            await h.jump(120);
-            ev?.push("jump");
-          }
-          const ledge = Math.abs(e.location.y - s.location.y) > 1.2;
-          if (pc.world.query && now - moved.at > (ledge ? 700 : 1500) && now - lastPath > 2500) {
-            lastPath = now;
-            await navigate(pc, { entity: target.id }, { radius: REACH - 0.2, timeoutMs: Math.min(8000, Math.max(1000, ctx.deadline - now)) }, signal);
-            h.track(f, aimHeight, 10);
-            moved = { at: h.now(), x: Number.NaN, z: Number.NaN };
-          }
+          await unstick(s, e, now, false);
         } else {
           await h.walk(standing ? undefined : toward, false);
           moved = { at: now, x: s.location.x, z: s.location.z };
@@ -1069,7 +1052,7 @@ async function duel(pc: PlayerController, first: EntityInfo, ctx: FightContext, 
           const n = near.find((x) => x.id === m.id);
           const d = n?.dist ?? horizontalDistance(s.location, m.location);
           const v = m.id === target.id ? vel : m.velocity;
-          const c = n?.closing ?? (v && d > 0.01 ? ((v.x * (s.location.x - m.location.x) + v.z * (s.location.z - m.location.z)) / d) * 20 : 0);
+          const c = n?.closing ?? closingSpeed(s.location, m.location, v, d);
           return {
             id: m.id,
             type: shortType(m.typeId),

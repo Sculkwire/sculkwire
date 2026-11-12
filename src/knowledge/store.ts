@@ -3,18 +3,39 @@
  * and per data source the version in use, the newest seen upstream and the last check. Without `update`, every
  * source follows its upstream on its own (checked at most daily; see `docs/tools.md`).
  */
-import { readdir, readFile, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { errorMessage } from "../core/errors.ts";
 import { cacheDir } from "../core/paths.ts";
 import { type Channel, CHANNELS } from "../core/version.ts";
-import { listInstalled, updateBds } from "../runtime/bds/install.ts";
 import { changelogIndex, changelogStatus, fetchChangelogs } from "./changelog.ts";
 import { docsIndex, docsStatus, ensureCreatorDocs } from "./docs.ts";
 import { progress } from "./net.ts";
 import { ensureRockideSchemas, rockideStatus } from "./rockide.ts";
-import { ensureBedrockSamples, newestCachedSamples, samplesDir } from "./samples.ts";
+import { ensureBedrockSamples, newestCachedSamples, samplesStatus } from "./samples.ts";
 import { ensureTypings, typingsStatus } from "./typings.ts";
 import { type ChannelPin, readPins, updatePins, type VersionPins } from "./versions.ts";
+
+/**
+ * A data source another feature keeps (BDS builds), registered by `wireFeatures()` so `knowledge update` refreshes it
+ * and `knowledge status` reports it per channel, after the knowledge sources.
+ */
+export interface StoreSource {
+  /** Row name in the source status (`BDS`). */
+  source: string;
+  /** Step name in `knowledge update` (`bds`). */
+  step: string;
+  /** Refresh now; resolves to the step detail. */
+  update(channel: Channel, progress: (message: string) => void): Promise<string>;
+  /** Version in use, from the cache only. */
+  inUse(channel: Channel): Promise<string | undefined>;
+  /** Newest version the pins name. */
+  latest(pin: ChannelPin | undefined): string | undefined;
+}
+
+const storeSources: StoreSource[] = [];
+
+export function registerStoreSource(source: StoreSource): void {
+  if (!storeSources.includes(source)) storeSources.push(source);
+}
 
 export interface UpdateReport {
   pins: VersionPins;
@@ -30,7 +51,7 @@ export async function updateKnowledge(channels: readonly Channel[] = CHANNELS): 
     try {
       steps.push({ channel, step: name, ok: true, detail: await fn() });
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
+      const detail = errorMessage(err);
       progress(`${channel} ${name} failed: ${detail}`);
       steps.push({ channel, step: name, ok: false, detail });
     }
@@ -38,8 +59,8 @@ export async function updateKnowledge(channels: readonly Channel[] = CHANNELS): 
   await Promise.all([
     step("all", "rockide", async () => {
       const r = await ensureRockideSchemas({ refresh: true });
-      if (r.stale) throw new Error(`update failed (${r.stale}); kept ${r.release}`);
-      return `${r.release} (${r.commit.slice(0, 10)})`;
+      if (r.stale) throw new Error(`update failed (${r.stale}); kept ${r.release.version}`);
+      return `${r.release.version} (${r.release.commit.slice(0, 10)})`;
     }),
     ...channels.map(async (channel) => {
       // The pinned tag itself: without `version` a cached older tag would answer and the new one would wait.
@@ -60,19 +81,10 @@ export async function updateKnowledge(channels: readonly Channel[] = CHANNELS): 
         const index = await changelogIndex(channel, articles);
         return `${articles.length} articles (${index.docs.size} chunks)`;
       });
-      await step(channel, "bds", async () => (await updateBds(channel, progress))?.version ?? "not installed");
+      for (const source of storeSources) await step(channel, source.step, () => source.update(channel, progress));
     }),
   ]);
   return { pins, steps };
-}
-
-async function exists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /** One external data source: what is used, what upstream has, when upstream was last asked. */
@@ -101,8 +113,8 @@ export async function sourceStatus(pins?: VersionPins): Promise<SourceStatus[]> 
   const rockide = await rockideStatus();
   out.push({
     source: "rockide/schemas",
-    inUse: rockide?.release,
-    latest: rockide?.latest,
+    inUse: rockide?.release.version,
+    latest: rockide ? (rockide.latest ?? rockide.release.version) : undefined,
     checkedAt: rockide?.checkedAt,
     note: rockide?.error ? `update failed: ${rockide.error}` : undefined,
   });
@@ -131,8 +143,7 @@ export async function sourceStatus(pins?: VersionPins): Promise<SourceStatus[]> 
       note: docs ? `checkout ${docs.commit.slice(0, 10)}` : undefined,
     });
     out.push({ source: "changelogs", channel, inUse: (await changelogStatus(channel))?.newest, latest: pin?.changelog?.version, checkedAt });
-    const [bds] = await listInstalled(channel);
-    out.push({ source: "BDS", channel, inUse: bds?.version, latest: pin?.bds?.version, checkedAt });
+    for (const s of storeSources) out.push({ source: s.source, channel, inUse: await s.inUse(channel), latest: s.latest(pin), checkedAt });
   }
   return out;
 }
@@ -164,7 +175,6 @@ export interface KnowledgeStatus {
 
 export async function knowledgeStatus(): Promise<KnowledgeStatus> {
   const pins = await readPins();
-  const cachedTags = await readdir(cacheDir("knowledge", "samples")).catch(() => [] as string[]);
   const channels: ChannelStatus[] = [];
   for (const channel of CHANNELS) {
     const pin = pins?.channels[channel];
@@ -173,14 +183,7 @@ export async function knowledgeStatus(): Promise<KnowledgeStatus> {
       status.version = pin.version;
       status.pin = pin;
     }
-    for (const tag of cachedTags.filter((t) => !t.startsWith("."))) {
-      if (channel === "preview" ? !tag.endsWith("-preview") : tag.endsWith("-preview")) continue;
-      const marker = join(samplesDir(tag), ".sculkwire-samples.json");
-      const parts = (await exists(marker))
-        ? (JSON.parse(await readFile(marker, "utf8")) as { parts: string[] }).parts
-        : undefined;
-      status.samples.push(parts ? { tag, cached: true, parts } : { tag, cached: false });
-    }
+    for (const { tag, parts } of await samplesStatus(channel)) status.samples.push(parts ? { tag, cached: true, parts } : { tag, cached: false });
     const docs = await docsStatus(channel);
     if (docs) status.docs = { docsVersion: docs.docsVersion, commit: docs.commit };
     const changelogs = await changelogStatus(channel);
@@ -190,6 +193,6 @@ export async function knowledgeStatus(): Promise<KnowledgeStatus> {
   const result: KnowledgeStatus = { cacheDir: cacheDir("knowledge"), channels, sources: await sourceStatus(pins) };
   if (pins) result.updatedAt = pins.updatedAt;
   const r = await rockideStatus();
-  if (r) result.rockide = { release: r.release, commit: r.commit, fetchedAt: r.fetchedAt, checkedAt: r.checkedAt, latest: r.latest };
+  if (r) result.rockide = { release: r.release.version, commit: r.release.commit, fetchedAt: r.fetchedAt, checkedAt: r.checkedAt, latest: r.latest ?? r.release.version };
   return result;
 }

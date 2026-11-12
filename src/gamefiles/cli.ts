@@ -1,32 +1,26 @@
 import { parseArgs } from "node:util";
-import type { CliCommand } from "../core/cli.ts";
+import { type CliCommand, err, out } from "../core/cli.ts";
 import { ExitCode } from "../core/diagnostic.ts";
-import { detectBuilds, gameDirCandidates, noBuildMessage, selectBuild, type GameBuild } from "./detect.ts";
-import { extractPack, findPack, listPacks, listVanillaPacks, PACK_KINDS, type PackKind } from "./extract.ts";
-
-function out(text: string): void {
-  process.stdout.write(`${text}\n`);
-}
-
-function err(text: string): void {
-  process.stderr.write(`${text}\n`);
-}
+import { errorMessage, UsageError } from "../core/errors.ts";
+import { detectBuilds, gameDirCandidates, noBuildMessage, requireBuild, type GameBuild } from "./detect.ts";
+import { DEFAULT_PACK_KIND, extractPack, findPack, listPacks, listVanillaPacks, PACK_KINDS, type PackKind } from "./extract.ts";
 
 type Parsed = { values: Record<string, string | boolean | undefined>; positionals: string[] };
 
-function parse(args: string[], options: Record<string, { type: "string" | "boolean"; short?: string }>): Parsed | undefined {
+function parse(args: string[], options: Record<string, { type: "string" | "boolean"; short?: string }>): Parsed {
   try {
     return parseArgs({ args, options: { ...options, json: { type: "boolean" } }, allowPositionals: true });
   } catch (e) {
-    err(e instanceof Error ? e.message : String(e));
-    return undefined;
+    throw new UsageError(errorMessage(e));
   }
 }
 
-function resolveBuild(selector: string | undefined): GameBuild | undefined {
-  const build = selectBuild(detectBuilds(), selector);
-  if (!build) err(noBuildMessage(selector));
-  return build;
+function resolveBuild(selector: string | undefined): GameBuild {
+  try {
+    return requireBuild(selector);
+  } catch (e) {
+    throw new UsageError(errorMessage(e));
+  }
 }
 
 function isKind(value: unknown): value is PackKind {
@@ -38,15 +32,15 @@ const builds: CliCommand = {
   summary: "Installed PC (GDK) game builds: version, game directory, pack folders [--game-dir dir] [--json]",
   async run(args) {
     const p = parse(args, { "game-dir": { type: "string" } });
-    if (!p) return ExitCode.usage;
     const dir = p.values["game-dir"];
-    const found = detectBuilds(typeof dir === "string" ? [dir] : gameDirCandidates());
+    const searched = typeof dir === "string" ? [dir] : gameDirCandidates();
+    const found = detectBuilds(searched);
     if (p.values.json) {
       out(JSON.stringify({ builds: found }, null, 2));
       return found.length ? ExitCode.ok : ExitCode.usage;
     }
     if (found.length === 0) {
-      err(noBuildMessage());
+      err(noBuildMessage(undefined, searched));
       return ExitCode.usage;
     }
     for (const b of found) {
@@ -66,14 +60,12 @@ const packs: CliCommand = {
   summary: "List the versioned vanilla packs of an installed build (--all for every pack, --kind behavior|resource)",
   async run(args) {
     const p = parse(args, { build: { type: "string" }, kind: { type: "string" }, all: { type: "boolean" } });
-    if (!p) return ExitCode.usage;
     const kind = p.values.kind;
     if (kind !== undefined && !isKind(kind)) {
       err(`--kind must be one of ${PACK_KINDS.join(", ")}`);
       return ExitCode.usage;
     }
     const build = resolveBuild(p.values.build as string | undefined);
-    if (!build) return ExitCode.usage;
     const list = (p.values.all ? listPacks(build) : listVanillaPacks(build)).filter((x) => !kind || x.kind === kind);
     if (p.values.json) out(JSON.stringify({ build: build.key, version: build.version, packs: list }, null, 2));
     else for (const x of list) out(`${x.kind.padEnd(8)} ${x.name.padEnd(32)} ${String(x.archives).padStart(4)} archives`);
@@ -91,15 +83,13 @@ const extract: CliCommand = {
       out: { type: "string" },
       force: { type: "boolean" },
     });
-    if (!p) return ExitCode.usage;
     const pack = p.positionals[0];
-    const kind = p.values.kind ?? "behavior";
+    const kind = p.values.kind ?? DEFAULT_PACK_KIND;
     if (!pack || p.positionals.length > 1 || !isKind(kind)) {
       err("usage: sculk gamefiles extract <pack> [--kind behavior|resource] [--out dir] [--force] [--build key]");
       return ExitCode.usage;
     }
     const build = resolveBuild(p.values.build as string | undefined);
-    if (!build) return ExitCode.usage;
     const target = findPack(build, pack, kind);
     if (!target) {
       err(`no ${kind} pack ${JSON.stringify(pack)} in build ${build.key} (see: sculk gamefiles packs --all)`);

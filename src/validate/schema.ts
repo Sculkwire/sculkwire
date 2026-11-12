@@ -9,16 +9,21 @@
  */
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { readdir } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Ajv, type ErrorObject, type ValidateFunction } from "ajv";
 import { Ajv2020 } from "ajv/dist/2020.js";
-import { parse as parseJsonc } from "jsonc-parser";
-import type { Diagnostic } from "../core/diagnostic.ts";
+import { errorMessage } from "../core/errors.ts";
+import { readJsonOr, writeFileAtomic } from "../core/fs.ts";
+import { memoAsync } from "../core/memo.ts";
 import { cacheDir } from "../core/paths.ts";
 import type { PackKind } from "../core/project.ts";
-import { compareVersionTuples, type FileKind, formatVersionOf, versionTuple } from "./classify.ts";
+import { compareTuples } from "../core/version.ts";
+import { listEngineSchemas, readSchemaJson } from "../knowledge/metadata.ts";
+import { rockideRoutes } from "../knowledge/rockide.ts";
+import { type FileKind, formatVersionOf, versionTuple } from "./classify.ts";
+import type { Finding } from "./context.ts";
 import { type JsonDocument, parsePointer, pointerJoin, rangeAtPointer } from "./jsonc.ts";
 
 export type SchemaSourceName = "engine" | "rockide";
@@ -31,7 +36,6 @@ export interface SchemaChoice {
   pointer: string;
   /** Engine schema version folder, when versioned. */
   version?: string;
-  dialect: "draft-07" | "2020-12";
   /** Short human label, e.g. `engine server/entity/1.26.50/ActorDocument.json`. */
   label: string;
 }
@@ -55,7 +59,6 @@ export function engineSchemasBase(opts: SchemaOptions): string | undefined {
 const MAX_ERRORS_PER_FILE = 20;
 const CALIBRATION_VERSION = 4;
 
-// ---------------------------------------------------------------- engine schemas (bedrock-samples)
 
 interface EngineRoot {
   kind: FileKind;
@@ -92,39 +95,28 @@ interface EngineCandidate {
   root: EngineRoot;
 }
 
-const engineIndexMemo = new Map<string, Promise<Map<FileKind, EngineCandidate[]>>>();
+const engineIndexMemo = memoAsync<Map<FileKind, EngineCandidate[]>>();
 
 /** kind -> candidate schema files sorted by version (beta folders excluded; `legacy` sorts first). */
 function engineIndex(base: string): Promise<Map<FileKind, EngineCandidate[]>> {
-  let p = engineIndexMemo.get(base);
-  if (!p) {
-    p = (async () => {
-      const out = new Map<FileKind, EngineCandidate[]>();
-      for (const root of ENGINE_ROOTS) {
-        for (const dir of root.dirs) {
-          let versions: string[] = [];
-          try {
-            versions = await readdir(join(base, dir));
-          } catch {
-            continue;
-          }
-          for (const v of versions) {
-            const tuple = v === "legacy" ? [0] : versionTuple(v);
-            if (!tuple.length) continue;
-            const file = join(base, dir, v, root.file);
-            if (!existsSync(file)) continue;
-            let list = out.get(root.kind);
-            if (!list) out.set(root.kind, (list = []));
-            list.push({ version: tuple, versionText: v, file, root });
-          }
+  return engineIndexMemo(base, async () => {
+    const files = await listEngineSchemas(base);
+    const out = new Map<FileKind, EngineCandidate[]>();
+    for (const root of ENGINE_ROOTS) {
+      for (const dir of root.dirs) {
+        for (const f of files) {
+          if (f.scope !== dir || f.name !== root.file) continue;
+          const tuple = f.formatVersion === "legacy" ? [0] : versionTuple(f.formatVersion);
+          if (!tuple.length) continue;
+          let list = out.get(root.kind);
+          if (!list) out.set(root.kind, (list = []));
+          list.push({ version: tuple, versionText: f.formatVersion, file: join(base, ...f.rel.split("/")), root });
         }
       }
-      for (const list of out.values()) list.sort((a, b) => compareVersionTuples(a.version, b.version));
-      return out;
-    })();
-    engineIndexMemo.set(base, p);
-  }
-  return p;
+    }
+    for (const list of out.values()) list.sort((a, b) => compareTuples(a.version, b.version));
+    return out;
+  });
 }
 
 /** Nearest engine schema with version <= the file's format_version. Exported for tests. */
@@ -132,18 +124,16 @@ export function pickEngineCandidate(candidates: readonly EngineCandidate[], form
   const fv = versionTuple(formatVersion);
   if (!fv.length) return undefined;
   let best: EngineCandidate | undefined;
-  for (const c of candidates) if (compareVersionTuples(c.version, fv) <= 0) best = c;
+  for (const c of candidates) if (compareTuples(c.version, fv) <= 0) best = c;
   return best;
 }
 
-// ---------------------------------------------------------------- glob routing (rockide)
 
 interface GlobRule {
-  packKind: PackKind | undefined;
+  packKind: PackKind;
   include: RegExp[];
   exclude: RegExp[];
   file: string;
-  dialect: "draft-07" | "2020-12";
 }
 
 export function globToRegExp(pattern: string): RegExp {
@@ -171,63 +161,31 @@ export function globToRegExp(pattern: string): RegExp {
   return new RegExp(`^${out}$`);
 }
 
-const rockideMemo = new Map<string, Promise<GlobRule[]>>();
+const rockideMemo = memoAsync<GlobRule[]>();
 
-/** Rockide's own file -> schema mapping, parsed from its `scripts/compile.ts` (BP/RP/SP entry tables). */
+/** Rockide's own file -> schema routing; resource-pack globs also match inside `subpacks/<name>/`. */
 function loadRockideRules(dir: string): Promise<GlobRule[]> {
-  let p = rockideMemo.get(dir);
-  if (!p) {
-    p = (async () => {
-      const src = await readFile(join(dir, "scripts", "compile.ts"), "utf8");
-      const rules: GlobRule[] = [];
-      for (const [constName, packKind] of [
-        ["BP_ENTRIES", "behavior"],
-        ["RP_ENTRIES", "resource"],
-        ["SP_ENTRIES", "skin"],
-      ] as [string, PackKind][]) {
-        const block = new RegExp(`const ${constName}[^=]*=\\s*\\[([\\s\\S]*?)\\n\\];`).exec(src)?.[1];
-        if (!block) continue;
-        for (const m of block.matchAll(/fileMatch:\s*(\[[^\]]*\]|"[^"]*"),\s*url:\s*"([^"]+)"/g)) {
-          const raw = m[1] as string;
-          const matches = (raw.startsWith("[") ? JSON.parse(raw.replace(/,\s*\]/, "]")) : [JSON.parse(raw)]) as string[];
-          let include = matches.filter((x) => !x.startsWith("!"));
-          let exclude = matches.filter((x) => x.startsWith("!")).map((x) => x.slice(1));
-          if (packKind === "resource" && !include.some((x) => x.startsWith("manifest."))) {
-            include = [...include, ...include.map((x) => `subpacks/*/${x}`)];
-            exclude = [...exclude, ...exclude.map((x) => `subpacks/*/${x}`)];
-          }
-          rules.push({
-            packKind,
-            include: include.map(globToRegExp),
-            exclude: exclude.map(globToRegExp),
-            file: join(dir, m[2] as string),
-            dialect: "2020-12",
-          });
-        }
+  return rockideMemo(dir, async () =>
+    (await rockideRoutes(dir)).map(({ packKind, fileMatch, file }) => {
+      let include = fileMatch.filter((x) => !x.startsWith("!"));
+      let exclude = fileMatch.filter((x) => x.startsWith("!")).map((x) => x.slice(1));
+      if (packKind === "resource" && !include.some((x) => x.startsWith("manifest."))) {
+        include = [...include, ...include.map((x) => `subpacks/*/${x}`)];
+        exclude = [...exclude, ...exclude.map((x) => `subpacks/*/${x}`)];
       }
-      return rules;
-    })();
-    rockideMemo.set(dir, p);
-  }
-  return p;
+      return { packKind, include: include.map(globToRegExp), exclude: exclude.map(globToRegExp), file };
+    }),
+  );
 }
 
 function matchRule(rules: readonly GlobRule[], packKind: PackKind, rel: string): GlobRule | undefined {
   return rules.find(
     (r) =>
-      (r.packKind === undefined || r.packKind === packKind) &&
+      r.packKind === packKind &&
       r.include.some((re) => re.test(rel)) &&
       !r.exclude.some((re) => re.test(rel)),
   );
 }
-
-/**
- * Source precedence, measured on bedrock-samples 1.26.60.5 (`docs/tools.md`, validate_pack): rockide first
- * catches unknown components and fields the engine dump admits (86% vs 18% of injected entity/block/item
- * errors) for +9 held-out vanilla false positives in 3816 files (24 vs 15); engine covers what rockide does not
- * route.
- */
-const SCHEMA_ORDER: readonly SchemaSourceName[] = ["rockide", "engine"];
 
 /** Choose the schema for one file. `undefined` = no schema covers it. */
 export async function chooseSchema(
@@ -239,11 +197,11 @@ export async function chooseSchema(
 ): Promise<SchemaChoice | undefined> {
   // manifest.json is owned by the manifest check: the available schemas reject valid manifests.
   if (kind === "manifest") return undefined;
-  for (const source of SCHEMA_ORDER) {
-    const choice = source === "engine" ? await engineChoice(kind, value, opts) : await rockideChoice(packKind, rel, opts);
-    if (choice) return choice;
-  }
-  return undefined;
+  // Source precedence, measured on bedrock-samples 1.26.60.5 (`docs/tools.md`, validate_pack): rockide first
+  // catches unknown components and fields the engine dump admits (86% vs 18% of injected entity/block/item
+  // errors) for +9 held-out vanilla false positives in 3816 files (24 vs 15); engine covers what rockide does not
+  // route.
+  return (await rockideChoice(packKind, rel, opts)) ?? (await engineChoice(kind, value, opts));
 }
 
 async function engineChoice(kind: FileKind, value: unknown, opts: SchemaOptions): Promise<SchemaChoice | undefined> {
@@ -253,7 +211,7 @@ async function engineChoice(kind: FileKind, value: unknown, opts: SchemaOptions)
   const c = pickEngineCandidate((await engineIndex(engineBase)).get(kind) ?? [], fv);
   if (!c || !subtreeExists(value, c.root.pointer)) return undefined;
   const rel2 = c.file.slice(engineBase.length + 1).split("\\").join("/");
-  return { source: "engine", file: c.file, pointer: c.root.pointer, version: c.versionText, dialect: "draft-07", label: `engine ${rel2}` };
+  return { source: "engine", file: c.file, pointer: c.root.pointer, version: c.versionText, label: `engine ${rel2}` };
 }
 
 async function rockideChoice(packKind: PackKind, rel: string, opts: SchemaOptions): Promise<SchemaChoice | undefined> {
@@ -261,7 +219,7 @@ async function rockideChoice(packKind: PackKind, rel: string, opts: SchemaOption
   if (!dir) return undefined;
   const r = matchRule(await loadRockideRules(dir), packKind, rel);
   if (!r) return undefined;
-  return { source: "rockide", file: r.file, pointer: "", dialect: r.dialect, label: `rockide ${r.file.slice(dir.length + 1).split("\\").join("/")}` };
+  return { source: "rockide", file: r.file, pointer: "", label: `rockide ${r.file.slice(dir.length + 1).split("\\").join("/")}` };
 }
 
 function subtreeExists(value: unknown, pointer: string): boolean {
@@ -273,41 +231,29 @@ function subtreeExists(value: unknown, pointer: string): boolean {
   return v !== undefined;
 }
 
-// ---------------------------------------------------------------- schema loading + Ajv
 
 type Json = Record<string, unknown>;
 
-const rawCache = new Map<string, Promise<unknown>>();
+const basenameMaps = memoAsync<Map<string, string[]>>();
 
-function readSchemaFile(path: string): Promise<unknown> {
-  let p = rawCache.get(path);
-  if (!p) {
-    p = readFile(path, "utf8").then((t) => parseJsonc(t, [], { allowTrailingComma: true }) as unknown);
-    rawCache.set(path, p);
-  }
-  return p;
-}
-
-const basenameMaps = new Map<string, Map<string, string[]>>();
-
-async function basenameMap(root: string): Promise<Map<string, string[]>> {
-  let m = basenameMaps.get(root);
-  if (m) return m;
-  m = new Map();
-  const walk = async (d: string): Promise<void> => {
-    for (const e of await readdir(d, { withFileTypes: true }).catch(() => [])) {
-      const p = join(d, e.name);
-      if (e.isDirectory()) await walk(p);
-      else if (e.name.endsWith(".json")) {
-        const list = m?.get(e.name) ?? [];
-        list.push(p);
-        m?.set(e.name, list);
+/** File name -> every `.json` file of that name under `root`. */
+function basenameMap(root: string): Promise<Map<string, string[]>> {
+  return basenameMaps(root, async () => {
+    const m = new Map<string, string[]>();
+    const walk = async (d: string): Promise<void> => {
+      for (const e of await readdir(d, { withFileTypes: true }).catch(() => [])) {
+        const p = join(d, e.name);
+        if (e.isDirectory()) await walk(p);
+        else if (e.name.endsWith(".json")) {
+          const list = m.get(e.name) ?? [];
+          list.push(p);
+          m.set(e.name, list);
+        }
       }
-    }
-  };
-  await walk(root);
-  basenameMaps.set(root, m);
-  return m;
+    };
+    await walk(root);
+    return m;
+  });
 }
 
 /** Resolve a `$ref` file part against the referencing file, with fallbacks for upstream layout quirks. */
@@ -379,7 +325,7 @@ async function refTarget(ref: string): Promise<unknown> {
   const hash = ref.indexOf("#");
   const url = hash >= 0 ? ref.slice(0, hash) : ref;
   if (!url.startsWith("file:")) return undefined;
-  let node = await readSchemaFile(fileURLToPath(url)).catch(() => undefined);
+  let node = await readSchemaJson(fileURLToPath(url)).catch(() => undefined);
   for (const seg of parsePointer(hash >= 0 ? decodeURIComponent(ref.slice(hash + 1)) : "")) {
     if (!node || typeof node !== "object") return undefined;
     node = (node as Json)[seg];
@@ -540,7 +486,7 @@ class SchemaRuntime {
 
   private async load(uri: string, rt: SourceRuntime): Promise<Json> {
     const path = fileURLToPath(uri);
-    const raw = structuredClone(await readSchemaFile(path));
+    const raw = structuredClone(await readSchemaJson(path));
     const schema: Json = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Json) : {};
     delete schema.$schema;
     schema.$id = uri;
@@ -556,8 +502,10 @@ class SchemaRuntime {
   }
 
   async validator(choice: SchemaChoice, opts: SchemaOptions): Promise<ValidateFunction> {
-    const sourceRoot = choice.source === "engine" ? engineSchemasBase(opts) : opts.rockideSchemasDir;
-    const rt = this.runtime(`${choice.source}|${sourceRoot}`, choice.dialect, sourceRoot, choice.source === "rockide");
+    const rockide = choice.source === "rockide";
+    const sourceRoot = rockide ? opts.rockideSchemasDir : engineSchemasBase(opts);
+    // Rockide writes JSON Schema 2020-12; the engine dump is draft-07.
+    const rt = this.runtime(`${choice.source}|${sourceRoot}`, rockide ? "2020-12" : "draft-07", sourceRoot, rockide);
     const uri = pathToFileURL(choice.file).href;
     let p = rt.compiled.get(uri);
     if (!p) {
@@ -574,7 +522,6 @@ class SchemaRuntime {
 
 const runtime = new SchemaRuntime();
 
-// ---------------------------------------------------------------- error reduction + messages
 
 export interface SchemaIssue {
   keyword: string;
@@ -780,8 +727,8 @@ export async function evaluate(value: unknown, choice: SchemaChoice, kindKey: st
     const known = ((fvErr.params.allowedValues as unknown[]) ?? []).filter(
       (v): v is string => typeof v === "string" && versionTuple(v).length > 0,
     );
-    const older = known.filter((v) => compareVersionTuples(versionTuple(v), versionTuple(fv)) <= 0);
-    older.sort((a, b) => compareVersionTuples(versionTuple(a), versionTuple(b)));
+    const older = known.filter((v) => compareTuples(versionTuple(v), versionTuple(fv)) <= 0);
+    older.sort((a, b) => compareTuples(versionTuple(a), versionTuple(b)));
     const to = older[older.length - 1];
     if (to) {
       validate({ ...(instance as Json), format_version: to });
@@ -793,14 +740,13 @@ export async function evaluate(value: unknown, choice: SchemaChoice, kindKey: st
   return fallback ? { issues, fallback } : { issues };
 }
 
-// ---------------------------------------------------------------- calibration against vanilla
 
 /** What vanilla content tells about the schemas: complaints it triggers (gaps). */
 export interface Calibration {
   signatures: Set<string>;
 }
 
-const calibrationMemo = new Map<string, Promise<Calibration>>();
+const calibrationMemo = memoAsync<Calibration>();
 
 /**
  * Signatures of schema complaints vanilla content triggers (computed once per samples checkout + schema
@@ -815,57 +761,45 @@ export function calibration(
     .update(JSON.stringify([identity, engineSchemasBase(opts) ?? "", opts.rockideSchemasDir ?? "", CALIBRATION_VERSION]))
     .digest("hex")
     .slice(0, 16);
-  let p = calibrationMemo.get(key);
-  if (!p) {
-    p = (async () => {
-      const file = cacheDir("validate", `calibration-${key}.json`);
+  return calibrationMemo(key, async () => {
+    const file = cacheDir("validate", `calibration-${key}.json`);
+    const cached = await readJsonOr<{ signatures: string[] }>(file);
+    if (cached) return { signatures: new Set(cached.signatures) };
+    const signatures = new Set<string>();
+    for (const f of await vanillaFiles()) {
+      const choice = await chooseSchema(f.packKind, f.rel, f.kind, f.value, opts);
+      if (!choice) continue;
       try {
-        const cached = JSON.parse(await readFile(file, "utf8")) as { signatures: string[] };
-        return { signatures: new Set(cached.signatures) };
+        const { issues } = await evaluate(f.value, choice, f.kind, opts);
+        for (const i of issues) for (const s of i.signatures) signatures.add(s);
       } catch {
-        // not cached yet
+        // schema that cannot compile: nothing to calibrate
       }
-      const signatures = new Set<string>();
-      for (const f of await vanillaFiles()) {
-        const choice = await chooseSchema(f.packKind, f.rel, f.kind, f.value, opts);
-        if (!choice) continue;
-        try {
-          const { issues } = await evaluate(f.value, choice, f.kind, opts);
-          for (const i of issues) for (const s of i.signatures) signatures.add(s);
-        } catch {
-          // schema that cannot compile: nothing to calibrate
-        }
-      }
-      await mkdir(dirname(file), { recursive: true });
-      await writeFile(file, JSON.stringify({ signatures: [...signatures].sort() }));
-      return { signatures };
-    })();
-    calibrationMemo.set(key, p);
-  }
-  return p;
+    }
+    await writeFileAtomic(file, JSON.stringify({ signatures: [...signatures].sort() }));
+    return { signatures };
+  });
 }
 
-// ---------------------------------------------------------------- per-file check
 
 export interface SchemaFileResult {
   choice?: SchemaChoice;
-  diagnostics: Omit<Diagnostic, "file">[];
+  diagnostics: Omit<Finding, "file">[];
 }
 
-/** Game rules no schema encodes, each measured on BDS (legacy docs/validate.md). */
-function gameRules(kind: FileKind, value: unknown, doc: JsonDocument): Omit<Diagnostic, "file">[] {
-  const out: Omit<Diagnostic, "file">[] = [];
+/** Game rules no schema encodes, each measured on BDS. */
+function gameRules(kind: FileKind, value: unknown, doc: JsonDocument): Omit<Finding, "file">[] {
+  const out: Omit<Finding, "file">[] = [];
   if (kind !== "item" && kind !== "block") return out;
   const fv = formatVersionOf(value);
   const root = kind === "item" ? "minecraft:item" : "minecraft:block";
   const mc = ((value as Json)?.[root] as Json | undefined)?.description as Json | undefined;
   const group = (mc?.menu_category as Json | undefined)?.group;
-  if (typeof group === "string" && !group.includes(":") && fv && compareVersionTuples(versionTuple(fv), [1, 21, 60]) >= 0) {
+  if (typeof group === "string" && !group.includes(":") && fv && compareTuples(versionTuple(fv), [1, 21, 60]) >= 0) {
     const pointer = `/${root}/description/menu_category/group`;
     out.push({
       severity: "error",
       code: "schema.menu-group-namespace",
-      source: "schema",
       message: `menu_category.group '${group}' needs a namespace from format_version 1.21.60; the game rejects the whole ${kind}`,
       hint: `use "minecraft:${group}"`,
       pointer,
@@ -892,17 +826,16 @@ export async function checkSchemaFile(args: SchemaFileArgs): Promise<SchemaFileR
   const { packKind, rel, kind, doc, opts } = args;
   const gaps = args.calibration?.signatures;
   const value = doc.value;
-  const diagnostics: Omit<Diagnostic, "file">[] = [];
+  const diagnostics: Omit<Finding, "file">[] = [];
   if (value === undefined) return { diagnostics };
   if (packKind === "behavior") diagnostics.push(...gameRules(kind, value, doc));
   const fv = formatVersionOf(value);
   if (fv && args.gameVersion && kind !== "manifest") {
     const t = versionTuple(fv);
-    if (t.length && compareVersionTuples(t.slice(0, 3), args.gameVersion.slice(0, 3)) > 0) {
+    if (t.length && compareTuples(t.slice(0, 3), args.gameVersion.slice(0, 3)) > 0) {
       diagnostics.push({
         severity: "error",
         code: "schema.format-version-too-new",
-        source: "schema",
         message: `format_version ${fv} is newer than Minecraft ${args.gameVersion.join(".")} (${args.channel ?? "stable"}); the game rejects the file`,
         pointer: "/format_version",
         range: rangeAtPointer(doc, "/format_version"),
@@ -918,8 +851,7 @@ export async function checkSchemaFile(args: SchemaFileArgs): Promise<SchemaFileR
     diagnostics.push({
       severity: "warning",
       code: "schema.unavailable",
-      source: "schema",
-      message: `schema ${choice.label} could not be evaluated: ${String(err instanceof Error ? err.message : err).slice(0, 200)}`,
+      message: `schema ${choice.label} could not be evaluated: ${errorMessage(err).slice(0, 200)}`,
       range: rangeAtPointer(doc, ""),
     });
     return { choice, diagnostics };
@@ -928,7 +860,6 @@ export async function checkSchemaFile(args: SchemaFileArgs): Promise<SchemaFileR
     diagnostics.push({
       severity: "warning",
       code: "schema.format-version-fallback",
-      source: "schema",
       message: `${choice.label} has no schema for format_version ${result.fallback.from}; validated with ${result.fallback.to}`,
       pointer: "/format_version",
       range: rangeAtPointer(doc, "/format_version"),
@@ -942,7 +873,6 @@ export async function checkSchemaFile(args: SchemaFileArgs): Promise<SchemaFileR
       diagnostics.push({
         severity: "warning",
         code: "schema.gap",
-        source: "schema",
         message: `${issue.message} (vanilla content triggers this too: schema gap)`,
         pointer: issue.pointer,
         range,
@@ -954,13 +884,12 @@ export async function checkSchemaFile(args: SchemaFileArgs): Promise<SchemaFileR
       diagnostics.push({
         severity: "error",
         code: "schema.truncated",
-        source: "schema",
         message: `more than ${MAX_ERRORS_PER_FILE} schema errors; the rest are omitted`,
         range: rangeAtPointer(doc, ""),
       });
       break;
     }
-    diagnostics.push({ severity: "error", code: `schema.${kebab(issue.keyword)}`, source: "schema", message: issue.message, pointer: issue.pointer, range });
+    diagnostics.push({ severity: "error", code: `schema.${kebab(issue.keyword)}`, message: issue.message, pointer: issue.pointer, range });
   }
   return { choice, diagnostics };
 }

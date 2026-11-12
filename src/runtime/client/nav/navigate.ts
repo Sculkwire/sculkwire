@@ -4,11 +4,14 @@
  * opening doors, and planning again when the player leaves the path, gets stuck or the target entity moves.
  */
 import { setTimeout as sleep } from "node:timers/promises";
-import { aimAt, horizontalDistance, yawTo, type Follow, type PlayerController, type PlayerState, type Vec3 } from "../player.ts";
+import { aimAt } from "../camera.ts";
+import { horizontalDistance, yawTo } from "../geometry.ts";
+import type { Follow, PlayerController } from "../player.ts";
+import type { PlayerState, Vec3 } from "../types.ts";
 import { gridFor, type GridCache } from "./grid.ts";
 import { closedIn, plan, standAt, type PathStep, type PlanResult } from "./planner.ts";
 
-export interface NavigateOptions {
+interface NavigateOptions {
   /** Arrive within this many blocks (default 0.7, 2 for an entity). */
   radius?: number;
   /** Sprint on straight stretches (default true). Gaps of 2 or 3 blocks are always sprint-jumped. */
@@ -21,7 +24,7 @@ export interface NavigateOptions {
   closeDoors?: boolean;
 }
 
-export interface NavigateResult {
+interface NavigateResult {
   ok: boolean;
   message: string;
   /** The last planned path (feet positions, block centers). */

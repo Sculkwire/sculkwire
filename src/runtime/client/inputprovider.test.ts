@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { runShutdown } from "../../core/shutdown.ts";
 import { inputProvider, registerInputProvider, setBuiltinInputProvider, type InputProvider } from "./inputprovider.ts";
 
 function fakeProvider(name: string): InputProvider & { closed: number } {
@@ -63,5 +64,17 @@ describe("input provider registry", () => {
     expect(inputProvider()).toBe(agent);
     setBuiltinInputProvider(undefined);
     expect(inputProvider()).toBeUndefined();
+  });
+
+  // Last in the file: the process runs its shutdown hooks only once.
+  it("closes the provider in use and the built-in one once when the process shuts down", async () => {
+    const agent = fakeProvider("agent");
+    const mine = fakeProvider("mine");
+    setBuiltinInputProvider(agent);
+    registerInputProvider(mine);
+    await runShutdown();
+    await runShutdown();
+    expect(mine.closed).toBe(1);
+    expect(agent.closed).toBe(1);
   });
 });

@@ -4,15 +4,15 @@
  * comes from the version pins (re-resolved daily); while a newly pinned tag is not checked out yet, the newest cached
  * checkout of the channel keeps answering and the MCP server checks out the new tag in the background.
  */
-import { readdir, readFile } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { backgroundDownloadsAllowed } from "../core/background.ts";
 import { cacheDir } from "../core/paths.ts";
 import { type Channel, compareGameVersions, parseGameVersion } from "../core/version.ts";
+import { readJsonOr, writeJsonAtomic } from "../core/fs.ts";
 import { setSparse, sparseClone } from "./git.ts";
-import { writeJsonAtomic } from "../core/fs.ts";
 import { OfflineMissingError, progress, single } from "./net.ts";
-import { RETRY_AFTER_FAILURE_MS } from "./tracked.ts";
+import { upstreamBackoff } from "./tracked.ts";
 import { findSamplesTag, getPins, SAMPLES_REPO, type SamplesTag, updatePins } from "./versions.ts";
 
 export type SamplesPart = "metadata" | "behavior_pack" | "resource_pack";
@@ -37,7 +37,8 @@ export interface SamplesCheckout {
   tag: string;
 }
 
-interface Marker {
+/** What a checkout holds: written into it once its sparse checkout is complete. */
+export interface SamplesMarker {
   tag: string;
   commit: string;
   parts: SamplesPart[];
@@ -46,14 +47,24 @@ interface Marker {
 
 const MARKER = ".sculkwire-samples.json";
 
-export const samplesDir = (tag: string): string => cacheDir("knowledge", "samples", tag);
+const samplesDir = (tag: string): string => cacheDir("knowledge", "samples", tag);
 
-async function readMarker(root: string): Promise<Marker | undefined> {
-  try {
-    return JSON.parse(await readFile(join(root, MARKER), "utf8")) as Marker;
-  } catch {
-    return undefined;
+const readMarker = (root: string): Promise<SamplesMarker | undefined> => readJsonOr<SamplesMarker>(join(root, MARKER));
+
+/** Record that the checkout at `root` holds `marker.parts`. */
+export function writeSamplesMarker(root: string, marker: SamplesMarker): Promise<void> {
+  return writeJsonAtomic(join(root, MARKER), marker);
+}
+
+/** Every cached checkout of the channel by tag, with the parts it holds (none while incomplete); no network. */
+export async function samplesStatus(channel: Channel): Promise<{ tag: string; parts?: SamplesPart[] }[]> {
+  const out: { tag: string; parts?: SamplesPart[] }[] = [];
+  for (const tag of await readdir(cacheDir("knowledge", "samples")).catch(() => [] as string[])) {
+    if (tag.startsWith(".") || (channel === "preview" ? !tag.endsWith("-preview") : tag.endsWith("-preview"))) continue;
+    const marker = await readMarker(samplesDir(tag));
+    out.push(marker ? { tag, parts: marker.parts } : { tag });
   }
+  return out;
 }
 
 function patterns(parts: SamplesPart[], images: boolean): string[] {
@@ -67,7 +78,7 @@ function patterns(parts: SamplesPart[], images: boolean): string[] {
   return out;
 }
 
-const satisfies = (marker: Marker | undefined, parts: SamplesPart[], images: boolean): boolean =>
+const satisfies = (marker: SamplesMarker | undefined, parts: SamplesPart[], images: boolean): boolean =>
   !!marker && parts.every((p) => marker.parts.includes(p)) && (marker.images || !images);
 
 /** The newest complete checkout of the channel (other than `except`) that has `parts`, without network. */
@@ -93,19 +104,16 @@ function checkout(found: SamplesTag, parts: SamplesPart[], images: boolean): Pro
     if (!marker) {
       progress(`checking out bedrock-samples ${found.tag} (${parts.join(", ")}${images ? ", images" : ""})`);
       const commit = await sparseClone(root, { url: SAMPLES_REPO, ref: found.tag, patterns: patterns(parts, images) });
-      await writeJsonAtomic(join(root, MARKER), { tag: found.tag, commit, parts, images } satisfies Marker);
+      await writeSamplesMarker(root, { tag: found.tag, commit, parts, images });
       return;
     }
     const allParts = [...new Set([...marker.parts, ...parts])];
     const allImages = marker.images || images;
     progress(`extending bedrock-samples ${found.tag} to ${allParts.join(", ")}${allImages ? ", images" : ""}`);
     await setSparse(root, patterns(allParts, allImages));
-    await writeJsonAtomic(join(root, MARKER), { ...marker, parts: allParts, images: allImages } satisfies Marker);
+    await writeSamplesMarker(root, { ...marker, parts: allParts, images: allImages });
   });
 }
-
-/** Per tag: when its background checkout last failed (per process). */
-const backgroundFailures = new Map<string, number>();
 
 export async function ensureBedrockSamples(opts: EnsureSamplesOptions): Promise<SamplesCheckout> {
   const parts = opts.parts?.length ? opts.parts : DEFAULT_PARTS;
@@ -124,12 +132,12 @@ export async function ensureBedrockSamples(opts: EnsureSamplesOptions): Promise<
   // The channel's newest tag (no explicit version) is not checked out yet: answer from the previous one.
   const previous = opts.version ? undefined : await newestCachedSamples(opts.channel, parts, images, found.tag);
   if (previous) {
-    const failed = backgroundFailures.get(found.tag) ?? 0;
-    if (!opts.offline && backgroundDownloadsAllowed() && Date.now() - failed >= RETRY_AFTER_FAILURE_MS) {
-      checkout(found, parts, images).catch((err: unknown) => {
-        backgroundFailures.set(found.tag, Date.now());
-        progress(`bedrock-samples ${found.tag} checkout failed (${err instanceof Error ? err.message : String(err)}); using ${previous.tag}`);
-      });
+    if (!opts.offline && backgroundDownloadsAllowed()) {
+      upstreamBackoff.background(
+        `samples:${found.tag}`,
+        () => checkout(found, parts, images),
+        (reason) => `bedrock-samples ${found.tag} checkout failed (${reason}); using ${previous.tag}`,
+      );
     }
     return previous;
   }

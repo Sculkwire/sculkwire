@@ -4,7 +4,7 @@
  * install, `resolveBds` keeps returning the installed one; the MCP server downloads the new one in the background
  * and the next call uses it. `updateBds` (`sculk knowledge update`) downloads it now.
  */
-import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, normalize, sep } from "node:path";
 import { unzip } from "fflate";
 import { z } from "zod";
@@ -12,10 +12,10 @@ import type { Channel } from "../../core/version.ts";
 import { compareGameVersions, parseGameVersion } from "../../core/version.ts";
 import { backgroundDownloadsAllowed } from "../../core/background.ts";
 import { cacheDir, dataDir } from "../../core/paths.ts";
-import { PrerequisiteError } from "../../core/errors.ts";
-import { getPins } from "../../knowledge/versions.ts";
-
-export const LINKS_API = "https://net-secondary.web.minecraft-services.net/api/v1.0/download/links";
+import { errorMessage, PrerequisiteError } from "../../core/errors.ts";
+import { exists, readJsonOr } from "../../core/fs.ts";
+import { fetchBdsLinks, getPins } from "../../knowledge/versions.ts";
+import { INSTALL_MARKER, serverExecutable } from "./files.ts";
 
 export type BdsPlatform = "linux" | "windows";
 
@@ -41,13 +41,10 @@ const DOWNLOAD_TYPES: Record<string, { channel: Channel; platform: BdsPlatform }
   serverBedrockPreviewWindows: { channel: "preview", platform: "windows" },
 };
 
-const MARKER = ".sculkwire-bds.json";
-
 const LinksResponse = z.object({
   result: z.object({ links: z.array(z.object({ downloadType: z.string(), downloadUrl: z.string() })) }),
 });
 
-/** Parse the download-links API response body. */
 export function parseLinks(body: unknown): BdsLink[] {
   const out: BdsLink[] = [];
   for (const l of LinksResponse.parse(body).result.links) {
@@ -58,12 +55,6 @@ export function parseLinks(body: unknown): BdsLink[] {
   return out;
 }
 
-export async function fetchLinks(): Promise<BdsLink[]> {
-  const res = await fetch(LINKS_API, { headers: { "User-Agent": "sculkwire" }, signal: AbortSignal.timeout(30_000) });
-  if (!res.ok) throw new Error(`download-links API: HTTP ${res.status}`);
-  return parseLinks(await res.json());
-}
-
 /** BDS build for a host: Linux x64 and Windows x64 only (Mojang publishes no macOS or arm64 server). */
 export function bdsPlatformFor(platform: NodeJS.Platform, arch: string): BdsPlatform | undefined {
   if (arch !== "x64") return undefined;
@@ -72,12 +63,6 @@ export function bdsPlatformFor(platform: NodeJS.Platform, arch: string): BdsPlat
   return undefined;
 }
 
-/** Server executable inside an install for a BDS platform. */
-export function serverExecutable(platform: BdsPlatform): string {
-  return platform === "windows" ? "bedrock_server.exe" : "bedrock_server";
-}
-
-/** The download link for the channel and BDS platform. */
 export function pickLink(links: readonly BdsLink[], channel: Channel, platform: BdsPlatform): BdsLink | undefined {
   return links.find((l) => l.channel === channel && l.platform === platform);
 }
@@ -96,21 +81,12 @@ export function assertHostSupported(platform: NodeJS.Platform = process.platform
 
 const EULA_FILE = (): string => dataDir("eula-accepted");
 
-export async function eulaAccepted(): Promise<boolean> {
-  try {
-    await stat(EULA_FILE());
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Require Minecraft EULA acceptance: once per data dir, via `SCULKWIRE_ACCEPT_EULA=1` or `--accept-eula`
  * (`accept = true`). Acceptance is recorded in `dataDir('eula-accepted')`.
  */
 export async function requireEula(accept = false): Promise<void> {
-  if (await eulaAccepted()) return;
+  if (await exists(EULA_FILE())) return;
   if (accept || process.env.SCULKWIRE_ACCEPT_EULA === "1") {
     await mkdir(dirname(EULA_FILE()), { recursive: true });
     await writeFile(
@@ -132,12 +108,8 @@ interface Marker {
   installedAt: string;
 }
 
-async function readMarker(dir: string): Promise<Marker | undefined> {
-  try {
-    return JSON.parse(await readFile(join(dir, MARKER), "utf8")) as Marker;
-  } catch {
-    return undefined;
-  }
+function readMarker(dir: string): Promise<Marker | undefined> {
+  return readJsonOr<Marker>(join(dir, INSTALL_MARKER));
 }
 
 /** Installed servers, newest first. */
@@ -188,7 +160,7 @@ export async function installBds(opts: InstallOptions = {}): Promise<BdsInstall 
   const log = opts.log ?? (() => {});
   const platform = assertHostSupported();
   await requireEula(opts.acceptEula);
-  const link = pickLink(await fetchLinks(), channel, platform);
+  const link = pickLink(parseLinks(await fetchBdsLinks()), channel, platform);
   if (!link) throw new PrerequisiteError(`no ${platform === "windows" ? "Windows" : "Linux"} BDS published for channel ${channel}`);
   const dir = cacheDir("bds", link.version);
   const existing = await readMarker(dir);
@@ -205,7 +177,7 @@ export async function installBds(opts: InstallOptions = {}): Promise<BdsInstall 
   await unzipTo(zip, tmp);
   if (platform === "linux") await chmod(join(tmp, serverExecutable(platform)), 0o755);
   const marker: Marker = { channel, version: link.version, url: link.url, installedAt: new Date().toISOString() };
-  await writeFile(join(tmp, MARKER), JSON.stringify(marker, null, 2));
+  await writeFile(join(tmp, INSTALL_MARKER), JSON.stringify(marker, null, 2));
   await rm(dir, { recursive: true, force: true });
   await rename(tmp, dir);
   log(`installed BDS ${link.version} at ${dir}`);
@@ -245,7 +217,7 @@ async function updateWhenBehind(channel: Channel, installed: BdsInstall): Promis
     await updateBds(channel, (line) => process.stderr.write(`sculkwire: ${line}\n`));
   } catch (err) {
     updateFailures.set(channel, Date.now());
-    process.stderr.write(`sculkwire: BDS ${channel} update failed (${err instanceof Error ? err.message : String(err)}); using ${installed.version}\n`);
+    process.stderr.write(`sculkwire: BDS ${channel} update failed (${errorMessage(err)}); using ${installed.version}\n`);
   } finally {
     updating.delete(channel);
   }

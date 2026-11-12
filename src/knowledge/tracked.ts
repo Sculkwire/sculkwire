@@ -1,12 +1,16 @@
 /**
- * A cached copy of an upstream artifact that follows the upstream's newest release: one directory per release
- * under `dir()` plus `current.json` naming the copy in use. The release is re-checked at most once a day (or on
- * `refresh`); a new release is downloaded into a temp directory, checked, then switched to. Offline, a failed
- * check or a failed download keeps the previous copy. Used by rockide/schemas.
+ * Following an upstream. Every source (version pins, bedrock-samples, typings, docs, changelogs, rockide/schemas)
+ * checks its upstream at most once a day, keeps answering from its previous copy while a check or download fails,
+ * retries a failed check after an hour (per process) and logs one line per failure: `Backoff` holds that rule.
+ *
+ * `ensureTracked` is the generic cache on top of it: one directory per release under `dir()` plus `current.json`
+ * naming the copy in use. A new release is downloaded into a temp directory, checked, then switched to. Offline, a
+ * failed check or a failed download keeps the previous copy. Used by rockide/schemas.
  */
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { errorMessage } from "../core/errors.ts";
 import { writeJsonAtomic } from "../core/fs.ts";
 import { installDir, OfflineMissingError, progress, single } from "./net.ts";
 
@@ -74,9 +78,58 @@ export interface Marker<R extends Release> {
   error?: string;
 }
 
+/**
+ * Per-process failure back-off and in-flight checks, keyed per source (`pins`, `docs:stable`, `samples:<tag>`, ...).
+ * A failed check is not retried for `RETRY_AFTER_FAILURE_MS`; at most one background check per key runs at a time.
+ */
+class Backoff {
+  readonly #failures = new Map<string, number>();
+  readonly #running = new Map<string, Promise<void>>();
+
+  /** No check of `key` failed within the retry interval. */
+  ready(key: string, now = Date.now()): boolean {
+    return now - (this.#failures.get(key) ?? 0) >= RETRY_AFTER_FAILURE_MS;
+  }
+
+  failed(key: string, now = Date.now()): void {
+    this.#failures.set(key, now);
+  }
+
+  /** Forget the failures (all keys without `key`). */
+  reset(key?: string): void {
+    if (key) this.#failures.delete(key);
+    else this.#failures.clear();
+  }
+
+  /** The background check of `key` in flight, if any. */
+  running(key: string): Promise<void> | undefined {
+    return this.#running.get(key);
+  }
+
+  /**
+   * Run `check` in the background unless one for `key` is running or failed recently. A rejection is remembered (at
+   * `now`, default the time it failed) and logged as the one line `failure(reason)`.
+   */
+  background(key: string, check: () => Promise<unknown>, failure: (reason: string) => string, now?: number): void {
+    if (this.#running.has(key) || !this.ready(key, now)) return;
+    const run = check()
+      .then(
+        () => undefined,
+        (err: unknown) => {
+          this.failed(key, now);
+          progress(failure(errorMessage(err)));
+        },
+      )
+      .finally(() => this.#running.delete(key));
+    this.#running.set(key, run);
+  }
+}
+
+/** The back-off every knowledge source shares. */
+export const upstreamBackoff = new Backoff();
+
 /** Release names double as directory names. */
 const SAFE_NAME = /^[0-9A-Za-z][0-9A-Za-z._+-]*$/;
-const failures = new Map<string, number>();
 
 const markerPath = (spec: TrackedSpec<Release>): string => join(spec.dir(), "current.json");
 
@@ -113,7 +166,7 @@ export function ensureTracked<R extends Release>(spec: TrackedSpec<R>, defaultFe
     if (have) {
       const due = opts.refresh || !(now - Date.parse(have.checkedAt) < CHECK_INTERVAL_MS);
       if (opts.offline || !due) return copyOf(spec, have);
-      if (!opts.refresh && now - (failures.get(spec.key) ?? 0) < RETRY_AFTER_FAILURE_MS) {
+      if (!opts.refresh && !upstreamBackoff.ready(spec.key, now)) {
         return { ...copyOf(spec, have), stale: have.error ?? "last update check failed" };
       }
     } else if (opts.offline) {
@@ -151,9 +204,9 @@ export function ensureTracked<R extends Release>(spec: TrackedSpec<R>, defaultFe
       await prune(spec, have && have.dir !== name ? [name, have.dir] : [name]);
       return copyOf(spec, marker);
     } catch (err) {
-      failures.set(spec.key, now);
+      upstreamBackoff.failed(spec.key, now);
       if (!have) throw err;
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = errorMessage(err);
       progress(`${spec.name} update failed (${reason}); using ${have.release.version}`);
       // Remember the release seen upstream; `checkedAt` stays so the next process retries.
       if (latest && latest.version !== have.release.version) {
@@ -163,10 +216,4 @@ export function ensureTracked<R extends Release>(spec: TrackedSpec<R>, defaultFe
       return { ...copyOf(spec, have), stale: reason };
     }
   });
-}
-
-/** Test hook: forget the per-process failure back-off. */
-export function resetTrackedBackoff(key?: string): void {
-  if (key) failures.delete(key);
-  else failures.clear();
 }

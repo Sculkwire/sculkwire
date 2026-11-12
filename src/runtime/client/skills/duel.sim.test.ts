@@ -5,7 +5,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { drive, fakeClock, seededRandom } from "../../../testing/faketime.ts";
 import { LIVE_MISS_RATE, sim, simMob, spearMob, type Sim, type SimMob, type SimOptions } from "../../../testing/fightsim.ts";
-import { PlayerController, type PlayerAction } from "../player.ts";
+import { PlayerController } from "../player.ts";
+import type { PlayerAction } from "../types.ts";
 import { ENGINE_LATENCY_MS, SWING_OPENS_SHIELD_MS } from "./pack.ts";
 import { play } from "./play.ts";
 import { combatStats, traceFights, type TraceEvent, type TraceFrame } from "./stats.ts";

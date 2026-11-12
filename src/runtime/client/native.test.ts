@@ -11,8 +11,10 @@ import { FOREGROUND_MESSAGE, WindowsInputHelper, windowsScreenshot } from "./win
 // These run the real OS tools (tasklist, ps, PowerShell). CI runs them on Linux, Windows and macOS.
 
 describe("client on this OS", () => {
-  it("lists no game processes and finds installs without throwing", async () => {
-    expect(await gamePids()).toEqual([]);
+  it("lists game processes and finds installs without throwing, with or without a game running", async () => {
+    const pids = await gamePids();
+    expect(Array.isArray(pids)).toBe(true);
+    for (const pid of pids) expect(Number.isInteger(pid) && pid > 0).toBe(true);
     expect(Array.isArray(await findInstalls())).toBe(true);
   });
 });

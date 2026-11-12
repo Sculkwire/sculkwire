@@ -5,25 +5,20 @@
  */
 import { randomBytes } from "node:crypto";
 import { createSocket } from "node:dgram";
-import { copyFile, cp, link, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { copyFile, cp, link, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { basename, join, resolve } from "node:path";
 import type { PackInfo } from "../../core/project.ts";
 import { dataDir } from "../../core/paths.ts";
 import type { BdsInstall } from "./install.ts";
 import { enableExperiments, readLevelDat, writeLevelDat } from "../../gamefiles/nbt.ts";
+import { CONSOLE_LOG, INSTALL_MARKER, LOGS_DIR, TEST_CONFIG } from "./files.ts";
 
 /** Files the server writes or we rewrite: copied, never linked (a hardlink would modify the install). */
 const COPY_FILES: Record<string, true> = { "server.properties": true, "allowlist.json": true, "permissions.json": true };
 /** Install entries an instance must not share. */
-const SKIP: Record<string, true> = {
-  worlds: true,
-  logs: true,
-  "console.log": true,
-  ".sculkwire-bds.json": true,
-  "test_config.json": true,
-};
-export const DEFAULT_LEVEL = "sculkwire";
+const SKIP = new Set(["worlds", LOGS_DIR, CONSOLE_LOG, INSTALL_MARKER, TEST_CONFIG]);
+const LEVEL_NAME = "sculkwire";
 
 export interface LoadedPack {
   pack: PackInfo;
@@ -52,10 +47,8 @@ export interface InstanceOptions {
 export interface BdsInstance {
   id: string;
   dir: string;
-  levelName: string;
   worldDir: string;
   port: number;
-  portV6: number;
   packs: LoadedPack[];
   install: BdsInstall;
 }
@@ -125,7 +118,7 @@ export async function linkDir(src: string, dst: string, platform: NodeJS.Platfor
 async function linkInstall(from: string, to: string): Promise<void> {
   await mkdir(to, { recursive: true });
   for (const entry of await readdir(from, { withFileTypes: true })) {
-    if (SKIP[entry.name]) continue;
+    if (SKIP.has(entry.name)) continue;
     const src = join(from, entry.name);
     const dst = join(to, entry.name);
     if (entry.isDirectory()) await linkDir(src, dst);
@@ -153,10 +146,9 @@ export async function createInstance(opts: InstanceOptions): Promise<BdsInstance
   const port = await freeUdpPort();
   let portV6 = await freeUdpPort();
   while (portV6 === port) portV6 = await freeUdpPort();
-  const levelName = DEFAULT_LEVEL;
   const props = setProperties(await readFile(join(dir, "server.properties"), "utf8"), {
     "server-name": `sculkwire ${id}`,
-    "level-name": levelName,
+    "level-name": LEVEL_NAME,
     "level-type": "FLAT",
     gamemode: "creative",
     "allow-cheats": "true",
@@ -176,7 +168,7 @@ export async function createInstance(opts: InstanceOptions): Promise<BdsInstance
   });
   await writeFile(join(dir, "server.properties"), props);
 
-  const worldDir = join(dir, "worlds", levelName);
+  const worldDir = join(dir, "worlds", LEVEL_NAME);
   await mkdir(join(dir, "worlds"), { recursive: true });
   if (!opts.noWorld) {
     const template = opts.templateWorld;
@@ -207,13 +199,13 @@ export async function createInstance(opts: InstanceOptions): Promise<BdsInstance
     await writeFile(join(worldDir, "world_behavior_packs.json"), JSON.stringify(bp, null, 2));
     await writeFile(join(worldDir, "world_resource_packs.json"), JSON.stringify(rp, null, 2));
   }
-  return { id, dir, levelName, worldDir, port, portV6, packs, install: opts.install };
+  return { id, dir, worldDir, port, packs, install: opts.install };
 }
 
 /** Content log files the server wrote (`logs/ContentLog*.txt` and legacy root location). */
 export async function contentLogFiles(instance: Pick<BdsInstance, "dir">): Promise<string[]> {
   const out: string[] = [];
-  for (const sub of ["logs", ""]) {
+  for (const sub of [LOGS_DIR, ""]) {
     try {
       for (const name of await readdir(join(instance.dir, sub))) {
         if (/^ContentLog.*\.txt$/i.test(name)) out.push(join(instance.dir, sub, name));
@@ -231,13 +223,4 @@ export async function contentLogFiles(instance: Pick<BdsInstance, "dir">): Promi
  */
 export async function disposeInstance(instance: Pick<BdsInstance, "dir">): Promise<void> {
   await rm(instance.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-}
-
-export async function exists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch {
-    return false;
-  }
 }

@@ -18,6 +18,9 @@ export interface SearchHit<D> {
   terms: string[];
 }
 
+/** Part of every persisted index key: bump when chunking or tokenization changes so persisted indexes rebuild. */
+export const INDEX_FORMAT = 1;
+
 const FIELDS = ["title", "heading", "text"];
 const BOOST = { title: 3, heading: 2, text: 1 };
 const LOOSE = (term: string): boolean => term.length >= 5 && !/[:./@-]/.test(term);

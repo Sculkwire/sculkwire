@@ -13,12 +13,12 @@
  * foreground. The log then still says which world the game opened, which press moved it on, and whether the client
  * joined.
  */
-import { readFile } from "node:fs/promises";
-import { inflateSync } from "node:zlib";
-import { engine, type EngineResult } from "../engine/engine.ts";
+import { errorMessage } from "../../core/errors.ts";
 import { isStoreScreen, type UiControl, type UiScreen } from "../engine/ui.ts";
 import { CLIENT_JOINED, joinStateInLog, NO_JOIN_YET, type JoinState } from "./contentlog.ts";
 import { findIconTile, iconCells } from "./icon.ts";
+import { DEFAULT_FRAME } from "./launcher.ts";
+import { decodePng, pngSize, type Pixels } from "./png.ts";
 
 export type ScreenKind =
   /** The title screen: Play, Settings, Marketplace. */
@@ -215,65 +215,6 @@ export const LAYOUT = {
   saveAndQuit: { x: 0.293, y: 0.662 },
 } as const;
 
-/** A decoded 8-bit RGB or RGBA PNG. */
-export interface Pixels {
-  width: number;
-  height: number;
-  channels: number;
-  data: Uint8Array;
-}
-
-/** Decode a non-interlaced 8-bit RGB/RGBA PNG (what gamescope and PrintWindow write), or undefined for anything else. */
-export function decodePng(png: Buffer): Pixels | undefined {
-  const size = pngSize(png);
-  if (!size) return undefined;
-  const depth = png[24];
-  const color = png[25];
-  const interlace = png[28];
-  const channels = color === 2 ? 3 : color === 6 ? 4 : 0;
-  if (depth !== 8 || !channels || interlace !== 0) return undefined;
-  const parts: Buffer[] = [];
-  for (let at = 8; at + 8 <= png.length; ) {
-    const length = png.readUInt32BE(at);
-    const type = png.toString("ascii", at + 4, at + 8);
-    if (type === "IDAT") parts.push(png.subarray(at + 8, at + 8 + length));
-    if (type === "IEND") break;
-    at += 12 + length;
-  }
-  let raw: Buffer;
-  try {
-    raw = inflateSync(Buffer.concat(parts));
-  } catch {
-    return undefined;
-  }
-  const stride = size.width * channels;
-  if (raw.length < (stride + 1) * size.height) return undefined;
-  const data = new Uint8Array(stride * size.height);
-  for (let y = 0; y < size.height; y++) {
-    const filter = raw[y * (stride + 1)];
-    const line = y * stride;
-    for (let i = 0; i < stride; i++) {
-      const x = raw[y * (stride + 1) + 1 + i] ?? 0;
-      const a = i >= channels ? (data[line + i - channels] ?? 0) : 0;
-      const b = y > 0 ? (data[line - stride + i] ?? 0) : 0;
-      const c = i >= channels && y > 0 ? (data[line - stride + i - channels] ?? 0) : 0;
-      let v = x;
-      if (filter === 1) v = x + a;
-      else if (filter === 2) v = x + b;
-      else if (filter === 3) v = x + ((a + b) >> 1);
-      else if (filter === 4) {
-        const p = a + b - c;
-        const pa = Math.abs(p - a);
-        const pb = Math.abs(p - b);
-        const pc = Math.abs(p - c);
-        v = x + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c);
-      }
-      data[line + i] = v & 0xff;
-    }
-  }
-  return { ...size, channels, data };
-}
-
 /**
  * Which visible Play-screen tiles are local worlds, in reading order. A local world's name row ends in an edit
  * button, whose divider is a light line (about 90,91,92) on the darker row (72,73,74); a featured server's "LAN
@@ -320,28 +261,6 @@ export interface UiRecovery {
   scroll?(x: number, y: number, delta: number): Promise<void>;
 }
 
-/** The attached agent as a `UiRecovery`, or undefined when no agent is attached (then the log and the keys are used). */
-function engineUi(sleep: (ms: number) => Promise<void>): UiRecovery | undefined {
-  if (!engine.attached) return undefined;
-  const value = <T>(result: EngineResult<T>): T => {
-    if (!result.ok) throw new Error(`${result.reason}: ${result.message}`);
-    return result.value;
-  };
-  return {
-    screen: async () => value(await engine.uiScreen()),
-    controls: async () => value(await engine.uiControls()),
-    press: async (name) => void value(await engine.uiPress(name)),
-    key: async (key) => void value(await engine.uiKey(key)),
-    click: async (x, y, count = 1) => {
-      for (let i = 0; i < count; i++) {
-        value(await engine.uiClick(x, y));
-        if (i + 1 < count) await sleep(120);
-      }
-    },
-    scroll: async (x, y, delta) => void value(await engine.uiScroll(x, y, delta)),
-  };
-}
-
 /** The game, as the recovery sees it. Tests replace it with a script. */
 export interface RecoveryIO {
   /** Engine-log text written since the previous call. */
@@ -350,8 +269,11 @@ export interface RecoveryIO {
   key(keys: string): Promise<void>;
   /** Click at a fraction of the frame; `count: 2` double-clicks. Absent when the caller has no mouse (keys only). */
   click?(x: number, y: number, count?: number): Promise<void>;
-  /** The agent's own UI, when the caller has one. Without it the recovery reads the log and uses the keys. */
-  ui?: UiRecovery;
+  /**
+   * The agent's own UI while one is attached, asked before each step (an agent can attach during the recovery).
+   * Without it the recovery reads the log and uses the keys.
+   */
+  ui?(): UiRecovery | undefined;
   /** A screenshot of the game: its file and PNG bytes. */
   screenshot(label: string): Promise<{ path: string; png: Buffer } | undefined>;
   /** False once the game process is gone. */
@@ -568,7 +490,7 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
   const opened: string[] = [];
   let lastOpened = screens.opened;
   const seen: string[] = [];
-  const uiRoute = (): UiRecovery | undefined => (uiDown ? undefined : (io.ui ?? engineUi(io.sleep)));
+  const uiRoute = (): UiRecovery | undefined => (uiDown ? undefined : io.ui?.());
   const touches = touchRoute(io, uiRoute, () => frame);
   const shoot = async (label: string) => {
     const shot = await io.screenshot(label).catch(() => undefined);
@@ -671,7 +593,7 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
           const wheel = (label: string, notches: number): Press => ({
             label,
             run: async () => {
-              const size = frame ?? { width: 1280, height: 720 };
+              const size = frame ?? DEFAULT_FRAME;
               await scroll?.(Math.round(size.width * LAYOUT.worldList.x), Math.round(size.height * LAYOUT.worldList.y), notches);
             },
             patienceMs: LOOK_PATIENCE_MS,
@@ -718,7 +640,7 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
       await press.run();
       if (press.input !== false) presses++;
     } catch (e) {
-      steps.push(`${known}: ${press.label} failed: ${e instanceof Error ? e.message : String(e)}`);
+      steps.push(`${known}: ${press.label} failed: ${errorMessage(e)}`);
     }
     pressed = { changes: screens.changes, at: io.now(), patienceMs: press.patienceMs ?? PATIENCE_MS };
   }
@@ -753,15 +675,4 @@ function fixedPress(t: Touch, kind: ScreenKind, n: number, wrongWorld: boolean):
       // screen: Escape.
       return t.key("Escape");
   }
-}
-
-/** Width and height of a PNG from its header. */
-export function pngSize(png: Buffer): { width: number; height: number } | undefined {
-  if (png.length < 24 || png.toString("ascii", 12, 16) !== "IHDR") return undefined;
-  return { width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
-}
-
-/** Read a screenshot file for `RecoveryIO.screenshot`. */
-export async function readShot(path: string): Promise<{ path: string; png: Buffer }> {
-  return { path, png: await readFile(path) };
 }

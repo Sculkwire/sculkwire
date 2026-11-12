@@ -6,8 +6,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { readLevelDat } from "../../gamefiles/nbt.ts";
 import type { ClientInstall } from "../../gamefiles/install.ts";
 import { PlayJobs, runActions, type PlayRunner } from "./jobs.ts";
-import type { PlayerInput } from "./launcher.ts";
-import { PlayerController, type PlayerState, type PlayerWorld } from "./player.ts";
+import type { PlayerInput } from "./input.ts";
+import { PlayerController } from "./player.ts";
+import type { PlayerState, PlayerWorld } from "./types.ts";
 import type { PlayResult, PlayStep } from "./skills/play.ts";
 import { createWorld, type CreatedWorld } from "./world.ts";
 

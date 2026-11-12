@@ -1,6 +1,6 @@
-/** Shared pieces of the combat scenarios: the standard loadout, a walled arena and the common judging. */
-import type { Vec3 } from "../player.ts";
-import { fillBox } from "./arena.ts";
+/** Shared pieces of the combat scenarios: the standard loadout and arena and the common judging. */
+import type { Vec3 } from "../types.ts";
+import { wall } from "./arena.ts";
 import { traceMetrics } from "./trace.ts";
 import type { Metric, MobSpawn, PlayerSetup, RunOutcome, Scenario } from "./types.ts";
 
@@ -14,15 +14,6 @@ export const FIGHTER: PlayerSetup = {
 };
 
 export const COMBAT_AREA = { radius: 14, height: 6 };
-
-/** A glass ring three blocks high at the arena's edge, so mobs and player stay in the arena. */
-export function wall(origin: Vec3, radius = COMBAT_AREA.radius, height = 3): string[] {
-  const r = radius;
-  const y0 = origin.y;
-  const y1 = origin.y + height - 1;
-  const side = (x0: number, z0: number, x1: number, z1: number) => fillBox({ x: origin.x + x0, y: y0, z: origin.z + z0 }, { x: origin.x + x1, y: y1, z: origin.z + z1 }, "minecraft:glass");
-  return [...side(-r, -r, r, -r), ...side(-r, r, r, r), ...side(-r, -r, -r, r), ...side(r, -r, r, r)];
-}
 
 /**
  * A combat scenario: the standard arena, a `play` kill goal, judged on kills and deaths. The extras add the fight's
@@ -51,7 +42,7 @@ export function combat(
     runs: s.runs,
     timeoutMs,
     area: COMBAT_AREA,
-    build: (ctx) => [...wall(ctx.origin), ...(s.build?.(ctx.origin) ?? [])],
+    build: (ctx) => [...wall(ctx.origin, COMBAT_AREA.radius), ...(s.build?.(ctx.origin) ?? [])],
     player: s.player ?? FIGHTER,
     mobs: s.mobs,
     ...(s.spawnAfterMs !== undefined ? { spawnAfterMs: s.spawnAfterMs } : {}),

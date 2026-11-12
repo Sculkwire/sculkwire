@@ -4,7 +4,9 @@
  * The runner (`run.ts`) does the rest: clearing, building, resetting between runs, measuring and reporting.
  */
 import type { CommandOutput } from "../bridge.ts";
-import type { ActionResult, InputKind, PlayerAction, PlayerController, PlayerState, Vec3 } from "../player.ts";
+import type { InputKind } from "../input.ts";
+import type { PlayerController } from "../player.ts";
+import type { ActionResult, PlayerAction, PlayerState, Vec3 } from "../types.ts";
 import type { PlayAction, PlayResult } from "../skills/play.ts";
 import type { TraceFrame } from "../skills/stats.ts";
 
@@ -102,6 +104,12 @@ export interface RunOutcome {
 }
 
 export type Metric = number | string | boolean;
+
+/** The extra `key` when it is a number, else `fallback` (NaN by default, which fails every comparison). */
+export function num(extra: Record<string, Metric>, key: string, fallback = Number.NaN): number {
+  const value = extra[key];
+  return typeof value === "number" ? value : fallback;
+}
 
 export interface Scenario {
   name: string;

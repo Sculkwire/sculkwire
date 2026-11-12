@@ -4,6 +4,8 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, posix, resolve, win32 } from "node:path";
+import { formatGameVersion, type GameVersion } from "../core/version.ts";
+import { GAME_EXE, installerRoot } from "./gdk.ts";
 import { wineGameDirs } from "./wine.ts";
 
 export interface GameBuild {
@@ -18,8 +20,6 @@ export interface GameBuild {
   packageName?: string;
   packRoots: { behavior?: string; resource?: string };
 }
-
-const EXE = "Minecraft.Windows.exe";
 
 /** GDK install folders the Xbox app creates on Windows (under `<drive>\XboxGames`), stable first. */
 const WINDOWS_GDK_TITLES = ["Minecraft for Windows", "Minecraft Preview for Windows"];
@@ -93,7 +93,7 @@ export function windowsGameDirs(env: NodeJS.ProcessEnv, probe: WindowsGameProbe)
 }
 
 /**
- * Game directories to probe. Linux and macOS: the mcbe-gdk-linux default install and its `game-dir` pointer, the
+ * Game directories to probe. Linux and macOS: the mcbe-gdk-linux install (`installerRoot`) and its `game-dir` pointer, the
  * game folders of every Wine/Proton client install (BedrockOnLinux, Flarial, Bottles, Lutris, Steam: `wineGameDirs`),
  * then `SCULKWIRE_GAME_DIRS` (`:` separated). Windows: `windowsGameDirs`.
  */
@@ -106,7 +106,7 @@ export function gameDirCandidates(
   if (platform === "win32") return windowsGameDirs(env, probe);
   const p = posix;
   const dirs: string[] = [];
-  const gdkLinux = p.join(home, ".local", "share", "mcbe-gdk-linux");
+  const gdkLinux = installerRoot(env, home);
   dirs.push(p.join(gdkLinux, "game"));
   const pointer = p.join(gdkLinux, "game-dir");
   if (existsSync(pointer)) {
@@ -124,15 +124,16 @@ export function isPreviewGameDir(dir: string): boolean {
   return pkg ? pkg === PREVIEW_PACKAGE : /preview/i.test(dir);
 }
 
-/** `1.21.12001.0` → `1.21.120.1` (GDK packs patch and revision as patch*100+revision). */
-export function appxToGameVersion(appx: string): string | undefined {
+/** `1.21.12001.0` (appx Identity) → `1.21.120.1` (GDK packs patch and revision as patch*100+revision). */
+export function appxToGameVersion(appx: string): GameVersion | undefined {
   const m = /^(\d+)\.(\d+)\.(\d+)\.\d+$/.exec(appx.trim());
   if (!m) return undefined;
   const packed = Number(m[3]);
-  return `${m[1]}.${m[2]}.${Math.floor(packed / 100)}.${packed % 100}`;
+  return { major: Number(m[1]), minor: Number(m[2]), patch: Math.floor(packed / 100), build: packed % 100 };
 }
 
-function readManifest(root: string): { appxVersion?: string; packageName?: string } {
+/** The `<Identity>` of a game folder's appx manifest: its version and package name. */
+export function readManifest(root: string): { appxVersion?: string; packageName?: string } {
   for (const name of ["appxmanifest.xml", "AppxManifest.xml"]) {
     const file = join(root, name);
     if (!existsSync(file)) continue;
@@ -151,10 +152,11 @@ function readManifest(root: string): { appxVersion?: string; packageName?: strin
 /** Reads one game directory; undefined when it holds no `Minecraft.Windows.exe`. */
 export function inspectBuild(dir: string): GameBuild | undefined {
   const root = resolve(dir);
-  const exe = join(root, EXE);
+  const exe = join(root, GAME_EXE);
   if (!existsSync(exe) || !statSync(exe).isFile()) return undefined;
   const { appxVersion, packageName } = readManifest(root);
-  const version = appxVersion ? appxToGameVersion(appxVersion) : undefined;
+  const parsed = appxVersion ? appxToGameVersion(appxVersion) : undefined;
+  const version = parsed ? formatGameVersion(parsed) : undefined;
   const key = version ?? createHash("sha256").update(root).digest("hex").slice(0, 12);
   const packRoots: GameBuild["packRoots"] = {};
   const bp = join(root, "data", "behavior_packs");
@@ -187,9 +189,17 @@ export function selectBuild(builds: readonly GameBuild[], selector?: string): Ga
   return builds.find((b) => b.key === selector || b.version === selector || b.root === abs) ?? inspectBuild(selector);
 }
 
-/** The error text when no build matches (or none was found at all). */
-export function noBuildMessage(selector?: string): string {
+/** The error text when no build matches (or none was found at all in `searched`). */
+export function noBuildMessage(selector?: string, searched?: readonly string[]): string {
   return selector
     ? `no Bedrock GDK build matches ${JSON.stringify(selector)}`
-    : `no Bedrock GDK build found (searched ${gameDirCandidates().join(", ")}; add directories with SCULKWIRE_GAME_DIRS)`;
+    : `no Bedrock GDK build found (searched ${(searched ?? gameDirCandidates()).join(", ")}; add directories with SCULKWIRE_GAME_DIRS)`;
+}
+
+/** The build `selector` picks (see `selectBuild`). Throws `noBuildMessage` when there is none. */
+export function requireBuild(selector?: string): GameBuild {
+  const searched = gameDirCandidates();
+  const build = selectBuild(detectBuilds(searched), selector);
+  if (!build) throw new Error(noBuildMessage(selector, searched));
+  return build;
 }

@@ -15,7 +15,6 @@ function install(appData: string, kind: ClientInstall["kind"], wine: boolean): C
     sharedComMojang: "",
     userComMojang: "",
     logsDir: "",
-    passesArgs: wine,
     wine,
     preview: false,
     gameDir: "/games/mc",

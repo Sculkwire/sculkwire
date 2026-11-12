@@ -6,9 +6,10 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { x as untar } from "tar";
+import { errorMessage } from "../core/errors.ts";
+import { exists, readJsonOr, writeFileAtomic, writeJsonAtomic } from "../core/fs.ts";
 import { cacheDir } from "../core/paths.ts";
 import type { Channel } from "../core/version.ts";
-import { writeFileAtomic, writeJsonAtomic } from "../core/fs.ts";
 import { httpBytes, installDir, OfflineMissingError, progress, single } from "./net.ts";
 import {
   type ChannelPin,
@@ -53,11 +54,9 @@ async function packument(pkg: string, offline?: boolean): Promise<Packument> {
     await writeJsonAtomic(packumentPath(pkg), doc);
     return doc;
   }
-  try {
-    return JSON.parse(await readFile(packumentPath(pkg), "utf8")) as Packument;
-  } catch {
-    throw new OfflineMissingError(`npm metadata for ${pkg}`);
-  }
+  const doc = await readJsonOr<Packument>(packumentPath(pkg));
+  if (!doc) throw new OfflineMissingError(`npm metadata for ${pkg}`);
+  return doc;
 }
 
 /** Resolve a manifest module version to an npm version for the channel. */
@@ -101,13 +100,17 @@ async function tarball(pkg: string, pin: NpmPin, offline?: boolean): Promise<str
   return path;
 }
 
-async function exists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch {
-    return false;
-  }
+/** What an install holds (`typings.json`); it is complete once `.complete` exists beside it. */
+export interface TypingsMeta {
+  channel: Channel;
+  beta: boolean;
+  packages: Record<string, string>;
+}
+
+/** Write an install's `typings.json` and then its `.complete` mark. */
+export async function writeTypingsMeta(root: string, meta: TypingsMeta): Promise<void> {
+  await writeJsonAtomic(join(root, "typings.json"), meta);
+  await writeFileAtomic(join(root, ".complete"), "");
 }
 
 /** Newest complete install of the channel (and beta flag) that has every explicitly requested module version. */
@@ -118,7 +121,7 @@ async function previousInstall(opts: EnsureTypingsOptions, wanted: Record<string
     const root = join(base, name);
     if (name.startsWith(".") || !(await exists(join(root, ".complete")))) continue;
     try {
-      const meta = JSON.parse(await readFile(join(root, "typings.json"), "utf8")) as { channel: Channel; beta: boolean; packages: Record<string, string> };
+      const meta = JSON.parse(await readFile(join(root, "typings.json"), "utf8")) as TypingsMeta;
       if (meta.channel !== opts.channel || meta.beta !== !!opts.beta) continue;
       if (Object.entries(wanted).some(([pkg, v]) => meta.packages[pkg] !== v && !meta.packages[pkg]?.startsWith(`${v}.`))) continue;
       const mtime = (await stat(join(root, ".complete"))).mtimeMs;
@@ -150,7 +153,7 @@ export async function ensureTypings(opts: EnsureTypingsOptions): Promise<Typings
     const wanted = Object.fromEntries(Object.entries(opts.modules ?? {}).filter(([pkg]) => pkg.startsWith("@minecraft/")));
     const prev = await previousInstall(opts, wanted);
     if (!prev) throw err;
-    progress(`Script API typings update failed (${err instanceof Error ? err.message : String(err)}); using the previous install`);
+    progress(`Script API typings update failed (${errorMessage(err)}); using the previous install`);
     const server = prev.packages["@minecraft/server"];
     return {
       nodeModulesDir: join(prev.root, "node_modules"),
@@ -206,8 +209,7 @@ async function installTypings(opts: EnsureTypingsOptions, channelPin: ChannelPin
         await mkdir(dest, { recursive: true });
         await untar({ file, cwd: dest, strip: 1 });
       }
-      await writeJsonAtomic(join(tmp, "typings.json"), { channel: opts.channel, beta: !!opts.beta, packages });
-      await writeFileAtomic(join(tmp, ".complete"), "");
+      await writeTypingsMeta(tmp, { channel: opts.channel, beta: !!opts.beta, packages });
       await installDir(tmp, root);
     } catch (err) {
       await rm(tmp, { recursive: true, force: true });

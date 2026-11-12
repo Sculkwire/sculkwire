@@ -25,6 +25,7 @@ import { homedir } from "node:os";
 import { dirname, join, posix, relative, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { unzip } from "fflate";
+import { errorMessage } from "../../core/errors.ts";
 import { REPO_SLUG, USER_AGENT, VERSION } from "../../core/meta.ts";
 import { cacheDir } from "../../core/paths.ts";
 import { run, type RunResult } from "../../core/process.ts";
@@ -93,20 +94,25 @@ export function selectAgentSource(gameDir: string, list: readonly AgentSource[] 
 /** `native/Cargo.toml` sits above this module (`src/runtime/engine`). */
 const NATIVE_DIRS = 6;
 
+/** The cargo target the agent is built for, and the two files the build makes. */
+const CARGO_TARGET = "x86_64-pc-windows-msvc";
+const AGENT_DLL = "sculkwire_agent.dll";
+const INJECTOR_EXE = "sculkwire-injector.exe";
+
 function pathFor(platform: NodeJS.Platform): typeof posix {
   return platform === "win32" ? win32 : posix;
 }
 
 /** The cargo invocation every build uses: one workspace, one target, locked dependencies. */
 export function cargoBuildArgs(): string[] {
-  return ["build", "--release", "--locked", "--target", "x86_64-pc-windows-msvc"];
+  return ["build", "--release", "--locked", "--target", CARGO_TARGET];
 }
 
 /** Where the cargo workspace writes the agent DLL and the injector for the Windows target. */
 export function cargoArtifacts(root: string, platform: NodeJS.Platform = process.platform): { dll: string; injector: string } {
   const p = pathFor(platform);
-  const release = p.join(root, "target", "x86_64-pc-windows-msvc", "release");
-  return { dll: p.join(release, "sculkwire_agent.dll"), injector: p.join(release, "sculkwire-injector.exe") };
+  const release = p.join(root, "target", CARGO_TARGET, "release");
+  return { dll: p.join(release, AGENT_DLL), injector: p.join(release, INJECTOR_EXE) };
 }
 
 /** `native/` above this module, or undefined when only the built package is installed. */
@@ -170,7 +176,7 @@ export function prebuiltUrl(version: string = VERSION, repo = REPO_SLUG): string
 }
 
 /** Members the archive must hold. */
-export const AGENT_MEMBERS = ["sculkwire_agent.dll", "sculkwire-injector.exe"] as const;
+export const AGENT_MEMBERS = [AGENT_DLL, INJECTOR_EXE] as const;
 
 export function sha256Hex(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -213,7 +219,7 @@ export async function extractAgent(zip: Uint8Array, dest: string): Promise<{ dll
   try {
     entries = await unzipEntries(zip);
   } catch (err) {
-    throw new AgentBuildError("download", `the prebuilt agent is not a zip archive: ${err instanceof Error ? err.message : String(err)}`);
+    throw new AgentBuildError("download", `the prebuilt agent is not a zip archive: ${errorMessage(err)}`);
   }
   await mkdir(dest, { recursive: true });
   for (const name of AGENT_MEMBERS) {
@@ -264,7 +270,7 @@ function overrideBuild(env: NodeJS.ProcessEnv, options: BuildOptions): AgentBuil
     if (!exists(path)) throw new AgentBuildError("prerequisite", `${name} does not exist: ${path}`);
   };
   check(dll, "SCULKWIRE_AGENT_DLL");
-  const injector = env.SCULKWIRE_AGENT_INJECTOR?.trim() || join(dirname(dll), "sculkwire-injector.exe");
+  const injector = env.SCULKWIRE_AGENT_INJECTOR?.trim() || join(dirname(dll), INJECTOR_EXE);
   check(injector, "SCULKWIRE_AGENT_INJECTOR");
   return { key: "override", dir: dirname(dll), dll, injector, cached: true, source: "override" };
 }
@@ -305,7 +311,7 @@ async function buildFromSource(source: AgentSource, options: BuildOptions): Prom
     });
   } catch (err) {
     if (err instanceof AgentBuildError) throw err;
-    throw new AgentBuildError("compile", `${source.name}: ${err instanceof Error ? err.message : String(err)}`);
+    throw new AgentBuildError("compile", `${source.name}: ${errorMessage(err)}`);
   }
   const exists = options.exists ?? existsSync;
   for (const [kind, path] of [
@@ -331,7 +337,7 @@ export async function buildWithCargo(root: string, cargo: string, options: Build
   const hash = nativeSourceHash(root);
   const dir = p.join(options.cacheRoot ?? cacheDir("agent"), hash);
   const dll = p.join(dir, `sculkwire-agent-${hash}.dll`);
-  const injector = p.join(dir, "sculkwire-injector.exe");
+  const injector = p.join(dir, INJECTOR_EXE);
   const exists = options.exists ?? existsSync;
   if (!options.force && exists(dll) && exists(injector)) return { key: hash, dir, dll, injector, cached: true, source: "cargo" };
 
@@ -384,7 +390,7 @@ export async function fetchPrebuiltAgent(options: BuildOptions = {}): Promise<Ag
   const get = options.fetchBytes ?? fetchBytes;
   const url = prebuiltUrl();
   const [zip, sums] = await Promise.all([get(url), get(`${url}.sha256`)]).catch((err: unknown) => {
-    const why = err instanceof Error ? err.message : String(err);
+    const why = errorMessage(err);
     throw new AgentBuildError(
       "download",
       `cannot download the prebuilt agent from ${url}: ${why}. Build it with cargo in native/ (see native/Cargo.toml), ` +
@@ -404,7 +410,7 @@ export async function fetchPrebuiltAgent(options: BuildOptions = {}): Promise<Ag
   } catch (err) {
     await rm(staging, { recursive: true, force: true });
     if (err instanceof AgentBuildError) throw err;
-    throw new AgentBuildError("download", `cannot unpack ${url}: ${err instanceof Error ? err.message : String(err)}`);
+    throw new AgentBuildError("download", `cannot unpack ${url}: ${errorMessage(err)}`);
   }
   return { key, dir, dll, injector, cached: false, source: "prebuilt" };
 }

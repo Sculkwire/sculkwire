@@ -3,7 +3,8 @@
  * are. A helper query answers 100 to 250 ms after the game read the entity; the stream's readings are at most a tick
  * or two old when they arrive, and each one handed out is carried forward along its velocity by its age.
  */
-import { horizontalDistance, type EntityInfo, type Vec3 } from "./player.ts";
+import { horizontalDistance } from "./geometry.ts";
+import type { EntityInfo, Vec3 } from "./types.ts";
 
 /** One streamed list: what the helper printed with the player state of game tick `tick`, arriving at wall time `at`. */
 export interface StreamedEntities {

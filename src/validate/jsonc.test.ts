@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { LineIndex, nodeAtPointer, parseJson, pointerFromPath, rangeAtPointer } from "./jsonc.ts";
+import { LineIndex, nodeAtPointer, parseJson, rangeAtPointer } from "./jsonc.ts";
 
 describe("LineIndex", () => {
   it("maps offsets to 1-based line/column, LF and CRLF", () => {
@@ -20,7 +20,6 @@ describe("pointer -> range", () => {
     expect(rangeAtPointer(doc, "/a/b/1")).toEqual({ start: { line: 3, column: 14 }, end: { line: 3, column: 17 } });
     expect(rangeAtPointer(doc, "/a/c~1d")).toEqual({ start: { line: 4, column: 12 }, end: { line: 4, column: 16 } });
     expect(rangeAtPointer(doc, "/a/c~1d", true)).toEqual({ start: { line: 4, column: 5 }, end: { line: 4, column: 10 } });
-    expect(pointerFromPath(["a", "c/d"])).toBe("/a/c~1d");
   });
   it("highlights the key of an object value and falls back to the nearest ancestor", () => {
     expect(rangeAtPointer(doc, "/a").start).toEqual({ line: 2, column: 3 });

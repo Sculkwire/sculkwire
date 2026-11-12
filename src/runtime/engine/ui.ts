@@ -1,6 +1,6 @@
 /**
- * Menus and screens, host side: the typed `ui.*` calls of the in-game agent, and the pieces the rest of sculkwire
- * needs from them.
+ * Menus and screens, host side: the parsers and parameter checks of the in-game agent's `ui.*` methods, which
+ * `EngineSession` calls, and the pieces the rest of sculkwire needs from them.
  *
  * The agent drives the game's own UI from inside the process, so a menu works in the background and on Windows
  * without the foreground: `ui.screen` names the screen and the stack under it, `ui.controls` lists what is on it,
@@ -10,10 +10,8 @@
  *
  * Every one of those inputs is refused on a store screen (Marketplace, Minecoins, the Dressing Room) except Escape to
  * leave it. The agent refuses them; `isStoreScreen` lets the host keep the same rule before it sends anything.
- *
- * Nothing here talks to the agent: the parsers and the parameter checks are pure, so `engine.ts` can use them without
- * this module importing it back.
  */
+import { isFiniteNumber, isObjectLike } from "./wire.ts";
 
 /** A screen the game shows, as the game names it (`start_screen`, `play_screen`, `pause_screen`, `hud_screen`). */
 export interface UiScreen {
@@ -63,17 +61,9 @@ const KEY_PART = /^[A-Za-z0-9_]+$/;
 const STORE_SCREEN =
   /marketplace|minecoins|coin|store|purchase|dressing|persona|profile_?editor|skin_selector|character_creator|upsell|(?:^|[._/])(?:csb|portfolio|token_faq|ugc_viewer|day_one_experience|win10_trial_conversion)(?![a-z])/i;
 
-function finite(v: unknown): v is number {
-  return typeof v === "number" && Number.isFinite(v);
-}
-
-function record(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 /** A `ui.screen` answer. The top of the stack is always `name`, whatever the agent left out. */
 export function parseUiScreen(raw: unknown): UiScreen | undefined {
-  if (!record(raw)) return undefined;
+  if (!isObjectLike(raw)) return undefined;
   const name = typeof raw.name === "string" ? raw.name.trim() : "";
   if (!name) return undefined;
   const stack = Array.isArray(raw.stack) ? raw.stack.filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "") : [];
@@ -85,9 +75,9 @@ export function parseUiScreen(raw: unknown): UiScreen | undefined {
 
 /** One `ui.controls` entry, or undefined when it has no name or no rectangle. */
 export function parseUiControl(raw: unknown): UiControl | undefined {
-  if (!record(raw)) return undefined;
+  if (!isObjectLike(raw)) return undefined;
   const name = typeof raw.name === "string" ? raw.name.trim() : "";
-  const rect = Array.isArray(raw.rect) && raw.rect.length >= 4 && raw.rect.slice(0, 4).every(finite) ? (raw.rect.slice(0, 4) as [number, number, number, number]) : undefined;
+  const rect = Array.isArray(raw.rect) && raw.rect.length >= 4 && raw.rect.slice(0, 4).every(isFiniteNumber) ? (raw.rect.slice(0, 4) as [number, number, number, number]) : undefined;
   if (!name || !rect) return undefined;
   const type = (UI_CONTROL_TYPES as readonly string[]).includes(raw.type as string) ? (raw.type as UiControlType) : "other";
   const control: UiControl = { name, type, rect, enabled: raw.enabled !== false };
@@ -97,7 +87,7 @@ export function parseUiControl(raw: unknown): UiControl | undefined {
 
 /** Every readable `ui.controls` entry, or undefined when the answer is neither a list nor `{controls: [...]}`. */
 export function parseUiControls(raw: unknown): UiControl[] | undefined {
-  const list = Array.isArray(raw) ? raw : record(raw) && Array.isArray(raw.controls) ? raw.controls : undefined;
+  const list = Array.isArray(raw) ? raw : isObjectLike(raw) && Array.isArray(raw.controls) ? raw.controls : undefined;
   if (!list) return undefined;
   return list.map(parseUiControl).filter((control): control is UiControl => control !== undefined);
 }
@@ -122,7 +112,7 @@ export function textParams(text: string): Record<string, unknown> | string {
 
 /** `ui.click` parameters: client pixels, the frame a screenshot shows. */
 export function clickParams(x: number, y: number, button?: UiButton): Record<string, unknown> | string {
-  if (!finite(x) || !finite(y)) return "a click needs finite x and y in client pixels";
+  if (!isFiniteNumber(x) || !isFiniteNumber(y)) return "a click needs finite x and y in client pixels";
   if (x < 0 || y < 0) return "a click needs client pixels from 0,0";
   if (button !== undefined && !(UI_BUTTONS as readonly string[]).includes(button)) return `button must be one of ${UI_BUTTONS.join(", ")}`;
   return { x, y, ...(button !== undefined ? { button } : {}) };
@@ -130,7 +120,7 @@ export function clickParams(x: number, y: number, button?: UiButton): Record<str
 
 /** `ui.scroll` parameters: client pixels and whole notches, positive up (away from the player). */
 export function scrollParams(x: number, y: number, delta: number): Record<string, unknown> | string {
-  if (!finite(x) || !finite(y) || x < 0 || y < 0) return "a scroll needs finite x and y in client pixels";
+  if (!isFiniteNumber(x) || !isFiniteNumber(y) || x < 0 || y < 0) return "a scroll needs finite x and y in client pixels";
   if (!Number.isInteger(delta) || delta === 0) return "a scroll needs a whole delta, positive up and negative down";
   return { x, y, delta };
 }

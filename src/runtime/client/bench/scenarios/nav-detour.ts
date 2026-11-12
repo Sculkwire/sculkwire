@@ -1,4 +1,4 @@
-import { blocks, course } from "./nav-kit.ts";
+import { blocks, course } from "../navkit.ts";
 
 /**
  * A stone wall 61 blocks wide and 3 high across the arena 4 blocks ahead, the goal 12 blocks behind it: the way

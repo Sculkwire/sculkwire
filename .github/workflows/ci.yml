@@ -54,7 +54,7 @@ jobs:
           SCULKWIRE_ACCEPT_EULA: "1"
         run: |
           set +e
-          node src/cli.ts bds gametest src/runtime/bds/fixtures/gametest_pack --json > gametest.json
+          node src/cli.ts bds gametest test/fixtures/gametest_pack --json > gametest.json
           code=$?
           set -e
           cat gametest.json

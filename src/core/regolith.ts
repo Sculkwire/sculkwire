@@ -22,9 +22,9 @@ export interface RegolithBuild {
 
 export interface RegolithFailure {
   profile: string;
+  /** `unavailable`: no rgl; `unreadable`: config.json cannot be read; `failed`: `rgl run` failed. */
+  kind: "unavailable" | "unreadable" | "failed";
   message: string;
-  /** Pointer into config.json for the failing profile. */
-  pointer: string;
 }
 
 type Obj = Record<string, unknown>;
@@ -144,11 +144,10 @@ export async function regolithExportFolders(root: string): Promise<RegolithExpor
  */
 export async function buildRegolith(projectRoot: string, profile: string, rglPath?: string): Promise<RegolithBuild | RegolithFailure> {
   const root = resolve(projectRoot);
-  const pointer = `/regolith/profiles/${profile}`;
   const rgl = findRgl(rglPath);
-  if (!rgl) return { profile, pointer, message: "rgl not found (~/.local/bin, ~/.rgl/bin or PATH)" };
+  if (!rgl) return { profile, kind: "unavailable", message: "rgl not found (~/.local/bin, ~/.rgl/bin or PATH)" };
   const config = await readConfig(root);
-  if (!config) return { profile, pointer: "", message: "config.json is not readable" };
+  if (!config) return { profile, kind: "unreadable", message: "config.json is not readable" };
   const workDir = await mkdtemp(join(tmpdir(), "sculk-rgl-"));
   const work = join(workDir, "project");
   const out = join(workDir, "out");
@@ -183,7 +182,7 @@ export async function buildRegolith(projectRoot: string, profile: string, rglPat
     // rgl colours its log even with NO_COLOR, and the message is read as plain text.
     const output = (r.stdout + r.stderr).replace(/\x1b\[[0-9;]*m/g, "").trim();
     const tail = output.slice(-2000);
-    return { profile, pointer, message: `rgl run ${profile} failed: ${tail.length < output.length ? tail.slice(tail.indexOf("\n") + 1) : tail}` };
+    return { profile, kind: "failed", message: `rgl run ${profile} failed: ${tail.length < output.length ? tail.slice(tail.indexOf("\n") + 1) : tail}` };
   }
   const packs = (config.packs && typeof config.packs === "object" ? config.packs : {}) as Obj;
   const outputs: { source: string; built: string }[] = [];

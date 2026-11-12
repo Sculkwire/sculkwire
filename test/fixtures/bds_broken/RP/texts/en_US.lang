@@ -1,4 +1,0 @@
-entity.mcbe:test_mob.name=Test Mob
-item.spawn_egg.entity.mcbe:test_mob.name=Spawn Test Mob
-item.mcbe:test_item=Test Item
-tile.mcbe:test_block.name=Test Block

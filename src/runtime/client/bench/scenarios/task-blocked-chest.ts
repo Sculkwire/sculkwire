@@ -12,10 +12,11 @@
  * fills the chest; `summon minecraft:villager ... minecraft:become_farmer` makes an adult villager (`villager_v2` to
  * scripts) and the fence pen keeps it on its block for the length of a run.
  */
-import { carried, distanceTo, planExtras } from "../plankit.ts";
+import { xyz } from "../../geometry.ts";
+import { atLeast, carried, distanceTo, phrased, planExtras } from "../plankit.ts";
 import type { BenchContext, Offset, Scenario } from "../types.ts";
 
-export const BLOCKED_CHEST_PHRASINGS = [
+const BLOCKED_CHEST_PHRASINGS = [
   "get the diamond from the chest",
   "take the diamond out of the chest",
   "grab the diamond in the chest",
@@ -32,10 +33,6 @@ const AREA = { radius: 10, height: 6 };
 const CHEST: Offset = { dx: 0, dy: 0, dz: 4 };
 const DECOY: Offset = { dx: 2, dy: 0, dz: 4 };
 
-function xyz(v: { x: number; y: number; z: number }): string {
-  return `${Math.floor(v.x)} ${Math.floor(v.y)} ${Math.floor(v.z)}`;
-}
-
 /** The wanted chest with one diamond and the empty decoy chest. */
 function chests(ctx: BenchContext): string[] {
   const chest = xyz(ctx.at(CHEST));
@@ -44,7 +41,13 @@ function chests(ctx: BenchContext): string[] {
 
 const player = { gameMode: "survival" as const, time: "day" as const };
 
-const byBlock: Scenario = {
+/** Both scenarios read the same: the diamond carried, and how far from the chest the run ended. */
+const judged: Pick<Scenario, "measure" | "success"> = {
+  measure: async (ctx, o) => ({ ...planExtras(o.play), diamonds: await carried(ctx, "minecraft:diamond"), chestDistance: distanceTo(ctx, o, CHEST) }),
+  success: atLeast("diamonds", 1),
+};
+
+const byBlock = phrased({
   name: "blocked-chest",
   suite: "task",
   summary: "a chest 4 blocks away with 1 diamond, its side facing the player covered by 2 stone blocks, an empty decoy chest 2 blocks beside it; success: the diamond in the inventory",
@@ -54,12 +57,10 @@ const byBlock: Scenario = {
   build: (ctx) => [...chests(ctx), `setblock ${xyz(ctx.at({ dx: 0, dy: 0, dz: 3 }))} stone`, `setblock ${xyz(ctx.at({ dx: 0, dy: 1, dz: 3 }))} stone`],
   player,
   goals: BLOCKED_CHEST_PHRASINGS,
-  action: () => ({ action: "play", goal: BLOCKED_CHEST_PHRASINGS[0] as string, durationMs: 60_000 }),
-  measure: async (ctx, o) => ({ ...planExtras(o.play), diamonds: await carried(ctx, "minecraft:diamond"), chestDistance: distanceTo(ctx, o, CHEST) }),
-  success: (_o, extra) => typeof extra.diamonds === "number" && extra.diamonds >= 1,
-};
+  ...judged,
+});
 
-const byVillager: Scenario = {
+const byVillager = phrased({
   name: "blocked-chest-villager",
   suite: "task",
   summary: "a chest 4 blocks away with 1 diamond, a villager penned in fences on its side facing the player, an empty decoy chest 2 blocks beside it; success: the diamond in the inventory",
@@ -79,9 +80,7 @@ const byVillager: Scenario = {
   },
   player,
   goals: BLOCKED_CHEST_PHRASINGS,
-  action: () => ({ action: "play", goal: BLOCKED_CHEST_PHRASINGS[0] as string, durationMs: 60_000 }),
-  measure: async (ctx, o) => ({ ...planExtras(o.play), diamonds: await carried(ctx, "minecraft:diamond"), chestDistance: distanceTo(ctx, o, CHEST) }),
-  success: (_o, extra) => typeof extra.diamonds === "number" && extra.diamonds >= 1,
-};
+  ...judged,
+});
 
 export const scenarios = [byBlock, byVillager];

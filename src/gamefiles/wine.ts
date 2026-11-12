@@ -5,8 +5,7 @@
  */
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync, type Dirent } from "node:fs";
 import { join } from "node:path";
-
-const EXE = "Minecraft.Windows.exe";
+import { GAME_EXE } from "./gdk.ts";
 
 /** Where Wine, Proton and the launchers put their prefixes, under a home folder. */
 export function winePrefixRoots(home: string): string[] {
@@ -19,6 +18,11 @@ export function winePrefixRoots(home: string): string[] {
     join(home, "Library", "Application Support"),
   ];
 }
+
+/** Never holds a prefix, and can be large: Wine's drive links, npm trees, sculkwire's own data. */
+const SKIP_DIRS = new Set(["dosdevices", "node_modules", "sculkwire"]);
+/** Stop walking after this many data folders. */
+const MAX_APPDATA_DIRS = 16;
 
 function entries(dir: string): Dirent[] {
   try {
@@ -35,9 +39,9 @@ function entries(dir: string): Dirent[] {
 export function wineAppDataDirs(home: string): string[] {
   const found: string[] = [];
   const walk = (dir: string, depth: number): void => {
-    if (depth > 7 || found.length >= 16) return;
+    if (depth > 7 || found.length >= MAX_APPDATA_DIRS) return;
     for (const e of entries(dir)) {
-      if (!e.isDirectory() || e.name === "dosdevices" || e.name === "node_modules" || e.name === "sculkwire") continue;
+      if (!e.isDirectory() || SKIP_DIRS.has(e.name)) continue;
       const p = join(dir, e.name);
       if (e.name !== "drive_c") {
         walk(p, depth + 1);
@@ -58,11 +62,6 @@ export function wineAppDataDirs(home: string): string[] {
   return found.sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base" }));
 }
 
-/** The prefix (the folder holding `drive_c`) of a Wine AppData folder. */
-export function prefixOf(appData: string): string {
-  return appData.split(/drive_c/)[0]?.replace(/[\\/]+$/, "") ?? appData;
-}
-
 /** The Wine prefix (`…/pfx`) an install's data folder lives in; undefined for native Windows installs. */
 export function winePrefix(appData: string): string | undefined {
   const i = appData.search(/[\\/]drive_c[\\/]/);
@@ -74,7 +73,7 @@ function settingsGameDir(root: string): string | undefined {
   try {
     const settings: unknown = JSON.parse(readFileSync(join(root, "settings.json"), "utf8"));
     const dir = settings && typeof settings === "object" && "game_dir" in settings ? settings.game_dir : undefined;
-    return typeof dir === "string" && existsSync(join(dir, EXE)) ? dir : undefined;
+    return typeof dir === "string" && existsSync(join(dir, GAME_EXE)) ? dir : undefined;
   } catch {
     return undefined;
   }
@@ -90,7 +89,7 @@ export function launcherGameDirs(prefix: string): string[] {
   const found: { dir: string; mtime: number }[] = [];
   const walk = (dir: string, depth: number): void => {
     for (const e of entries(dir)) {
-      if (e.isFile() && e.name === EXE) {
+      if (e.isFile() && e.name === GAME_EXE) {
         found.push({ dir, mtime: statSync(join(dir, e.name)).mtimeMs });
       } else if (e.isDirectory() && depth < 4 && e.name !== "compatdata" && e.name !== "pfx" && e.name !== "drive_c") {
         walk(join(dir, e.name), depth + 1);
@@ -106,6 +105,10 @@ export function launcherGameDirs(prefix: string): string[] {
 /** Every game folder of every Wine/Proton client install under a home folder, prefix by prefix. */
 export function wineGameDirs(home: string): string[] {
   const dirs: string[] = [];
-  for (const appData of wineAppDataDirs(home)) for (const dir of launcherGameDirs(prefixOf(appData))) if (!dirs.includes(dir)) dirs.push(dir);
+  for (const appData of wineAppDataDirs(home)) {
+    const prefix = winePrefix(appData);
+    if (!prefix) continue;
+    for (const dir of launcherGameDirs(prefix)) if (!dirs.includes(dir)) dirs.push(dir);
+  }
   return dirs;
 }

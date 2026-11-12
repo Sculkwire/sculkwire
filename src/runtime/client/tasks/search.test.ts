@@ -1,34 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { drive, fakeClock } from "../../../testing/faketime.ts";
-import { FakeWorld } from "../../../testing/fakeworld.ts";
-import { parseRecipe, RecipeIndex, type Recipe } from "./recipes.ts";
+import { fakeTaskWorld, runFakeStep as run, shapedRecipe } from "../../../testing/fakeworld.ts";
 import { findBlocks, findEntities, ringCubes } from "./search.ts";
-import { runTaskStep } from "./steps.ts";
-import type { TaskStep } from "./types.ts";
 
 const TABLE = "minecraft:crafting_table";
 
-function index(): RecipeIndex {
-  const sword = JSON.stringify({
-    format_version: "1.20.10",
-    "minecraft:recipe_shaped": {
-      description: { identifier: "test:sword" },
-      tags: ["crafting_table"],
-      pattern: ["X", "X", "#"],
-      key: { X: { item: "minecraft:iron_ingot" }, "#": { item: "minecraft:stick" } },
-      result: { item: "minecraft:iron_sword" },
-    },
-  });
-  return new RecipeIndex([parseRecipe(sword, "vanilla")].filter((recipe): recipe is Recipe => !!recipe), "the test recipes");
-}
+const SWORD = shapedRecipe("test:sword", ["X", "X", "#"], { X: { item: "minecraft:iron_ingot" }, "#": { item: "minecraft:stick" } }, { item: "minecraft:iron_sword" });
 
-function world(): FakeWorld {
-  return new FakeWorld(fakeClock, index());
-}
-
-function run(w: FakeWorld, step: TaskStep) {
-  return drive(runTaskStep(step, w.env()), 100, 300_000);
-}
+const world = () => fakeTaskWorld([SWORD]);
 
 beforeEach(() => {
   vi.useFakeTimers();

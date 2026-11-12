@@ -2,8 +2,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildBrarchive } from "./brarchive.ts";
-import { appxToGameVersion, inspectBuild } from "./detect.ts";
+import { buildBrarchive } from "../testing/brarchive.ts";
+import { inspectBuild } from "./detect.ts";
 import { extractPack, findPack, listVanillaPacks } from "./extract.ts";
 
 const dirs: string[] = [];
@@ -49,12 +49,6 @@ function fakeGame(): string {
 }
 
 describe("gamefiles detect + extract", () => {
-  it("unpacks the appx patch*100+revision version", () => {
-    expect(appxToGameVersion("1.21.12001.0")).toBe("1.21.120.1");
-    expect(appxToGameVersion("1.20.8002.0")).toBe("1.20.80.2");
-    expect(appxToGameVersion("garbage")).toBeUndefined();
-  });
-
   it("lists versioned vanilla packs in version order", () => {
     const build = inspectBuild(fakeGame())!;
     expect(build.version).toBe("1.21.120.1");

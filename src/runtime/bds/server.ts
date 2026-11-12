@@ -1,9 +1,17 @@
 /** One running `bedrock_server` process: line-split console, stdin commands, start/stop lifecycle. */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { createWriteStream, existsSync, type WriteStream } from "node:fs";
+import { createWriteStream, type WriteStream } from "node:fs";
 import { join, win32 } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { findOnPath } from "../../core/which.ts";
+import { CONSOLE_LOG, serverExecutable } from "./files.ts";
+
+/** How long a server may take to print `Server started.`. */
+export const START_TIMEOUT_MS = 180_000;
+/** The most a console command waits for its output. */
+export const COMMAND_MAX_MS = 5000;
+const STARTED_RE = /Server started\./;
 
 export interface ConsoleLine {
   /** Monotonic, 1-based. */
@@ -28,9 +36,10 @@ export interface ServerCommand {
  * `bedrock_server.exe` (DLLs load from its own directory).
  */
 export function serverCommand(dir: string, platform: NodeJS.Platform, stdbuf?: string): ServerCommand {
-  if (platform === "win32") return { command: win32.join(dir, "bedrock_server.exe"), args: [], env: {} };
+  if (platform === "win32") return { command: win32.join(dir, serverExecutable("windows")), args: [], env: {} };
   const env = { LD_LIBRARY_PATH: "." };
-  return stdbuf ? { command: stdbuf, args: ["-oL", "-eL", "./bedrock_server"], env } : { command: "./bedrock_server", args: [], env };
+  const exe = `./${serverExecutable("linux")}`;
+  return stdbuf ? { command: stdbuf, args: ["-oL", "-eL", exe], env } : { command: exe, args: [], env };
 }
 
 /**
@@ -80,8 +89,8 @@ export class BdsServer extends EventEmitter {
   constructor(dir: string) {
     super();
     this.dir = dir;
-    this.#log = createWriteStream(join(dir, "console.log"));
-    const stdbuf = process.platform !== "win32" && existsSync("/usr/bin/stdbuf") ? "/usr/bin/stdbuf" : undefined;
+    this.#log = createWriteStream(join(dir, CONSOLE_LOG));
+    const stdbuf = process.platform !== "win32" ? findOnPath("stdbuf") : undefined;
     const { command, args, env } = serverCommand(dir, process.platform, stdbuf);
     this.#proc = spawn(command, args, {
       cwd: dir,
@@ -123,7 +132,7 @@ export class BdsServer extends EventEmitter {
     this.lines.push(line);
     const version = /\bVersion:? (\d+\.\d+\.\d+(?:\.\d+)?)/.exec(text);
     if (version && !this.serverVersion) this.serverVersion = version[1];
-    if (this.state === "starting" && /Server started\./.test(text)) {
+    if (this.state === "starting" && STARTED_RE.test(text)) {
       this.state = "running";
       this.emit("started");
     }
@@ -136,6 +145,19 @@ export class BdsServer extends EventEmitter {
 
   get exited(): Promise<number | null> {
     return this.#exited;
+  }
+
+  /** The text of every console line so far. */
+  text(): string[] {
+    return this.lines.map((l) => l.text);
+  }
+
+  /** The last `n` console lines as one string, for error messages. */
+  tail(n = 30): string {
+    return this.lines
+      .slice(-n)
+      .map((l) => l.text)
+      .join("\n");
   }
 
   /**
@@ -173,9 +195,9 @@ export class BdsServer extends EventEmitter {
   }
 
   /** Resolves when the server printed `Server started.`. */
-  async started(timeoutMs = 180_000): Promise<void> {
+  async started(timeoutMs = START_TIMEOUT_MS): Promise<void> {
     if (this.state === "running") return;
-    await this.waitFor(/Server started\./, timeoutMs);
+    await this.waitFor(STARTED_RE, timeoutMs);
   }
 
   write(command: string): void {
@@ -189,7 +211,7 @@ export class BdsServer extends EventEmitter {
    */
   async quiet(from: number, opts: { quietMs?: number; maxMs?: number; needOutput?: boolean } = {}): Promise<ConsoleLine[]> {
     const quietMs = opts.quietMs ?? 400;
-    const maxMs = opts.maxMs ?? 5000;
+    const maxMs = opts.maxMs ?? COMMAND_MAX_MS;
     const start = Date.now();
     let seen = this.lines.length;
     let quietSince = Date.now();

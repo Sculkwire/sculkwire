@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { LineSplitter, serverCommand } from "./server.ts";
-import { dirLinkType } from "./instance.ts";
 
 describe("serverCommand", () => {
   it("line-buffers ./bedrock_server through stdbuf on Linux", () => {
@@ -39,13 +38,5 @@ describe("LineSplitter", () => {
     const s = new LineSplitter();
     expect(s.push(Buffer.from("a\nb\r"))).toEqual(["a"]);
     expect(s.end()).toEqual(["b"]);
-  });
-});
-
-describe("dirLinkType", () => {
-  it("uses junctions on Windows (no admin or Developer Mode needed)", () => {
-    expect(dirLinkType("win32")).toBe("junction");
-    expect(dirLinkType("linux")).toBe("dir");
-    expect(dirLinkType("darwin")).toBe("dir");
   });
 });

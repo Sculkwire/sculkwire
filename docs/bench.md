@@ -122,7 +122,7 @@ Each gap between two frames counts for the earlier frame, at most 100 ms (a stal
 
 ### Navigation
 
-Every movement course is survival at day with empty hands inside a glass ring 4 blocks high at the arena's edge, on a stone floor, so the course is the only way to the goal. Each runs 3 times by default with a 45 s limit (30 s for `parkour`, 60 s for `detour`). The action is a `goto` to the goal block. A run succeeds when `goto` arrives at the goal's height (within a block) with no damage and no death. The extra numbers are the distance from the goal, the height difference, and the jumps, gap jumps, doors opened, doors closed behind and replans from `goto`'s message. The shared pieces are in `scenarios/nav-kit.ts`.
+Every movement course is survival at day with empty hands inside a glass ring 4 blocks high at the arena's edge, on a stone floor, so the course is the only way to the goal. Each runs 3 times by default with a 45 s limit (30 s for `parkour`, 60 s for `detour`). The action is a `goto` to the goal block. A run succeeds when `goto` arrives at the goal's height (within a block) with no damage and no death. The extra numbers are the distance from the goal, the height difference, and the jumps, gap jumps, doors opened, doors closed behind and replans from `goto`'s message. The shared pieces are in `navkit.ts`.
 
 | Scenario | File | Course | Also needs |
 |---|---|---|---|

@@ -11,8 +11,11 @@
 import { cp, readdir, readFile, rm } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { parse as parseJsonc } from "jsonc-parser";
-import type { RegolithExportFolders } from "../../core/regolith.ts";
 import type { Diagnostic } from "../../core/diagnostic.ts";
+import { discoverProject } from "../../core/project.ts";
+import { buildRegolith, regolithExportFolders, regolithPlan, type RegolithExportFolders } from "../../core/regolith.ts";
+import type { ClientInstall } from "../../gamefiles/install.ts";
+import type { PackRef } from "./world.ts";
 
 /** Pack kinds a world can activate. */
 export type DeployKind = "behavior" | "resource";
@@ -275,4 +278,99 @@ export async function packDisplayName(name: string, dirs: readonly (string | und
     if (value) return value;
   }
   return name;
+}
+
+export interface DeployedPack {
+  name?: string;
+  uuid: string;
+  kind: string;
+  /** Folder under `development_<kind>_packs`; absent when the pack is not deployed. */
+  folder?: string;
+  /** Absolute deployed pack dir; absent when the pack is not deployed. */
+  path?: string;
+  /** True when the deployed copy is the Regolith build output. */
+  built: boolean;
+}
+
+/**
+ * Put the project's packs into `development_*_packs`: build with rgl when the Regolith profile runs filters (the
+ * built packs are what the game loads), then copy per `planPackDeploy` and `applyPackDeploy`, which leave one
+ * folder of this project per uuid and warn about foreign folders sharing it. `refresh` (game_reload) copies the
+ * project again into every folder derived from it. Throws with the rgl message when the build fails.
+ */
+export async function deployProject(
+  install: ClientInstall,
+  project: string,
+  deploy: boolean,
+  refresh: boolean,
+): Promise<{ packs: DeployedPack[]; refs: PackRef[]; copied: string[]; owned: string[]; diagnostics: Diagnostic[] }> {
+  const layout = await discoverProject(project);
+  const comMojang = install.sharedComMojang;
+  const deployed = await listDevPacks(comMojang);
+  const rglExports = layout.regolith ? await regolithExportFolders(project) : undefined;
+  const builtHeaders = new Map<string, { dir: string; uuid: string; version: string; name?: string }>();
+  const result: { packs: DeployedPack[]; refs: PackRef[]; copied: string[]; owned: string[]; diagnostics: Diagnostic[] } = {
+    packs: [],
+    refs: [],
+    copied: [],
+    owned: [],
+    diagnostics: [],
+  };
+  let regolithProfile: string | undefined;
+  let workDir: string | undefined;
+  try {
+    if (layout.regolith) {
+      const regolith = await regolithPlan(project);
+      if (regolith?.hasFilters) {
+        regolithProfile = regolith.profile;
+        const build = await buildRegolith(project, regolith.profile);
+        if (!("outputs" in build)) throw new Error(`the Regolith build failed, so nothing was deployed. ${build.message}`);
+        workDir = build.workDir;
+        if (!build.outputs.length) throw new Error(`rgl run ${regolith.profile} built no pack with a manifest, so nothing was deployed`);
+        for (const o of build.outputs) {
+          const header = await readManifestHeader(o.built);
+          if (!header) throw new Error(`rgl built ${o.built} without a header uuid/version, so nothing was deployed`);
+          builtHeaders.set(resolve(o.source), { dir: o.built, ...header });
+        }
+      }
+    }
+    const relDirs = new Map(layout.packs.map((p) => [resolve(p.dir), p.relDir || "."]));
+    const packs: PackToDeploy[] = [];
+    for (const pack of layout.packs) {
+      if (pack.kind !== "behavior" && pack.kind !== "resource") continue;
+      const fresh = builtHeaders.get(resolve(pack.dir));
+      const uuid = fresh?.uuid ?? pack.uuid;
+      const version = fresh?.version ?? pack.version;
+      if (!uuid || !version) throw new Error(`${pack.relDir || "."}/manifest.json has no header uuid/version`);
+      const manifestName = fresh?.name ?? pack.name;
+      // The built dir goes away after this deploy, so the lang lookup happens now (built text first, then source).
+      const name = manifestName ? await packDisplayName(manifestName, [fresh?.dir, pack.dir]) : undefined;
+      packs.push({ kind: pack.kind, dir: resolve(pack.dir), uuid, version, ...(fresh ? { built: fresh.dir } : {}), ...(name ? { name } : {}) });
+    }
+    if (regolithProfile) {
+      const unbuilt = packs.filter((p) => !p.built).map((p) => relDirs.get(p.dir) ?? p.dir);
+      if (unbuilt.length) {
+        throw new Error(`rgl run ${regolithProfile} did not build ${unbuilt.join(", ")}, so nothing was deployed (deploying the source packs would leave out the filter output)`);
+      }
+    }
+    const plan = planPackDeploy({ project, packs, comMojang, deploy, deployed, refresh, ...(rglExports ? { rglExports } : {}) });
+    const applied = await applyPackDeploy(plan);
+    result.copied = applied.copied;
+    result.owned = applied.owned;
+    result.diagnostics = applied.diagnostics;
+    for (const entry of plan) {
+      result.packs.push({
+        ...(entry.name ? { name: entry.name } : {}),
+        uuid: entry.uuid,
+        kind: entry.kind,
+        ...(entry.folder ? { folder: entry.folder } : {}),
+        ...(entry.path ? { path: entry.path } : {}),
+        built: entry.built,
+      });
+      result.refs.push({ uuid: entry.uuid, version: entry.version.split(".").map(Number), kind: entry.kind });
+    }
+  } finally {
+    if (workDir) await rm(workDir, { recursive: true, force: true });
+  }
+  return result;
 }

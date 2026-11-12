@@ -11,12 +11,14 @@
  * channels (script debugger, websockets, content log) are owned by the bridge and refused here.
  */
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile, rm, writeFile } from "node:fs/promises";
+import { readJsonOr, writeJsonAtomic } from "../../core/fs.ts";
 import { dataDir } from "../../core/paths.ts";
 import { findInstall, optionsFiles, type ClientInstall } from "../../gamefiles/install.ts";
 import { applyOptions, bridgeOptions, parseOptions, removeOptions } from "../../gamefiles/options.ts";
-import { engine, isRecord, type EngineResult, type EngineSession, type GameSetting, type SettingValue } from "./engine.ts";
+import { engine, type EngineSession, type GameSetting, type SettingValue } from "./engine.ts";
+import { invalid, type EngineResult } from "./failure.ts";
+import { isObjectLike } from "./wire.ts";
 
 /** Where a value came from: the running game, or the file the game reads at its next launch. */
 export type SettingsSource = "engine" | "options.txt";
@@ -73,15 +75,10 @@ const defaultRecord = () => dataDir("client", "engine-settings-restore.json");
 /** The record of values changed and not yet restored. A missing or damaged file means "nothing pending". */
 async function readPending(record: string): Promise<PendingRecord> {
   const settings: Record<string, PendingSetting> = {};
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(await readFile(record, "utf8"));
-  } catch {
-    return { settings };
-  }
-  if (!isRecord(parsed) || !isRecord(parsed.settings)) return { settings };
+  const parsed = await readJsonOr<unknown>(record);
+  if (!isObjectLike(parsed) || !isObjectLike(parsed.settings)) return { settings };
   for (const [id, entry] of Object.entries(parsed.settings)) {
-    if (!isRecord(entry)) continue;
+    if (!isObjectLike(entry)) continue;
     const previous = entry.previous;
     if (previous !== null && typeof previous !== "boolean" && typeof previous !== "number" && typeof previous !== "string") continue;
     settings[id] = { previous: previous ?? null, source: entry.source === "options.txt" ? "options.txt" : "engine" };
@@ -94,8 +91,7 @@ async function writePending(record: string, pending: PendingRecord): Promise<voi
     await rm(record, { force: true });
     return;
   }
-  await mkdir(dirname(record), { recursive: true });
-  await writeFile(record, `${JSON.stringify(pending, null, 2)}\n`);
+  await writeJsonAtomic(record, pending);
 }
 
 /** The text `options.txt` holds for `value`: booleans are 1/0 there, numbers and strings as written. */
@@ -202,7 +198,7 @@ export async function listSettings(filter?: string, deps: SettingsDeps = {}): Pr
   const install = deps.install ?? (await findInstall());
   const { files, values } = await readOptionsFiles(install);
   if (!files.some((file) => existsSync(file))) {
-    return { ok: false, code: -32602, reason: "invalid_params", message: `no options.txt for ${install.label} (${files.join(", ")}); start the game once so it writes one` };
+    return invalid(`no options.txt for ${install.label} (${files.join(", ")}); start the game once so it writes one`);
   }
   const settings = [...values.entries()]
     .filter(([id]) => matches(id, filter))
@@ -214,7 +210,7 @@ export async function listSettings(filter?: string, deps: SettingsDeps = {}): Pr
 /** One setting by id. */
 export async function getSetting(id: string, deps: SettingsDeps = {}): Promise<EngineResult<SettingView>> {
   const key = id.trim();
-  if (!key) return { ok: false, code: -32602, reason: "invalid_params", message: "a setting id cannot be empty" };
+  if (!key) return invalid("a setting id cannot be empty");
   const session = deps.session ?? engine;
   if (await session.reachable()) {
     const result = await session.settingsGet(key);
@@ -224,7 +220,7 @@ export async function getSetting(id: string, deps: SettingsDeps = {}): Promise<E
   const { values } = await readOptionsFiles(install);
   const value = values.get(key);
   if (value === undefined) {
-    return { ok: false, code: -32602, reason: "invalid_params", message: `options.txt has no ${key}${BRIDGE_KEYS.has(key) ? " (the bridge owns that key)" : ""}` };
+    return invalid(`options.txt has no ${key}${BRIDGE_KEYS.has(key) ? " (the bridge owns that key)" : ""}`);
   }
   return { ok: true, value: { source: "options.txt", setting: fileSetting(key, value) } };
 }
@@ -235,14 +231,11 @@ export async function getSetting(id: string, deps: SettingsDeps = {}): Promise<E
  */
 export async function setSetting(id: string, value: SettingValue, deps: SettingsDeps = {}): Promise<EngineResult<SettingChange>> {
   const key = id.trim();
-  if (!key) return { ok: false, code: -32602, reason: "invalid_params", message: "a setting id cannot be empty" };
+  if (!key) return invalid("a setting id cannot be empty");
   if (BRIDGE_KEYS.has(key)) {
-    return {
-      ok: false,
-      code: -32602,
-      reason: "invalid_params",
-      message: `${key} belongs to the bridge's own channels (script debugger, websockets, content log); game_launch writes it and game_stop restores it`,
-    };
+    return invalid(
+      `${key} belongs to the bridge's own channels (script debugger, websockets, content log); game_launch writes it and game_stop restores it`,
+    );
   }
   const session = deps.session ?? engine;
   const change: SettingChange = { id: key, previous: null, value, source: "engine", appliesAt: "now" };
@@ -256,19 +249,14 @@ export async function setSetting(id: string, value: SettingValue, deps: Settings
     const install = deps.install ?? (await findInstall());
     const { files, values } = await readOptionsFiles(install);
     if (!files.some((file) => existsSync(file))) {
-      return { ok: false, code: -32602, reason: "invalid_params", message: `no options.txt for ${install.label} (${files.join(", ")}); start the game once so it writes one` };
+      return invalid(`no options.txt for ${install.label} (${files.join(", ")}); start the game once so it writes one`);
     }
     const existing = values.get(key);
     if (existing === undefined) {
-      return {
-        ok: false,
-        code: -32602,
-        reason: "invalid_params",
-        message: `options.txt has no ${key}; without an attached agent only options the game already saved can be changed`,
-      };
+      return invalid(`options.txt has no ${key}; without an attached agent only options the game already saved can be changed`);
     }
     if (FILE_SCALE[key] && numberIn(settingsText(value)) === undefined) {
-      return { ok: false, code: -32602, reason: "invalid_params", message: `${key} takes a number, got ${JSON.stringify(value)}` };
+      return invalid(`${key} takes a number, got ${JSON.stringify(value)}`);
     }
     change.previous = existing;
     change.value = settingsText(value);

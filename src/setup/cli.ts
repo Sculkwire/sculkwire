@@ -2,19 +2,17 @@
  * `sculk setup` (checks the machine, registers sculkwire with MCP clients, prints the registration for any other)
  * and `sculk doctor` (the same checks, one line per problem with its fix).
  */
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
-import type { CliCommand } from "../core/cli.ts";
+import { type CliCommand, err, out } from "../core/cli.ts";
 import { ExitCode } from "../core/diagnostic.ts";
+import { errorMessage } from "../core/errors.ts";
 import { cacheDir } from "../core/paths.ts";
-import { findOnPath } from "../core/which.ts";
-import { listInstalled } from "../runtime/bds/install.ts";
-import { findInstalls } from "../gamefiles/install.ts";
-import { describeVersion, versionInfo } from "../update/auto.ts";
-import { CLIENTS, type Client, ompConfigPath, parseClients, registerClaude, registerOmp, serverEntry, snippet } from "../update/register.ts";
 import { findRgl } from "../core/regolith.ts";
+import { findInstalls } from "../gamefiles/install.ts";
+import { listInstalled } from "../runtime/bds/install.ts";
+import { describeVersion, versionInfo } from "../update/auto.ts";
+import { CLIENTS, type McpClient, parseClients, serverEntry, snippet } from "./register.ts";
 
 /** The install command for Node.js on this Linux distribution (from /etc/os-release), or undefined when unknown. */
 function linuxNodeInstall(): string | undefined {
@@ -119,11 +117,11 @@ const doctor: CliCommand = {
   summary: "Check the machine: Node, game client, BDS and rgl",
   async run(args) {
     if (args.length) {
-      process.stderr.write("usage: sculk doctor\n");
+      err("usage: sculk doctor");
       return ExitCode.usage;
     }
     const checks = await runChecks();
-    for (const c of checks) process.stdout.write(`${formatCheck(c)}\n`);
+    for (const c of checks) out(formatCheck(c));
     return checks.some((c) => c.level === "required" && !c.ok) ? ExitCode.findings : ExitCode.ok;
   },
 };
@@ -143,54 +141,38 @@ async function ask(question: string, fallback: string): Promise<string> {
 }
 
 const SETUP_USAGE = [
-  "usage: sculk setup [--yes] [--register omp,claude]",
+  `usage: sculk setup [--yes] [--register ${CLIENTS.map((c) => c.name).join(",")}]`,
   "",
   "  --yes       ask nothing (no client registration unless --register)",
-  "  --register  register sculkwire with these MCP clients (omp, claude); the JSON for any other client is printed",
+  `  --register  register sculkwire with these MCP clients (${CLIENTS.map((c) => c.name).join(", ")}); the JSON for any other client is printed`,
 ].join("\n");
 
 interface SetupArgs {
   yes: boolean;
-  register?: Client[];
+  register?: McpClient[];
 }
 
 function parseSetup(args: string[]): SetupArgs | string {
-  const out: SetupArgs = { yes: false };
+  const parsed: SetupArgs = { yes: false };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (arg === "--yes" || arg === "-y") out.yes = true;
+    if (arg === "--yes" || arg === "-y") parsed.yes = true;
     else if (arg === "--register") {
       const clients = parseClients(args[++i] ?? "");
       if (typeof clients === "string") return clients;
-      out.register = clients;
+      parsed.register = clients;
     } else return `unknown argument ${arg}`;
   }
-  return out;
+  return parsed;
 }
 
-/** Clients worth offering: omp when ~/.omp exists, claude when its CLI is on PATH. */
-function detectedClients(): Client[] {
-  return CLIENTS.filter((c) => (c === "omp" ? existsSync(join(homedir(), ".omp")) : findOnPath("claude") !== undefined));
-}
-
-async function register(clients: Client[]): Promise<void> {
+async function register(clients: readonly McpClient[]): Promise<void> {
   const entry = serverEntry();
   for (const client of clients) {
     try {
-      if (client === "omp") {
-        const r = await registerOmp(entry, ompConfigPath());
-        process.stderr.write(`Registered sculkwire in ${r.path}${r.backup ? ` (previous file kept as ${r.backup})` : ""}\n`);
-      } else {
-        const claude = findOnPath("claude");
-        if (!claude) {
-          process.stderr.write("The claude CLI is not on PATH, add the JSON below to Claude Code by hand\n");
-          continue;
-        }
-        await registerClaude(entry, claude);
-        process.stderr.write("Registered sculkwire with Claude Code (user scope)\n");
-      }
-    } catch (err) {
-      process.stderr.write(`Registering with ${client} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      err(await client.register(entry));
+    } catch (e) {
+      err(`Registering with ${client.name} failed: ${errorMessage(e)}`);
     }
   }
 }
@@ -201,21 +183,23 @@ const setup: CliCommand = {
   async run(args) {
     const opts = parseSetup(args);
     if (typeof opts === "string") {
-      process.stderr.write(`${opts}\n${SETUP_USAGE}\n`);
+      err(`${opts}\n${SETUP_USAGE}`);
       return ExitCode.usage;
     }
-    process.stderr.write("Checking this machine...\n");
-    for (const c of await runChecks()) process.stderr.write(`${formatCheck(c)}\n`);
+    err("Checking this machine...");
+    for (const c of await runChecks()) err(formatCheck(c));
     let clients = opts.register;
     if (!opts.yes && !clients) {
-      const answer = await ask(`Register sculkwire with which MCP clients? (${CLIENTS.join(", ")}, comma separated, or none)`, detectedClients().join(",") || "none");
+      const names = CLIENTS.map((c) => c.name);
+      const detected = CLIENTS.filter((c) => c.detect()).map((c) => c.name);
+      const answer = await ask(`Register sculkwire with which MCP clients? (${names.join(", ")}, comma separated, or none)`, detected.join(",") || "none");
       const parsed = parseClients(answer);
-      if (typeof parsed === "string") process.stderr.write(`${parsed}, skipping registration\n`);
+      if (typeof parsed === "string") err(`${parsed}, skipping registration`);
       clients = typeof parsed === "string" ? [] : parsed;
     }
     await register(clients ?? []);
-    process.stderr.write("\nMCP registration for any other client:\n\n");
-    process.stdout.write(`${snippet(serverEntry())}\n`);
+    err("\nMCP registration for any other client:\n");
+    out(snippet(serverEntry()));
     return ExitCode.ok;
   },
 };

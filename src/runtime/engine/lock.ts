@@ -6,7 +6,8 @@
  * gives it back. `mode` lives in the DLL so every process sees the same one: `on`, `off`, or `auto` (locked while an
  * action or play job runs, which this process declares with `hold`). Each change arrives as a `lock` notification.
  */
-import type { EngineResult } from "./engine.ts";
+import { malformed, type EngineResult } from "./failure.ts";
+import { finiteOrZero } from "./wire.ts";
 
 export const LOCK_MODES = ["on", "off", "auto"] as const;
 export type LockMode = (typeof LOCK_MODES)[number];
@@ -58,17 +59,13 @@ export interface LockState {
   camera: "disabled" | "enabled" | null;
 }
 
-function count(v: unknown): number {
-  return typeof v === "number" && Number.isFinite(v) ? v : 0;
-}
-
 function shiftOf(r: Record<string, unknown>, key: "message" | "raw"): unknown {
   const shift = r.shift;
   return shift && typeof shift === "object" && key in shift ? (shift as Record<string, unknown>)[key] : undefined;
 }
 
 function pair(v: unknown): [number, number] {
-  return Array.isArray(v) ? [count(v[0]), count(v[1])] : [0, 0];
+  return Array.isArray(v) ? [finiteOrZero(v[0]), finiteOrZero(v[1])] : [0, 0];
 }
 
 function padOf(r: Record<string, unknown>): Record<string, unknown> {
@@ -87,15 +84,15 @@ export function parseLockState(raw: unknown): LockState | undefined {
     user: r.user === true,
     active: r.active === true,
     window: r.window === true,
-    dropped: count(r.dropped),
-    focusLost: count(r.focusLost),
-    focusKept: count(r.focusKept),
+    dropped: finiteOrZero(r.dropped),
+    focusLost: finiteOrZero(r.focusLost),
+    focusKept: finiteOrZero(r.focusKept),
     wineFocused: r.focused !== false,
     wineForeground: r.foreground !== false,
     shift: { message: pair(shiftOf(r, "message")), raw: pair(shiftOf(r, "raw")) },
-    keysHidden: count(r.keysHidden),
+    keysHidden: finiteOrZero(r.keysHidden),
     hostFocused: r.hostFocused !== false,
-    pad: { hooked: count(padOf(r).hooked), reads: count(padOf(r).reads), active: count(padOf(r).active), hidden: count(padOf(r).hidden) },
+    pad: { hooked: finiteOrZero(padOf(r).hooked), reads: finiteOrZero(padOf(r).reads), active: finiteOrZero(padOf(r).active), hidden: finiteOrZero(padOf(r).hidden) },
     camera: r.camera === "disabled" || r.camera === "enabled" ? r.camera : null,
   };
 }
@@ -186,7 +183,7 @@ export class InputLock {
     const result = await this.#send(mode ? { mode } : {});
     if (!result.ok) return result;
     const state = parseLockState(result.value);
-    if (!state) return { ok: false, code: -32000, reason: "protocol", message: `input.lock answered ${JSON.stringify(result.value)}` };
+    if (!state) return malformed("input.lock", result.value);
     this.update(state);
     return { ok: true, value: state };
   }

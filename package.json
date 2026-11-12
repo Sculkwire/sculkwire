@@ -18,12 +18,11 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "sculk": "node --experimental-strip-types src/cli.ts"
+    "sculk": "node src/cli.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "ajv": "^8.20.0",
-    "ajv-formats": "^3.0.1",
     "fflate": "^0.8.3",
     "jsonc-parser": "^3.3.1",
     "minisearch": "^7.2.0",

@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { drawIcon, fill, frame, png } from "../../testing/screenshots.ts";
 import { findIcons, findIconTile, ICON_HEIGHT, ICON_PALETTE, ICON_WIDTH, iconCells, iconPixel, worldIcon, type Rect } from "./icon.ts";
 import { AC_CHROMINANCE, AC_LUMINANCE, DC_LUMINANCE, encodeFlatJpeg, huffmanCodes, type HuffmanSpec, type Rgb } from "./jpeg.ts";
-import { decodePng, LAYOUT, type Pixels } from "./screens.ts";
+import { decodePng, type Pixels } from "./png.ts";
+import { LAYOUT } from "./screens.ts";
 
 /** Markers in file order, up to and including SOS (the entropy-coded data follows it). */
 function markers(jpeg: Buffer): number[] {

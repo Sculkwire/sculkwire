@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { EngineSession, type EngineResult } from "../engine/engine.ts";
+import { EngineSession } from "../engine/engine.ts";
+import type { EngineResult } from "../engine/failure.ts";
 import { AgentInputProvider } from "./agentprovider.ts";
 
 describe("AgentInputProvider without an agent", () => {

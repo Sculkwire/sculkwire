@@ -4,8 +4,9 @@
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { detectBuilds, gameDirCandidates, noBuildMessage, selectBuild } from "./detect.ts";
-import { extractPack, findPack, listPacks, listVanillaPacks, PACK_KINDS, type PackKind } from "./extract.ts";
+import { fail } from "../core/mcp.ts";
+import { detectBuilds, gameDirCandidates, type GameBuild, noBuildMessage, requireBuild } from "./detect.ts";
+import { DEFAULT_PACK_KIND, extractPack, findPack, listPacks, listVanillaPacks, PACK_KINDS, type PackInfo, type PackKind } from "./extract.ts";
 
 const kindSchema = z.enum(PACK_KINDS as [PackKind, ...PackKind[]]);
 const buildSelector = z
@@ -20,7 +21,7 @@ const buildShape = z.object({
   appxVersion: z.string().optional(),
   packageName: z.string().optional(),
   packRoots: z.object({ behavior: z.string().optional(), resource: z.string().optional() }),
-});
+}) satisfies z.ZodType<GameBuild>;
 
 const packShape = z.object({
   kind: kindSchema,
@@ -29,11 +30,7 @@ const packShape = z.object({
   baseGameVersion: z.string().optional(),
   archives: z.number(),
   dir: z.string(),
-});
-
-function fail(text: string): { content: { type: "text"; text: string }[]; isError: true } {
-  return { content: [{ type: "text", text }], isError: true };
-}
+}) satisfies z.ZodType<PackInfo>;
 
 export function register(server: McpServer): void {
   server.registerTool(
@@ -50,7 +47,7 @@ export function register(server: McpServer): void {
     async ({ gameDir }) => {
       const searched = gameDir ? [gameDir] : gameDirCandidates();
       const builds = detectBuilds(searched);
-      const text = builds.length === 0 ? noBuildMessage() : builds.map((b) => `${b.version ?? "version unknown"} (${b.root})`).join("\n");
+      const text = builds.length === 0 ? noBuildMessage(undefined, searched) : builds.map((b) => `${b.version ?? "version unknown"} (${b.root})`).join("\n");
       return { content: [{ type: "text", text }], structuredContent: { builds, searched } };
     },
   );
@@ -71,8 +68,12 @@ export function register(server: McpServer): void {
       outputSchema: { build: z.string(), version: z.string().optional(), packs: z.array(packShape) },
     },
     async ({ build: selector, kind, all }) => {
-      const build = selectBuild(detectBuilds(), selector);
-      if (!build) return fail(noBuildMessage(selector));
+      let build: GameBuild;
+      try {
+        build = requireBuild(selector);
+      } catch (err) {
+        return fail(err);
+      }
       const packs = (all ? listPacks(build) : listVanillaPacks(build)).filter((p) => !kind || p.kind === kind);
       const versions = packs.filter((p) => p.kind === "behavior" && p.baseGameVersion).map((p) => p.baseGameVersion);
       const text =
@@ -114,19 +115,18 @@ export function register(server: McpServer): void {
         cached: z.boolean(),
       },
     },
-    async ({ pack, kind, build: selector, out, force }) => {
-      const build = selectBuild(detectBuilds(), selector);
-      if (!build) return fail(noBuildMessage(selector));
-      const info = findPack(build, pack, kind ?? "behavior");
-      if (!info) return fail(`no ${kind ?? "behavior"} pack ${JSON.stringify(pack)} in build ${build.key}`);
-      const options: { out?: string; force?: boolean } = {};
-      if (out) options.out = out;
-      if (force) options.force = force;
+    async ({ pack, kind = DEFAULT_PACK_KIND, build: selector, out, force }) => {
       let result;
       try {
+        const build = requireBuild(selector);
+        const info = findPack(build, pack, kind);
+        if (!info) return fail(`no ${kind} pack ${JSON.stringify(pack)} in build ${build.key}`);
+        const options: { out?: string; force?: boolean } = {};
+        if (out) options.out = out;
+        if (force) options.force = force;
         result = await extractPack(build, info, options);
       } catch (err) {
-        return fail(err instanceof Error ? err.message : String(err));
+        return fail(err);
       }
       const text =
         `${result.kind} ${result.pack} → ${result.out} (${result.looseFiles} loose, ${result.archiveEntries} archived` +

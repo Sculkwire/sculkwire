@@ -23,6 +23,7 @@ import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { errorMessage } from "../../core/errors.ts";
 
 export type FocusBackend = "kwin" | "x11" | "windows" | "none";
 
@@ -171,7 +172,7 @@ export class HostFocus {
       if (backend === "kwin") await focus.#startKwin(options.pid);
       else if (backend === "x11") focus.#startX11(options.pid);
     } catch (err) {
-      focus.error = err instanceof Error ? err.message : String(err);
+      focus.error = errorMessage(err);
       await focus.stop();
     }
     return focus;

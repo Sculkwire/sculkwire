@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PrerequisiteError } from "../../core/errors.ts";
-import { assertHostSupported, bdsPlatformFor, pickLink, serverExecutable, type BdsLink } from "./install.ts";
+import { assertHostSupported, bdsPlatformFor, parseLinks, pickLink, type BdsLink } from "./install.ts";
 
 const links: BdsLink[] = [
   { channel: "stable", platform: "linux", version: "1.26.63.1", url: "https://x/bin-linux/bedrock-server-1.26.63.1.zip" },
@@ -41,9 +41,22 @@ describe("BDS host platform", () => {
     expect(pickLink(links, "preview", "windows")?.url).toContain("bin-win-preview/");
     expect(pickLink(links.slice(0, 1), "preview", "linux")).toBeUndefined();
   });
+});
 
-  it("names the server executable per platform", () => {
-    expect(serverExecutable("linux")).toBe("bedrock_server");
-    expect(serverExecutable("windows")).toBe("bedrock_server.exe");
+describe("BDS download links", () => {
+  it("parses the download-links API", () => {
+    const links = parseLinks({
+      result: {
+        links: [
+          { downloadType: "serverBedrockLinux", downloadUrl: "https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-1.26.63.1.zip" },
+          { downloadType: "serverBedrockPreviewWindows", downloadUrl: "https://www.minecraft.net/bedrockdedicatedserver/bin-win-preview/bedrock-server-1.26.70.23.zip" },
+          { downloadType: "serverJar", downloadUrl: "https://piston-data.mojang.com/server.jar" },
+        ],
+      },
+    });
+    expect(links).toEqual([
+      { channel: "stable", platform: "linux", version: "1.26.63.1", url: expect.stringContaining("bin-linux/") },
+      { channel: "preview", platform: "windows", version: "1.26.70.23", url: expect.stringContaining("bin-win-preview/") },
+    ]);
   });
 });

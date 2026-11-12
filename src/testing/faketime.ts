@@ -4,7 +4,7 @@
  * plays out the same on a fast desktop, a loaded CI runner and Windows' coarse timers.
  */
 import { vi } from "vitest";
-import type { Clock } from "../runtime/client/player.ts";
+import type { Clock } from "../runtime/client/clock.ts";
 
 /** The controller clock on the global (faked) `Date` and `setTimeout`, resolved at call time. */
 export const fakeClock: Clock = {

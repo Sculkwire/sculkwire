@@ -20,16 +20,18 @@
  *   holds the shield open (right after a block: the blocked mob waits 1500 ms);
  * - the mob to strike: one in reach that can take a hit now, the one nearest the view first (`strikeTarget`).
  */
-import { angleDiff } from "../player.ts";
-import { escapeYaw } from "./flee.ts";
-import { BACKPEDAL_SPEED, openHeading, SHIELD_RAISE_MS } from "./defense.ts";
+import { PLAYER_REACH } from "../bedrock.ts";
+import { angleDiff } from "../geometry.ts";
+import { escapeYaw } from "./target.ts";
+import { BACKPEDAL_SPEED, SHIELD_RAISE_MS } from "./defense.ts";
+import { openHeading } from "./steer.ts";
 import { SPEAR_HIT_DIST } from "./mobs.ts";
 
 /** How the fight uses the shield: `auto` (`kite`, plus the shield boxed in), `kite` (never: footwork only), `guard` (always near mobs). */
 export const STANCES = ["auto", "kite", "guard"] as const;
 export type Stance = (typeof STANCES)[number];
 
-export type PackFoot = "advance" | "hold" | "retreat" | "guard";
+type PackFoot = "advance" | "hold" | "retreat" | "guard";
 
 /** One melee mob as the fight sees it this tick. */
 export interface PackMob {
@@ -92,7 +94,7 @@ export interface PackInput {
   stepOut?: boolean;
 }
 
-export interface PackMove {
+interface PackMove {
   foot: PackFoot;
   /** Hold the shield up (sneak). */
   shield: boolean;
@@ -131,7 +133,7 @@ export function nextAttackMs(at: number, blocked: boolean, cooldownMs: number): 
   return at + (blocked ? BLOCKED_ATTACK_MS : cooldownMs);
 }
 /** A mob within this many degrees of the view is covered (measured: blocked at 85, not at 95; 75 leaves room for the turn and aim jitter). */
-export const COVER_DEG = 75;
+const COVER_DEG = 75;
 /** One loop tick and the reading's age: a raise is decided this much ahead of the lead. */
 const RAISE_SLACK_MS = 100;
 /** The shield stays up this much longer past the raise window, so it does not flicker between two ticks. */
@@ -157,8 +159,6 @@ const WAIT_DIST = 4;
  * So eye to aim point 3.06 strikes and 3.16 does not: a swing goes out only within 3.05 where it will land.
  */
 export const STRIKE_REACH = 3.05;
-/** The same reach as a horizontal centre distance on level ground (struck at 3.0, not at 3.1). */
-export const STRIKE_CENTRE = 3.0;
 /**
  * The swing goes out at a mob once its reading (the horizontal centre distance, as read now: no lead for its walk) is
  * this close. Live (2026-11-11, N=60 bench, every swing at a mob walking in, closing above 1.5, by that reading;
@@ -167,8 +167,8 @@ export const STRIKE_CENTRE = 3.0;
  * 1000 misses at 3.05 or more. So 2.9 for a mob walking in (one tick of its walk inside 3.0; 48 % at 2.9, 76 % at
  * 2.85), and 2.99 for one standing or backing off.
  */
-export const STRIKE_DIST_WALKING_IN = 2.9;
-export const STRIKE_DIST_STILL = 2.99;
+const STRIKE_DIST_WALKING_IN = 2.9;
+const STRIKE_DIST_STILL = 2.99;
 /** A mob closing faster than this (blocks a second) is walking in. */
 export const WALKING_IN = 1.5;
 /** Where the swing at a mob goes out, by its closing speed. */
@@ -188,14 +188,13 @@ export const STRIKE_AIM_DEG = 8;
  * distance (`strikeDistance`): a mob coming in that the hand is on is waited for and struck at 2.9, never stepped back
  * from first.
  */
-export const UNANSWERED_EDGE = 0.1;
-const STRUCK_FIRST = true;
+const UNANSWERED_EDGE = 0.1;
 /**
  * Without the this-tick reading (`strikeNow`, the creeper duel's keep-out), a mob coming in this close that the hand
  * cannot strike within the latency is stepped away from: measured on retail 2026-11-11 (two N=60 bench files, 41
  * hurts), the nearest mob 100 ms before a hurt read 1.6 to 2.5 blocks (median 2.0, a quarter at 2.3 to 2.5).
  */
-export const HIT_READING_DIST = 2.5;
+const HIT_READING_DIST = 2.5;
 /** Footwork without the shield keeps this much time between a mob and its reach (beyond the input latency). */
 const KITE_MARGIN_MS = 150;
 /**
@@ -282,7 +281,7 @@ export function bearingArc(bearings: readonly number[]): { width: number; middle
  * Against a spear: the feet give ground once a spear mob charging is this close (centre to centre): its hit lands from
  * 3.35 (`SPEAR_HIT_DIST`; live round 2), plus the distance it charges in the input latency and a tick.
  */
-export const SPEAR_GIVE_DIST = 3.8;
+const SPEAR_GIVE_DIST = 3.8;
 /**
  * Giving ground, the two still close at this much (blocks a second), under the spear's 0.92 (`SPEAR_MIN_CLOSING`): it
  * comes on slowly without its charge hurting.
@@ -293,12 +292,12 @@ export const SPEAR_SAFE_CLOSING = 0.3;
  * all 8 spear hits came with the husk at 3.0 to 3.35 and the player at 4.1 to 5.7 (sprinting after it, or backing off
  * at full speed); none with the player standing or walking slowly there.
  */
-export const SPEAR_SAFE_SPEED = 3.0;
+const SPEAR_SAFE_SPEED = 3.0;
 /** A spear mob backing off is chased at a sprint only beyond this; nearer, at its retreat speed plus `SPEAR_CHASE_GAIN`. */
-export const SPEAR_SPRINT_DIST = 5;
-export const SPEAR_CHASE_GAIN = 0.8;
+const SPEAR_SPRINT_DIST = 5;
+const SPEAR_CHASE_GAIN = 0.8;
 /** A spear mob charging within this is waited for standing, not walked up to. */
-export const SPEAR_WAIT_DIST = 7;
+const SPEAR_WAIT_DIST = 7;
 /** A spear mob backing off (opening faster than `WALKING_IN`) is struck from this reading: it lags behind the mob. */
 export const SPEAR_OPENING_STRIKE = 2.8;
 
@@ -432,8 +431,8 @@ export function packMove(i: PackInput): PackMove {
     ? undefined
     : timed.find(
         (t) =>
-          (t.m.dist <= STRIKE_CENTRE + UNANSWERED_EDGE && t.m.closing > 0 && t.m.strikeNow === false && !(STRUCK_FIRST && struckFirst(t.m))) ||
-          (t.m.dist <= STRIKE_CENTRE + 0.2 && (reachInMs(t.m) <= strikeIn(t.m) + i.latencyMs || (t.m.strikeNow === undefined && t.m.dist <= HIT_READING_DIST && t.m.closing > 0 && strikeIn(t.m) > i.latencyMs))),
+          (t.m.dist <= PLAYER_REACH + UNANSWERED_EDGE && t.m.closing > 0 && t.m.strikeNow === false && !struckFirst(t.m)) ||
+          (t.m.dist <= PLAYER_REACH + 0.2 && (reachInMs(t.m) <= strikeIn(t.m) + i.latencyMs || (t.m.strikeNow === undefined && t.m.dist <= HIT_READING_DIST && t.m.closing > 0 && strikeIn(t.m) > i.latencyMs))),
       );
   if (unanswered && room >= BOXED_ROOM) return withFace(retreat(`${unanswered.m.id} reaches the player before the hand can strike it`));
   if (threat) {
@@ -467,7 +466,7 @@ export function strikeTarget(mobs: readonly PackMob[], currentId: string | undef
   if (mobs.length === 0) return currentId;
   const current = mobs.find((m) => m.id === currentId);
   const strikeIn = (m: PackMob) => m.strikeInMs ?? m.hittableMs;
-  const hittable = mobs.filter((m) => m.dist <= STRIKE_CENTRE && m.hittableMs <= latencyMs + 150);
+  const hittable = mobs.filter((m) => m.dist <= PLAYER_REACH && m.hittableMs <= latencyMs + 150);
   // The one the hand can strike soonest (under the crosshair, the smallest turn), the current one while it is about as soon.
   const best = [...hittable].sort((a, b) => strikeIn(a) - strikeIn(b) || a.dist - b.dist)[0];
   if (current && hittable.includes(current) && (!best || strikeIn(current) <= strikeIn(best) + 100)) return current.id;
@@ -481,7 +480,7 @@ export function strikeTarget(mobs: readonly PackMob[], currentId: string | undef
  * A mob in reach whose clock has been ready this long has attacked by now (a zombie attacks the moment it can): the
  * fight's clocks run up to `HURT_SEEN_LAG_MS` (150) early and a tick or two off, so less than this is not proof.
  */
-export const OVERDUE_MS = 250;
+const OVERDUE_MS = 250;
 
 /**
  * Which mobs just attacked (a hit taken or a hit the shield blocked): of the mobs whose reach covers the player (plus

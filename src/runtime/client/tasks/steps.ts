@@ -4,10 +4,12 @@
  * afterwards (`taskStepDone`), not whether its procedure ran through. The screen it opened is closed and every input
  * released, whatever ends it (done, failed, cancelled).
  */
+import { errorMessage } from "../../../core/errors.ts";
 import type { PlayerInventory } from "../../engine/inventory.ts";
 import { resolveName } from "./names.ts";
-import { bareId, namespaced } from "./recipes.ts";
-import { center, distance, nothingFound, Run, StepFail, STATION_RADIUS, xyz } from "./run.ts";
+import { blockCenter, distance, xyz } from "../geometry.ts";
+import { bareId, namespaced } from "./ids.ts";
+import { nothingFound, Run, StepFail, STATION_RADIUS } from "./run.ts";
 import { findEntities } from "./search.ts";
 import { carriedStacks, countsOf, gainedBetween } from "./stock.ts";
 import type { InventoryCounts, TaskEnv, TaskProbe, TaskStep, TaskStepResult } from "./types.ts";
@@ -180,14 +182,19 @@ async function fetch(run: Run, step: Extract<TaskStep, { kind: "fetch" }>): Prom
 }
 
 /** The armor slot an item is worn in (0 head, 1 chest, 2 legs, 3 feet), "offhand" for a shield, else held. */
-function wornAt(item: string): number | "offhand" | "hand" {
+/** The armor slot an item is worn in (0 head, 1 chest, 2 legs, 3 feet); undefined for an item that is not worn. */
+export function armorSlotOf(item: string): number | undefined {
   const id = bareId(item);
-  if (id === "shield") return "offhand";
   if (/_helmet$|^carved_pumpkin$|_skull$|_head$/.test(id)) return 0;
   if (/_chestplate$|^elytra$/.test(id)) return 1;
   if (/_leggings$/.test(id)) return 2;
   if (/_boots$/.test(id)) return 3;
-  return "hand";
+  return undefined;
+}
+
+function wornAt(item: string): number | "offhand" | "hand" {
+  if (bareId(item) === "shield") return "offhand";
+  return armorSlotOf(item) ?? "hand";
 }
 
 function probeOf(inventory: PlayerInventory, item: string): TaskProbe {
@@ -255,7 +262,7 @@ async function reachBlock(run: Run, step: Extract<TaskStep, { kind: "reach_block
       continue;
     }
     const me = await run.env.controller.position();
-    const goal = center(target.location);
+    const goal = blockCenter(target.location);
     return { message: `standing next to the ${bareId(block)} at ${xyz(target.location)}`, probe: { distance: Math.hypot(me.x - goal.x, me.z - goal.z) } };
   }
   throw new StepFail("unreachable", `no way to the ${bareId(block)} within ${search.within} (${tried.join("; ")})`);
@@ -318,7 +325,7 @@ export async function runTaskStep(step: TaskStep, env: TaskEnv, signal?: AbortSi
         ? err
         : signal?.aborted
           ? new StepFail("cancelled", "the step was cancelled")
-          : new StepFail("refused", err instanceof Error ? err.message : String(err));
+          : new StepFail("refused", errorMessage(err));
   } finally {
     await run.close();
     await env.controller.release().catch(() => undefined);

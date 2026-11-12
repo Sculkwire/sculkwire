@@ -2,7 +2,7 @@
 import { shortType } from "./mobs.ts";
 
 /** Melee damage of a held item; anything not listed hits like a fist (1). */
-export const WEAPON_DAMAGE: Record<string, number> = {
+const WEAPON_DAMAGE: Record<string, number> = {
   wooden_sword: 4,
   golden_sword: 4,
   stone_sword: 5,
@@ -63,7 +63,7 @@ const ARMOR_POINTS: Record<string, readonly [number, number, number, number]> = 
 };
 const PIECES = ["helmet", "chestplate", "leggings", "boots"] as const;
 
-export type HotbarItem = { typeId: string; amount: number } | null;
+type HotbarItem = { typeId: string; amount: number } | null;
 
 export function weaponDamage(typeId: string | undefined): number {
   return typeId ? (WEAPON_DAMAGE[shortType(typeId)] ?? 1) : 1;

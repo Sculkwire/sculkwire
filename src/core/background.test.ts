@@ -1,15 +1,11 @@
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { backgroundDownloadsAllowed, CLI_EXIT_GRACE_MS } from "./background.ts";
+import { CLI_EXIT_GRACE_MS } from "./background.ts";
 
 const CLI = join(import.meta.dirname, "..", "cli.ts");
 
 describe("background work policy", () => {
-  it("is off unless the MCP server turns it on", () => {
-    expect(backgroundDownloadsAllowed()).toBe(false);
-  });
-
   // A real process: the bound is about the event loop of a separate node process, which fake timers cannot drive.
   it("a CLI command exits within the grace period although a handle keeps the event loop alive", () => {
     const hang = "data:text/javascript,setInterval(() => {}, 1000)";

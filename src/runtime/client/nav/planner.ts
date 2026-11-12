@@ -4,10 +4,10 @@
  * vines, doors and fence gates to open, and sprint jumps over gaps of 1 to 3 blocks. Lava, fire, cactus, magma and
  * the like are never entered and cost extra to pass close by.
  */
-import type { Vec3 } from "../player.ts";
+import type { Vec3 } from "../types.ts";
 import type { BlockClass, BlockGrid } from "./grid.ts";
 
-export type MoveKind = "start" | "walk" | "jump" | "drop" | "gap" | "climb" | "swim" | "door";
+type MoveKind = "start" | "walk" | "jump" | "drop" | "gap" | "climb" | "swim" | "door";
 
 /** One block of a path: where the feet are, the floor height there, and the move that gets there from the step before. */
 export interface PathStep {
@@ -23,7 +23,7 @@ export interface PathStep {
   fall?: number;
 }
 
-export interface PlanGoal {
+interface PlanGoal {
   x: number;
   /** Without y any height at x/z counts. */
   y?: number;
@@ -32,7 +32,7 @@ export interface PlanGoal {
   radius?: number;
 }
 
-export interface PlanOptions {
+interface PlanOptions {
   /** Highest drop onto ground (default 3, which costs no health). Drops into water have no limit. */
   maxDrop?: number;
   /** Search limit (default 60000 blocks). */
@@ -41,7 +41,7 @@ export interface PlanOptions {
   bounds?: { min: Vec3; max: Vec3 };
 }
 
-export type PlanStatus = "found" | "partial" | "unreachable" | "no_start";
+type PlanStatus = "found" | "partial" | "unreachable" | "no_start";
 
 export interface PlanResult {
   status: PlanStatus;
@@ -128,7 +128,7 @@ interface Edge {
 }
 
 /** Every move from one standing block. */
-export function neighbors(g: BlockGrid, x: number, y: number, z: number, from: Stand, maxDrop = 3): Edge[] {
+function neighbors(g: BlockGrid, x: number, y: number, z: number, from: Stand, maxDrop = 3): Edge[] {
   const out: Edge[] = [];
   const add = (nx: number, ny: number, nz: number, s: Stand, move: MoveKind, base: number, extra: Partial<Edge> = {}) => {
     // Under water (head in water too) costs more, so the path swims at the surface where there is air.
@@ -231,7 +231,7 @@ function gapJumps(
 }
 
 /** Blocks the player could be standing in at a (fractional) position: the feet block first, then below and around. */
-export function startCandidates(p: Vec3): [number, number, number][] {
+function startCandidates(p: Vec3): [number, number, number][] {
   const bx = Math.floor(p.x);
   const bz = Math.floor(p.z);
   const by = Math.floor(p.y + 0.01);
@@ -390,7 +390,8 @@ export function plan(grid: BlockGrid, start: Vec3, goal: PlanGoal, options: Plan
   const where = (n: { x: number; y: number; z: number }) => `${n.x}, ${n.y}, ${n.z}`;
   if (reached !== undefined) {
     const n = nodes.get(reached) as Node;
-    return { status: "found", path: trace(reached), cost: n.g, expanded, message: `path of ${trace(reached).length - 1} moves to ${where(n)}` };
+    const path = trace(reached);
+    return { status: "found", path, cost: n.g, expanded, message: `path of ${path.length - 1} moves to ${where(n)}` };
   }
   const b = nodes.get(best) as Node;
   const bounds = options.bounds;

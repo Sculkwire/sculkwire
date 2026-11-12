@@ -5,7 +5,7 @@
  */
 import { crc32, deflateSync } from "node:zlib";
 import { ICON_HEIGHT, ICON_WIDTH, iconCells, iconPixel, type Rect } from "../runtime/client/icon.ts";
-import type { Pixels } from "../runtime/client/screens.ts";
+import type { Pixels } from "../runtime/client/png.ts";
 
 /** A `width` x `height` RGB frame of one grey (the Play screen's dark background by default). */
 export function frame(width: number, height: number, grey = 49): Pixels {

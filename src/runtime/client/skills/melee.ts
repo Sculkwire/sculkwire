@@ -8,7 +8,7 @@
 /** The struck mob's invulnerability after a hit, the shortest useful time between swings. */
 export const HIT_COOLDOWN_MS = 500;
 /** Jump this long before the next hit is due, so the player is falling when it is (apex at about 300 ms plus input latency). */
-export const CRIT_JUMP_LEAD_MS = 400;
+const CRIT_JUMP_LEAD_MS = 400;
 /** A crit that has not come this long after the hit was due (blocked jump, low ceiling) gives way to a plain hit. */
 export const CRIT_GIVE_UP_MS = 700;
 /** Downward speed (blocks per tick) that counts as falling. */
@@ -34,7 +34,7 @@ export interface MeleeInput {
   crits: boolean;
 }
 
-export type MeleeMove = "swing" | "crit" | "jump" | "wait";
+type MeleeMove = "swing" | "crit" | "jump" | "wait";
 
 /** What the hand does now: a plain swing, a critical swing, a jump to set one up, or nothing. */
 export function meleePlan(i: MeleeInput): MeleeMove {

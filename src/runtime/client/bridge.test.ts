@@ -155,7 +155,6 @@ describe("game_reload over the script debugger", () => {
       sharedComMojang: dir,
       userComMojang: dir,
       logsDir: join(dir, "logs"),
-      passesArgs: false,
       wine: false,
       preview: false,
     } as unknown as ClientInstall;

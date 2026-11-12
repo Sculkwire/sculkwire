@@ -1,16 +1,17 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
-import type { CliCommand } from "../../core/cli.ts";
+import { err, out, type CliCommand } from "../../core/cli.ts";
 import { ExitCode, exitCodeFor, formatDiagnostic, summarize } from "../../core/diagnostic.ts";
+import { errorMessage, UsageError } from "../../core/errors.ts";
 import { bench } from "./bench/cli.ts";
 import { bridge, WORLD_WAIT_MAX_S } from "./bridge.ts";
 import { clientDiagnostics, indexProjectPacks, readSince } from "./contentlog.ts";
-import { findInstall, findInstalls, type ClientInstall } from "../../gamefiles/install.ts";
+import { findInstall, findInstalls, pickInstall, type ClientInstall } from "../../gamefiles/install.ts";
 import { gamePids, readLaunchState } from "./launcher.ts";
 import { listWorlds } from "./world.ts";
 
-function out(json: boolean, value: unknown, text: string): void {
-  process.stdout.write(json ? `${JSON.stringify(value, null, 2)}\n` : `${text}\n`);
+function print(json: boolean, value: unknown, text: string): void {
+  out(json ? JSON.stringify(value, null, 2) : text);
 }
 
 const status: CliCommand = {
@@ -19,7 +20,7 @@ const status: CliCommand = {
   async run(args) {
     const { values } = parseArgs({ args, options: { json: { type: "boolean" } } });
     const installs = await findInstalls();
-    const install = await findInstall();
+    const install = pickInstall(installs);
     const state = await readLaunchState();
     const pids = await gamePids(install);
     const worlds = await listWorlds(install);
@@ -27,7 +28,7 @@ const status: CliCommand = {
     const describe = (i: ClientInstall) =>
       `${i.label}: ${i.version ?? "version unknown"}${i.preview ? " preview" : ""}, ` +
       `${i.launch ? "sculkwire launches it" : "you start the game"}, data ${i.appData}`;
-    out(!!values.json, value, [
+    print(!!values.json, value, [
       `using ${describe(install)}`,
       ...installs.filter((i) => i.appData !== install.appData).map((i) => `also found ${describe(i)}`),
       `running: ${pids.length > 0 ? `yes (pid ${pids.join(", ")}${state ? `, ${state.mode}` : ""})` : "no"}`,
@@ -47,7 +48,7 @@ const log: CliCommand = {
     const packs = values.project ? await indexProjectPacks(values.project, install.sharedComMojang) : [];
     const diagnostics = clientDiagnostics(text, packs);
     const s = summarize(diagnostics);
-    out(!!values.json, { diagnostics, summary: s }, [...diagnostics.map(formatDiagnostic), `${s.errors} error(s), ${s.warnings} warning(s)`].join("\n"));
+    print(!!values.json, { diagnostics, summary: s }, [...diagnostics.map(formatDiagnostic), `${s.errors} error(s), ${s.warnings} warning(s)`].join("\n"));
     return exitCodeFor(diagnostics);
   },
 };
@@ -71,22 +72,17 @@ const check: CliCommand = {
       },
     });
     const project = positionals[0];
-    if (!project) {
-      process.stderr.write(`${this.summary}\n`);
-      return ExitCode.usage;
+    if (!project) throw new UsageError(this.summary);
+    const display = values.display;
+    if (display !== undefined && display !== "window" && display !== "headless" && display !== "desktop") {
+      throw new UsageError("--display must be window, headless or desktop");
     }
-    process.stderr.write("launching the client (1-2 min)...\n");
+    const worldWait = values["world-wait"] === undefined ? undefined : Number(values["world-wait"]);
+    if (worldWait !== undefined && !(Number.isInteger(worldWait) && worldWait >= 10 && worldWait <= WORLD_WAIT_MAX_S)) {
+      throw new UsageError(`--world-wait must be whole seconds from 10 to ${WORLD_WAIT_MAX_S}`);
+    }
+    err("launching the client (1-2 min)...");
     try {
-      const display = values.display;
-      if (display !== undefined && display !== "window" && display !== "headless" && display !== "desktop") {
-        process.stderr.write(`--display must be window, headless or desktop\n`);
-        return ExitCode.usage;
-      }
-      const worldWait = values["world-wait"] === undefined ? undefined : Number(values["world-wait"]);
-      if (worldWait !== undefined && !(Number.isInteger(worldWait) && worldWait >= 10 && worldWait <= WORLD_WAIT_MAX_S)) {
-        process.stderr.write(`--world-wait must be whole seconds from 10 to ${WORLD_WAIT_MAX_S}\n`);
-        return ExitCode.usage;
-      }
       const st = await bridge.start({
         project,
         ...(display ? { mode: display } : {}),
@@ -94,18 +90,18 @@ const check: CliCommand = {
         betaApis: !!values["beta-apis"],
         ...(worldWait !== undefined ? { timeoutMs: worldWait * 1000 } : {}),
       });
-      process.stderr.write(`in world ${st.world}; debugger ${st.debugger.attached ? "attached" : "not attached"}, /connect clients ${st.connect.clients}\n`);
+      err(`in world ${st.world}; debugger ${st.debugger.attached ? "attached" : "not attached"}, /connect clients ${st.connect.clients}`);
       await sleep(Number(values.seconds ?? 10) * 1000);
       const shot = values.screenshot ? await bridge.screenshot(values.screenshot) : undefined;
       const { diagnostics } = await bridge.logs({ printSeq: 0 });
       const s = summarize(diagnostics);
-      out(!!values.json, { status: st, diagnostics, summary: s, screenshot: shot }, [
+      print(!!values.json, { status: st, diagnostics, summary: s, screenshot: shot }, [
         ...diagnostics.map(formatDiagnostic),
         `${s.errors} error(s), ${s.warnings} warning(s)${shot ? `; screenshot ${shot.path}` : ""}`,
       ].join("\n"));
       return exitCodeFor(diagnostics);
-    } catch (err) {
-      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    } catch (e) {
+      err(errorMessage(e));
       return ExitCode.usage;
     } finally {
       await bridge.stop();
@@ -118,7 +114,7 @@ const stop: CliCommand = {
   summary: "Stop the client and restore the options.txt keys sculkwire changed",
   async run() {
     const r = await bridge.stop();
-    process.stdout.write(`${r.stopped ? "stopped" : `not stopped: ${r.message}`}\n`);
+    out(r.stopped ? "stopped" : `not stopped: ${r.message}`);
     return r.stopped ? ExitCode.ok : ExitCode.usage;
   },
 };

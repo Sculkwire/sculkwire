@@ -16,57 +16,22 @@
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { CliCommand } from "../../core/cli.ts";
+import { err, type CliCommand } from "../../core/cli.ts";
 import { ExitCode } from "../../core/diagnostic.ts";
-import { bridge, HelperQueryError } from "../client/bridge.ts";
-import {
-  engine,
-  isSetupFailure,
-  type EngineFailure,
-  type EngineFailureReason,
-  type EngineResult,
-  type EngineSession,
-} from "./engine.ts";
-import { dimensionName, dimensionParam, dimensionSchema, itemSlotSchema, screenAct } from "./workstation.ts";
-
-/** A container walk touches every slot; a craft runs the game's own recipe request. Both deserve more than 15 s. */
-const CONTAINER_TIMEOUT_MS = 20_000;
-const CRAFT_TIMEOUT_MS = 60_000;
+import { errorMessage } from "../../core/errors.ts";
+import { ok } from "../../core/mcp.ts";
+import { failed, oneShot, parseCommandLine, printJson, stringOption } from "./cliutil.ts";
+import type { ScriptRoute } from "./deps.ts";
+import { dimensionName, dimensionParam, dimensionSchema } from "./dimension.ts";
+import { engine, type EngineSession } from "./engine.ts";
+import { failureSchema, invalid, malformed, type EngineFailure, type EngineFailureReason, type EngineResult } from "./failure.ts";
+import { itemName, itemSlotSchema, parseSlot, parseSlots, type Slot } from "./slot.ts";
+import { failureResult, invalidParamsResult } from "./toolresult.ts";
+import { finiteOrUndefined, integerOrUndefined, isPlainObject } from "./wire.ts";
+import { screenAct } from "./workstation.ts";
 
 /** Where an answer came from: the agent's own reads, or the helper pack's Script API components. */
 export type InventorySource = "engine" | "script";
-
-/** One enchantment on an item: the game's `minecraft:` id and its level (1 = I). */
-export interface ItemEnchantment {
-  id: string;
-  level: number;
-}
-
-/** A durability-bearing item: `damage` points taken out of `max`. */
-export interface ItemDurability {
-  damage: number;
-  max: number;
-}
-
-/**
- * One inventory slot's contents. `item` is always namespaced; `enchantments` is always present (empty when the item
- * has none) so a reader never has to tell "no enchantments" from "not reported". `contents` holds what is inside a
- * bundle or a shulker box, when the engine can read it.
- */
-export interface ItemSlot {
-  item: string;
-  count: number;
-  data?: number;
-  name?: string;
-  durability?: ItemDurability;
-  enchantments: ItemEnchantment[];
-  lore?: string[];
-  /** What a bundle or a shulker box item holds, in the slot shape the contract uses everywhere. */
-  contents?: Slot[];
-}
-
-/** A slot, or null when it is empty. */
-export type Slot = ItemSlot | null;
 
 export interface ArmorSlots {
   head: Slot;
@@ -166,147 +131,16 @@ export interface CraftRequest {
   table?: boolean;
 }
 
-function invalid(messageText: string): EngineFailure {
-  return { ok: false, code: -32602, reason: "invalid_params", message: messageText };
-}
-
-/** The agent answered with a shape this client does not know, so the value cannot be trusted. */
-function malformed(method: string, value: unknown): EngineFailure {
-  return { ok: false, code: -32000, reason: "protocol", message: `${method} answered ${JSON.stringify(value)}` };
-}
-
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function finite(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function whole(value: unknown): number | undefined {
-  const n = finite(value);
-  return n !== undefined && Number.isInteger(n) ? n : undefined;
-}
-
-/** `minecraft:` for an id written without a namespace of its own (`oak_planks`). */
-export function itemId(raw: string): string {
-  const id = raw.trim();
-  return id.includes(":") ? id : `minecraft:${id}`;
-}
-
-/** An item id on a command line or in a grid, or undefined when it is empty. */
-function itemName(raw: unknown): string | undefined {
-  if (typeof raw !== "string") return undefined;
-  const id = raw.trim();
-  return id ? itemId(id) : undefined;
-}
-
-function durabilityOf(raw: unknown): ItemDurability | undefined {
-  if (!isRecord(raw)) return undefined;
-  const damage = finite(raw.damage);
-  const max = finite(raw.max);
-  // A maximum is what gives damage meaning; without it the pair is not reported.
-  if (damage === undefined || max === undefined || max < 1) return undefined;
-  return { damage: Math.min(Math.max(0, Math.round(damage)), Math.round(max)), max: Math.round(max) };
-}
-
-/**
- * Bedrock's numeric enchantment ids (the order the game keeps in item data and the network protocol), indexed by
- * id. The names are the Script API's `minecraft:` enchantment type ids.
- */
-const ENCHANTMENT_IDS = [
-  "protection", "fire_protection", "feather_falling", "blast_protection", "projectile_protection", "thorns",
-  "respiration", "depth_strider", "aqua_affinity", "sharpness", "smite", "bane_of_arthropods", "knockback",
-  "fire_aspect", "looting", "efficiency", "silk_touch", "unbreaking", "fortune", "power", "punch", "flame",
-  "infinity", "luck_of_the_sea", "lure", "frost_walker", "mending", "binding", "vanishing", "impaling", "riptide",
-  "loyalty", "channeling", "multishot", "piercing", "quick_charge", "soul_speed", "swift_sneak", "wind_burst",
-  "density", "breach",
-] as const;
-
-/** A numeric enchantment id's name; an id past the table reads `minecraft:unknown_<n>` so the level is not lost. */
-export function enchantmentName(id: number): string {
-  return `minecraft:${ENCHANTMENT_IDS[id] ?? `unknown_${id}`}`;
-}
-
-/**
- * The game's enchantment shape (`{id, level}`, `id` numeric or a name), and the Script API's (`{type: {id}, level}`).
- */
-export function enchantmentsOf(raw: unknown): ItemEnchantment[] | undefined {
-  if (raw === undefined || raw === null) return [];
-  if (!Array.isArray(raw)) return undefined;
-  const out: ItemEnchantment[] = [];
-  for (const entry of raw) {
-    if (!isRecord(entry)) continue;
-    const numeric = typeof entry.id === "number" ? whole(entry.id) : undefined;
-    const id =
-      numeric !== undefined && numeric >= 0
-        ? enchantmentName(numeric)
-        : (itemName(entry.id) ??
-          (typeof entry.type === "string" ? itemName(entry.type) : isRecord(entry.type) ? itemName(entry.type.id) : undefined));
-    if (!id) continue;
-    const level = whole(entry.level) ?? 1;
-    out.push({ id, level: Math.max(1, level) });
-  }
-  return out;
-}
-
-function loreOf(raw: unknown): string[] | undefined {
-  if (raw === undefined || raw === null) return [];
-  if (!Array.isArray(raw)) return undefined;
-  return raw.filter((line): line is string => typeof line === "string" && line.length > 0);
-}
-
-/** A slot: null is empty, undefined is a shape this client cannot read. */
-export function parseSlot(raw: unknown): Slot | undefined {
-  if (raw === null) return null;
-  if (!isRecord(raw)) return undefined;
-  const item = itemName(raw.item);
-  if (!item) return undefined;
-  const count = raw.count === undefined ? 1 : whole(raw.count);
-  if (count === undefined || count < 1) return undefined;
-  const enchantments = enchantmentsOf(raw.enchantments);
-  const durability = durabilityOf(raw.durability);
-  const lore = loreOf(raw.lore);
-  if (!enchantments || !lore) return undefined;
-  const slot: ItemSlot = { item, count, enchantments };
-  const data = whole(raw.data);
-  if (data !== undefined && data >= 0) slot.data = data;
-  if (typeof raw.name === "string" && raw.name.trim()) slot.name = raw.name;
-  if (durability) slot.durability = durability;
-  if (lore.length) slot.lore = lore;
-  if (raw.contents !== undefined) {
-    const contents = parseSlots(raw.contents);
-    if (!contents) return undefined;
-    slot.contents = contents;
-  }
-  return slot;
-}
-
-export function parseSlots(raw: unknown): Slot[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
-  const out: Slot[] = [];
-  for (const entry of raw) {
-    const slot = parseSlot(entry);
-    if (slot === undefined) return undefined;
-    out.push(slot);
-  }
-  return out;
-}
-
 export function parseInventory(raw: unknown): PlayerInventory | undefined {
-  if (!isRecord(raw)) return undefined;
+  if (!isPlainObject(raw)) return undefined;
   // Both sources count from 0 (the engine and `selectedSlotIndex`); the result counts hotbar slots 1 to 9.
-  const index = raw.selectedSlot === undefined ? 0 : whole(raw.selectedSlot);
+  const index = raw.selectedSlot === undefined ? 0 : integerOrUndefined(raw.selectedSlot);
   if (index === undefined || index < 0) return undefined;
   const selectedSlot = index + 1;
   const hotbar = parseSlots(raw.hotbar);
   const inventory = parseSlots(raw.inventory);
   if (!hotbar || !inventory) return undefined;
-  const armor = isRecord(raw.armor) ? raw.armor : {};
+  const armor = isPlainObject(raw.armor) ? raw.armor : {};
   const slot = (value: unknown): Slot | undefined => (value === undefined ? null : parseSlot(value));
   const head = slot(armor.head);
   const chest = slot(armor.chest);
@@ -320,14 +154,14 @@ export function parseInventory(raw: unknown): PlayerInventory | undefined {
 }
 
 export function parseAttribute(raw: unknown): PlayerAttribute | undefined {
-  if (!isRecord(raw)) return undefined;
-  const current = finite(raw.current);
+  if (!isPlainObject(raw)) return undefined;
+  const current = finiteOrUndefined(raw.current);
   if (current === undefined) return undefined;
   const attribute: PlayerAttribute = { current };
-  const min = finite(raw.min);
-  const max = finite(raw.max);
-  const fallback = finite(raw.default);
-  const base = finite(raw.base);
+  const min = finiteOrUndefined(raw.min);
+  const max = finiteOrUndefined(raw.max);
+  const fallback = finiteOrUndefined(raw.default);
+  const base = finiteOrUndefined(raw.base);
   if (min !== undefined) attribute.min = min;
   if (max !== undefined) attribute.max = max;
   if (fallback !== undefined) attribute.default = fallback;
@@ -339,14 +173,14 @@ export function parseAttribute(raw: unknown): PlayerAttribute | undefined {
  * The agent answers the derived `armor` and `armorToughness` as bare numbers (`null` when the game's own function
  * cannot value the worn pieces); they become `{current}` like the helper pack's, and a `null` is left out.
  */
-const DERIVED_ATTRIBUTES: Readonly<Record<string, true>> = { armor: true, armorToughness: true };
+const DERIVED_ATTRIBUTES: ReadonlySet<string> = new Set(["armor", "armorToughness"]);
 
 export function parseAttributes(raw: unknown): PlayerAttributes | undefined {
-  if (!isRecord(raw)) return undefined;
+  if (!isPlainObject(raw)) return undefined;
   const out: PlayerAttributes = {};
   for (const [name, value] of Object.entries(raw)) {
-    if (DERIVED_ATTRIBUTES[name] && (value === null || typeof value === "number")) {
-      const current = finite(value);
+    if (DERIVED_ATTRIBUTES.has(name) && (value === null || typeof value === "number")) {
+      const current = finiteOrUndefined(value);
       if (current !== undefined) out[name] = { current };
       continue;
     }
@@ -359,10 +193,10 @@ export function parseAttributes(raw: unknown): PlayerAttributes | undefined {
 
 /** A container answer: `slots` is made exactly as long as the game's `size`, so a reader can index it. */
 export function parseContainer(raw: unknown): ContainerView | undefined {
-  if (!isRecord(raw)) return undefined;
+  if (!isPlainObject(raw)) return undefined;
   const slots = parseSlots(raw.slots);
   if (!slots) return undefined;
-  const size = whole(raw.size) ?? slots.length;
+  const size = integerOrUndefined(raw.size) ?? slots.length;
   if (size < 0) return undefined;
   const block = itemName(raw.block) ?? null;
   if (slots.length > size) slots.length = size;
@@ -371,7 +205,7 @@ export function parseContainer(raw: unknown): ContainerView | undefined {
 }
 
 export function parseOpenContainer(raw: unknown): OpenContainer | undefined {
-  if (!isRecord(raw)) return undefined;
+  if (!isPlainObject(raw)) return undefined;
   const screen = typeof raw.screen === "string" ? raw.screen.trim() : "";
   if (!screen) return undefined;
   const slots = parseSlots(raw.slots);
@@ -383,7 +217,7 @@ export function parseOpenContainer(raw: unknown): OpenContainer | undefined {
 }
 
 function parseRecipe(raw: unknown): CraftRecipe | undefined {
-  if (!isRecord(raw)) return undefined;
+  if (!isPlainObject(raw)) return undefined;
   const id = typeof raw.id === "string" ? raw.id.trim() : "";
   if (!id) return undefined;
   const type = typeof raw.type === "string" && raw.type.trim() ? raw.type.trim() : "unknown";
@@ -393,7 +227,7 @@ function parseRecipe(raw: unknown): CraftRecipe | undefined {
 
 /** `craft.match`: a null result is a real answer (nothing matches), so the key itself must be there. */
 export function parseCraftMatch(raw: unknown): CraftMatch | undefined {
-  if (!isRecord(raw) || raw.result === undefined) return undefined;
+  if (!isPlainObject(raw) || raw.result === undefined) return undefined;
   const result = parseSlot(raw.result);
   if (result === undefined) return undefined;
   const recipe = raw.recipe === undefined ? null : raw.recipe === null ? null : parseRecipe(raw.recipe);
@@ -461,7 +295,6 @@ export function craftMatchParams(request: CraftRequest): Record<string, unknown>
   return { ingredients, ...table };
 }
 
-/** `player.attributes`: every attribute the player has, plus the armour values the game derives. */
 export async function playerAttributes(session: EngineSession = engine): Promise<EngineResult<PlayerAttributes>> {
   const result = await session.call<unknown>("player.attributes", {});
   if (!result.ok) return result;
@@ -469,7 +302,6 @@ export async function playerAttributes(session: EngineSession = engine): Promise
   return attributes ? { ok: true, value: attributes } : malformed("player.attributes", result.value);
 }
 
-/** `player.inventory`: hotbar, main inventory, armour, offhand and cursor stack. */
 export async function playerInventory(session: EngineSession = engine): Promise<EngineResult<PlayerInventory>> {
   const result = await session.call<unknown>("player.inventory", {});
   if (!result.ok) return result;
@@ -481,25 +313,23 @@ export async function playerInventory(session: EngineSession = engine): Promise<
 export async function containerGet(at: BlockRef, session: EngineSession = engine): Promise<EngineResult<ContainerView>> {
   const params = blockParams(at);
   if (typeof params === "string") return invalid(params);
-  const result = await session.call<unknown>("container.get", params, { timeoutMs: CONTAINER_TIMEOUT_MS });
+  const result = await session.call<unknown>("container.get", params);
   if (!result.ok) return result;
   const view = parseContainer(result.value);
   return view ? { ok: true, value: view } : malformed("container.get", result.value);
 }
 
-/** `container.open`: the container screen the player has open now, plus their own inventory. */
 export async function containerOpen(session: EngineSession = engine): Promise<EngineResult<OpenContainer>> {
-  const result = await session.call<unknown>("container.open", {}, { timeoutMs: CONTAINER_TIMEOUT_MS });
+  const result = await session.call<unknown>("container.open", {});
   if (!result.ok) return result;
   const view = parseOpenContainer(result.value);
   return view ? { ok: true, value: view } : malformed("container.open", result.value);
 }
 
-/** `craft.match`: what the game's own recipe lookup makes of a grid or an ingredient list. */
 export async function craftMatch(request: CraftRequest, session: EngineSession = engine): Promise<EngineResult<CraftMatch>> {
   const params = craftMatchParams(request);
   if (typeof params === "string") return invalid(params);
-  const result = await session.call<unknown>("craft.match", params, { timeoutMs: CRAFT_TIMEOUT_MS });
+  const result = await session.call<unknown>("craft.match", params);
   if (!result.ok) return result;
   const match = parseCraftMatch(result.value);
   return match ? { ok: true, value: match } : malformed("craft.match", result.value);
@@ -536,7 +366,7 @@ function blockParams(at: BlockRef): Record<string, unknown> | string {
  * or the agent this session attached is gone: unloaded, or the game restarted), or an older agent does not have
  * these methods. All go to the helper pack.
  */
-const SCRIPT_FALLBACK: Readonly<Partial<Record<EngineFailureReason, boolean>>> = { not_attached: true, disconnected: true, unknown_method: true };
+const SCRIPT_FALLBACK: ReadonlySet<EngineFailureReason> = new Set(["not_attached", "disconnected", "unknown_method"]);
 
 /** The note a helper-pack answer carries: which agent failure sent the call there. */
 function fallbackNote(failure: EngineFailure): string {
@@ -550,81 +380,61 @@ function bothFailed(agentFailure: EngineFailure | undefined, err: unknown): Engi
     ok: false,
     code: -32000,
     reason: agentFailure?.reason === "disconnected" ? "disconnected" : "not_attached",
-    message: `no agent answered and the helper pack could not answer${agent}: ${messageOf(err)}`,
+    message: `no agent answered and the helper pack could not answer${agent}: ${errorMessage(err)}`,
   };
 }
 
-function scriptInventory(agentFailure?: EngineFailure): Promise<EngineResult<PlayerInventoryState>> {
-  return (async () => {
-    try {
-      const raw = await bridge.query("inventory");
-      if (!isRecord(raw)) return malformed("helper pack inventory", raw);
-      const inventory = parseInventory(raw.inventory);
-      const attributes = raw.attributes === undefined ? {} : parseAttributes(raw.attributes);
-      if (!inventory) return malformed("helper pack inventory", raw.inventory);
-      if (!attributes) return malformed("helper pack attributes", raw.attributes);
-      return { ok: true, value: { source: "script", ...(agentFailure ? { note: fallbackNote(agentFailure) } : {}), attributes, inventory } };
-    } catch (err) {
-      return bothFailed(agentFailure, err);
-    }
-  })();
+async function scriptInventory(query: ScriptRoute["query"], agentFailure?: EngineFailure): Promise<EngineResult<PlayerInventoryState>> {
+  try {
+    const raw = await query("inventory");
+    if (!isPlainObject(raw)) return malformed("helper pack inventory", raw);
+    const inventory = parseInventory(raw.inventory);
+    const attributes = raw.attributes === undefined ? {} : parseAttributes(raw.attributes);
+    if (!inventory) return malformed("helper pack inventory", raw.inventory);
+    if (!attributes) return malformed("helper pack attributes", raw.attributes);
+    return { ok: true, value: { source: "script", ...(agentFailure ? { note: fallbackNote(agentFailure) } : {}), attributes, inventory } };
+  } catch (err) {
+    return bothFailed(agentFailure, err);
+  }
 }
 
-function scriptContainer(at: BlockRef, agentFailure?: EngineFailure): Promise<EngineResult<ContainerView>> {
-  return (async () => {
-    const params = blockParams(at);
-    if (typeof params === "string") return invalid(params);
-    try {
-      const raw = await bridge.query("container", params);
-      const view = parseContainer(raw);
-      if (view) return { ok: true, value: agentFailure ? { ...view, note: fallbackNote(agentFailure) } : view };
-      return malformed("helper pack container", raw);
-    } catch (err) {
-      // A block with no container is a bad request, not a missing helper: the agent answers -32602 for it too.
-      if (err instanceof HelperQueryError && (err.reason === "no_container" || err.reason === "no_block")) {
-        return { ok: false, code: -32602, reason: "invalid_params", message: messageOf(err) };
-      }
-      return bothFailed(agentFailure, err);
-    }
-  })();
+async function scriptContainer(at: BlockRef, query: ScriptRoute["query"], agentFailure?: EngineFailure): Promise<EngineResult<ContainerView>> {
+  const params = blockParams(at);
+  if (typeof params === "string") return invalid(params);
+  try {
+    const raw = await query("container", params);
+    const view = parseContainer(raw);
+    if (view) return { ok: true, value: agentFailure ? { ...view, note: fallbackNote(agentFailure) } : view };
+    return malformed("helper pack container", raw);
+  } catch (err) {
+    // A block with no container is a bad request, not a missing helper: the agent answers -32602 for it too.
+    const reason = (err as { reason?: unknown } | null)?.reason;
+    if (reason === "no_container" || reason === "no_block") return invalid(errorMessage(err));
+    return bothFailed(agentFailure, err);
+  }
 }
 
-/** Attributes and inventory: the agent, else the helper pack. `source` says which answered. */
-export async function readPlayerInventory(session: EngineSession = engine): Promise<EngineResult<PlayerInventoryState>> {
+/** Attributes and inventory: the agent, else the helper pack (`query`). `source` says which answered. */
+export async function readPlayerInventory(
+  query: ScriptRoute["query"],
+  session: EngineSession = engine,
+): Promise<EngineResult<PlayerInventoryState>> {
   const inventory = await playerInventory(session);
-  if (!inventory.ok) return SCRIPT_FALLBACK[inventory.reason] ? scriptInventory(inventory) : inventory;
+  if (!inventory.ok) return SCRIPT_FALLBACK.has(inventory.reason) ? scriptInventory(query, inventory) : inventory;
   const attributes = await playerAttributes(session);
   if (!attributes.ok) return attributes;
   return { ok: true, value: { source: "engine", attributes: attributes.value, inventory: inventory.value } };
 }
 
-/** `container.get`: the agent, else the helper pack's block inventory component. */
-export async function readContainer(at: BlockRef, session: EngineSession = engine): Promise<EngineResult<ContainerView>> {
+/** `container.get`: the agent, else the helper pack's block inventory component (`query`). */
+export async function readContainer(
+  at: BlockRef,
+  query: ScriptRoute["query"],
+  session: EngineSession = engine,
+): Promise<EngineResult<ContainerView>> {
   const result = await containerGet(at, session);
-  if (result.ok || !SCRIPT_FALLBACK[result.reason]) return result;
-  return scriptContainer(at, result);
-}
-
-/* -------------------------------------------------------------------------------------------------------------- */
-/* MCP                                                                                                             */
-/* -------------------------------------------------------------------------------------------------------------- */
-
-type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
-type ToolResult = { content: Content[]; structuredContent?: Record<string, unknown>; isError?: boolean };
-
-function ok(text: string, structured: object): ToolResult {
-  return { content: [{ type: "text", text }], structuredContent: { ...structured } };
-}
-
-function failureOf(failure: EngineFailure): ToolResult {
-  const anchor = failure.anchor ? ` anchor ${failure.anchor}` : "";
-  const text = `${failure.reason} (${failure.code})${anchor}: ${failure.message}`;
-  return { content: [{ type: "text", text }], structuredContent: { ...failure }, isError: true };
-}
-
-function failedWith(err: unknown): ToolResult {
-  const text = messageOf(err);
-  return { content: [{ type: "text", text }], structuredContent: { ok: false, reason: "prerequisite", message: text }, isError: true };
+  if (result.ok || !SCRIPT_FALLBACK.has(result.reason)) return result;
+  return scriptContainer(at, query, result);
 }
 
 /** A short summary of an inventory: how much of it is filled, and the slot the hotbar points at. */
@@ -655,14 +465,6 @@ function craftMatchText(match: CraftMatch): string {
 function schemas() {
   // A slot in a container and a slot in a screen are one shape, so both schemas are built from the same definition.
   const maybeSlot = itemSlotSchema.nullable();
-
-  const failureSchema = {
-    ok: z.boolean(),
-    code: z.number().optional(),
-    reason: z.string().optional(),
-    anchor: z.string().optional(),
-    message: z.string().optional(),
-  };
 
   const playerInventorySchema = {
     ...failureSchema,
@@ -714,7 +516,7 @@ function schemas() {
 }
 
 /** `player_inventory`, `container` and `craft`. Called by the engine feature's `register`. */
-export function registerInventoryTools(server: McpServer): void {
+export function registerInventoryTools(server: McpServer, script: ScriptRoute): void {
   const { playerInventorySchema, containerSchema, craftSchema } = schemas();
 
   server.registerTool(
@@ -732,15 +534,11 @@ export function registerInventoryTools(server: McpServer): void {
       outputSchema: playerInventorySchema,
     },
     async () => {
-      try {
-        const result = await readPlayerInventory();
-        if (!result.ok) return failureOf(result);
-        const state = result.value;
-        const note = state.note ? `\n${state.note}` : "";
-        return ok(`${inventoryText(state.source, state)}${note}`, { ok: true, ...state });
-      } catch (err) {
-        return failedWith(err);
-      }
+      const result = await readPlayerInventory(script.query);
+      if (!result.ok) return failureResult(result);
+      const state = result.value;
+      const note = state.note ? `\n${state.note}` : "";
+      return ok(`${inventoryText(state.source, state)}${note}`, { ok: true, ...state });
     },
   );
 
@@ -764,29 +562,25 @@ export function registerInventoryTools(server: McpServer): void {
       outputSchema: containerSchema,
     },
     async ({ action, x, y, z: bz, dimension }) => {
-      try {
-        if (action === "open") {
-          const result = await containerOpen();
-          if (!result.ok) return failureOf(result);
-          const open = result.value;
-          const where = open.position ? ` at ${open.position.x} ${open.position.y} ${open.position.z}` : "";
-          return ok(`${open.screen}${where}: ${containerText({ block: open.block, size: open.slots.length, slots: open.slots })}`, {
-            ok: true,
-            action,
-            ...open,
-          });
-        }
-        if (x === undefined || y === undefined || bz === undefined) {
-          return failureOf(invalid("get needs x, y and z"));
-        }
-        const result = await readContainer({ x, y, z: bz, ...(dimension !== undefined ? { dimension } : {}) });
-        if (!result.ok) return failureOf(result);
-        const view = result.value;
-        const note = view.note ? `\n${view.note}` : "";
-        return ok(`${containerText(view)} at ${x} ${y} ${bz}${note}`, { ok: true, action, ...view });
-      } catch (err) {
-        return failedWith(err);
+      if (action === "open") {
+        const result = await containerOpen();
+        if (!result.ok) return failureResult(result);
+        const open = result.value;
+        const where = open.position ? ` at ${open.position.x} ${open.position.y} ${open.position.z}` : "";
+        return ok(`${open.screen}${where}: ${containerText({ block: open.block, size: open.slots.length, slots: open.slots })}`, {
+          ok: true,
+          action,
+          ...open,
+        });
       }
+      if (x === undefined || y === undefined || bz === undefined) {
+        return invalidParamsResult("get needs x, y and z");
+      }
+      const result = await readContainer({ x, y, z: bz, ...(dimension !== undefined ? { dimension } : {}) }, script.query);
+      if (!result.ok) return failureResult(result);
+      const view = result.value;
+      const note = view.note ? `\n${view.note}` : "";
+      return ok(`${containerText(view)} at ${x} ${y} ${bz}${note}`, { ok: true, action, ...view });
     },
   );
 
@@ -815,208 +609,142 @@ export function registerInventoryTools(server: McpServer): void {
       outputSchema: craftSchema,
     },
     async ({ action, grid, ingredients, table, recipe, times }) => {
-      try {
-        if (action === "match") {
-          const result = await craftMatch({
-            ...(grid !== undefined ? { grid } : {}),
-            ...(ingredients !== undefined ? { ingredients } : {}),
-            ...(table !== undefined ? { table } : {}),
-          });
-          if (!result.ok) return failureOf(result);
-          return ok(craftMatchText(result.value), { ok: true, action, ...result.value });
-        }
-        if (!recipe) return failureOf(invalid("run needs the recipe id craft match returned"));
-        const result = await craftRun(recipe, times);
-        if (!result.ok) {
-          const missing = result.reason === "not_attached" ? { ...result, message: `${result.message}. Crafting needs the agent (engine_attach)` } : result;
-          return failureOf(missing);
-        }
-        const run = result.value;
-        const made = run.result ? `${run.result.item} x${run.result.count}` : "nothing";
-        return ok(`crafted ${run.crafted} (${made}), ${run.consumed.length} stack(s) consumed`, { ok: true, action, ...run });
-      } catch (err) {
-        return failedWith(err);
+      if (action === "match") {
+        const result = await craftMatch({
+          ...(grid !== undefined ? { grid } : {}),
+          ...(ingredients !== undefined ? { ingredients } : {}),
+          ...(table !== undefined ? { table } : {}),
+        });
+        if (!result.ok) return failureResult(result);
+        return ok(craftMatchText(result.value), { ok: true, action, ...result.value });
       }
+      if (!recipe) return invalidParamsResult("run needs the recipe id craft match returned");
+      const result = await craftRun(recipe, times);
+      if (!result.ok) {
+        const missing = result.reason === "not_attached" ? { ...result, message: `${result.message}. Crafting needs the agent (engine_attach)` } : result;
+        return failureResult(missing);
+      }
+      const run = result.value;
+      const made = run.result ? `${run.result.item} x${run.result.count}` : "nothing";
+      return ok(`crafted ${run.crafted} (${made}), ${run.consumed.length} stack(s) consumed`, { ok: true, action, ...run });
     },
   );
-}
-
-/* -------------------------------------------------------------------------------------------------------------- */
-/* CLI                                                                                                             */
-/* -------------------------------------------------------------------------------------------------------------- */
-
-function out(value: unknown): void {
-  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
-}
-
-function err(text: string): void {
-  process.stderr.write(`${text}\n`);
-}
-
-/** The failure as JSON, and the exit code it maps to. */
-function failed(failure: EngineFailure): number {
-  out(failure);
-  const anchor = failure.anchor ? ` (anchor ${failure.anchor})` : "";
-  err(`${failure.reason}: ${failure.message}${anchor}`);
-  return isSetupFailure(failure) ? ExitCode.usage : ExitCode.findings;
-}
-
-/** One CLI call is one process, so the agent socket must not keep it alive after the answer is printed. */
-async function oneShot(body: () => Promise<number>): Promise<number> {
-  try {
-    return await body();
-  } finally {
-    engine.close();
-  }
 }
 
 const CRAFT_USAGE =
   "usage: sculk craft match --grid \"oak_planks,oak_planks,-;oak_planks,oak_planks,-\" | --ingredients oak_log,oak_log [--table] | sculk craft run <recipe> [--times N]";
 
-const playerInventoryCommand: CliCommand = {
-  name: "player inventory",
-  summary: "Player attributes and full inventory, through the agent or the helper pack's Script API fallback",
-  async run(args) {
-    return oneShot(async () => {
-      if (args.length) {
-        err("player inventory takes no arguments");
-        return ExitCode.usage;
-      }
-      try {
-        const result = await readPlayerInventory();
+/** `player inventory`, `container get` and `craft`. */
+export function inventoryCommands(script: ScriptRoute): CliCommand[] {
+  const playerInventoryCommand: CliCommand = {
+    name: "player inventory",
+    summary: "Player attributes and full inventory, through the agent or the helper pack's Script API fallback",
+    async run(args) {
+      return oneShot(async () => {
+        if (args.length) {
+          err("player inventory takes no arguments");
+          return ExitCode.usage;
+        }
+        const result = await readPlayerInventory(script.query);
         if (!result.ok) return failed(result);
-        out(result.value);
+        printJson(result.value);
         err(inventoryText(result.value.source, result.value));
         return ExitCode.ok;
-      } catch (e) {
-        const text = messageOf(e);
-        out({ ok: false, reason: "prerequisite", message: text });
-        err(text);
-        return ExitCode.usage;
-      }
-    });
-  },
-};
+      });
+    },
+  };
 
-const containerCommand: CliCommand = {
-  name: "container get",
-  summary: "What a block's container holds: container get <x> <y> <z> [--dimension overworld|nether|the_end]",
-  async run(args) {
-    return oneShot(async () => {
-      const dot = args.indexOf("--dimension");
-      const coords = dot === -1 ? args : args.slice(0, dot);
-      const dimension = dot === -1 ? undefined : args[dot + 1];
-      if (coords.length !== 3 || (dot !== -1 && (!dimension || !dimensionName(dimension)))) {
-        err("usage: sculk container get <x> <y> <z> [--dimension overworld|nether|the_end]");
-        return ExitCode.usage;
-      }
-      const [cx, cy, cz] = coords.map(Number);
-      const at = { x: cx ?? NaN, y: cy ?? NaN, z: cz ?? NaN };
-      if (!Number.isInteger(at.x) || !Number.isInteger(at.y) || !Number.isInteger(at.z)) {
-        err("x, y and z must be whole block coordinates");
-        return ExitCode.usage;
-      }
-      try {
-        const result = await readContainer({ ...at, ...(dimension ? { dimension } : {}) });
+  const containerCommand: CliCommand = {
+    name: "container get",
+    summary: "What a block's container holds: container get <x> <y> <z> [--dimension overworld|nether|the_end]",
+    async run(args) {
+      return oneShot(async () => {
+        const line = parseCommandLine(args, { dimension: { type: "string" } });
+        if (!line) return ExitCode.usage;
+        const dimension = stringOption(line, "dimension");
+        if (line.positionals.length !== 3 || (dimension !== undefined && !dimensionName(dimension))) {
+          err("usage: sculk container get <x> <y> <z> [--dimension overworld|nether|the_end]");
+          return ExitCode.usage;
+        }
+        const [x, y, z] = line.positionals.map(Number) as [number, number, number];
+        if (!Number.isInteger(x) || !Number.isInteger(y) || !Number.isInteger(z)) {
+          err("x, y and z must be whole block coordinates");
+          return ExitCode.usage;
+        }
+        const result = await readContainer({ x, y, z, ...(dimension ? { dimension } : {}) }, script.query);
         if (!result.ok) return failed(result);
-        out(result.value);
+        printJson(result.value);
         err(containerText(result.value));
         return ExitCode.ok;
-      } catch (e) {
-        const text = messageOf(e);
-        out({ ok: false, reason: "prerequisite", message: text });
-        err(text);
-        return ExitCode.usage;
-      }
-    });
-  },
-};
+      });
+    },
+  };
 
-const craftCommand: CliCommand = {
-  name: "craft",
-  summary:
-    "Match or run a crafting recipe through the game's own recipe lookup (craft run is screen act craft): " +
-    "craft match|run (needs the agent)",
-  async run(args) {
-    return oneShot(async () => {
-      const [action, ...rest] = args;
-      if (action === "match") {
-        let grid: (string | null)[][] | undefined;
-        let ingredients: string[] | undefined;
-        let table = false;
-        for (let i = 0; i < rest.length; i++) {
-          const arg = rest[i];
-          if (arg === undefined) break;
-          if (arg === "--table") table = true;
-          else if (arg === "--grid" || arg.startsWith("--grid=")) {
-            const text = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : rest[++i];
-            if (!text) {
-              err("--grid needs rows of item ids");
-              return ExitCode.usage;
-            }
-            const parsed = parseCraftGrid(text);
-            if (!parsed) {
-              err(`cannot read the grid ${JSON.stringify(text)}: rows of up to 3 item ids, "-" for an empty cell`);
-              return ExitCode.usage;
-            }
-            grid = parsed;
-          } else if (arg === "--ingredients" || arg.startsWith("--ingredients=")) {
-            const text = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : rest[++i];
-            if (!text) {
-              err("--ingredients needs a comma-separated list of item ids");
-              return ExitCode.usage;
-            }
-            ingredients = text
-              .split(",")
-              .map((id) => id.trim())
-              .filter((id) => id.length > 0);
-          } else {
+  const craftCommand: CliCommand = {
+    name: "craft",
+    summary:
+      "Match or run a crafting recipe through the game's own recipe lookup (craft run is screen act craft): " +
+      "craft match|run (needs the agent)",
+    async run(args) {
+      return oneShot(async () => {
+        const [action, ...rest] = args;
+        if (action === "match") {
+          const line = parseCommandLine(rest, { grid: { type: "string" }, ingredients: { type: "string" }, table: { type: "boolean" } });
+          if (!line) return ExitCode.usage;
+          if (line.positionals.length) {
             err(CRAFT_USAGE);
             return ExitCode.usage;
           }
-        }
-        try {
+          const gridText = stringOption(line, "grid");
+          const ingredientsText = stringOption(line, "ingredients");
+          let grid: (string | null)[][] | undefined;
+          if (gridText !== undefined) {
+            if (!gridText) {
+              err("--grid needs rows of item ids");
+              return ExitCode.usage;
+            }
+            grid = parseCraftGrid(gridText);
+            if (!grid) {
+              err(`cannot read the grid ${JSON.stringify(gridText)}: rows of up to 3 item ids, "-" for an empty cell`);
+              return ExitCode.usage;
+            }
+          }
+          if (ingredientsText !== undefined && !ingredientsText) {
+            err("--ingredients needs a comma-separated list of item ids");
+            return ExitCode.usage;
+          }
+          const ingredients = ingredientsText
+            ?.split(",")
+            .map((id) => id.trim())
+            .filter((id) => id.length > 0);
+          const table = line.values.table === true;
           const result = await craftMatch({ ...(grid ? { grid } : {}), ...(ingredients ? { ingredients } : {}), ...(table ? { table } : {}) });
           if (!result.ok) return failed(result);
-          out(result.value);
+          printJson(result.value);
           err(craftMatchText(result.value));
           return ExitCode.ok;
-        } catch (e) {
-          const text = messageOf(e);
-          out({ ok: false, reason: "prerequisite", message: text });
-          err(text);
-          return ExitCode.usage;
         }
-      }
-      if (action === "run") {
-        const recipe = rest[0];
-        const timesAt = rest.indexOf("--times");
-        const times = timesAt === -1 ? undefined : Number(rest[timesAt + 1]);
-        const extra = rest.filter((arg) => arg !== recipe && arg !== "--times" && String(times) !== arg);
-        if (!recipe || extra.length || (timesAt !== -1 && !Number.isInteger(times))) {
-          err(CRAFT_USAGE);
-          return ExitCode.usage;
-        }
-        try {
-          const result = await craftRun(recipe, times);
-          if (!result.ok) {
-            if (result.reason === "not_attached") err("crafting needs the agent: run sculk engine attach first");
-            return failed(result);
+        if (action === "run") {
+          const line = parseCommandLine(rest, { times: { type: "string" } });
+          if (!line) return ExitCode.usage;
+          const [recipe, ...extra] = line.positionals;
+          const timesText = stringOption(line, "times");
+          const times = timesText === undefined ? undefined : Number(timesText);
+          if (!recipe || extra.length || (times !== undefined && !Number.isInteger(times))) {
+            err(CRAFT_USAGE);
+            return ExitCode.usage;
           }
-          out(result.value);
+          const result = await craftRun(recipe, times);
+          if (!result.ok) return failed(result, "crafting needs the agent: run sculk engine attach first");
+          printJson(result.value);
           err(`crafted ${result.value.crafted}`);
           return ExitCode.ok;
-        } catch (e) {
-          const text = messageOf(e);
-          out({ ok: false, reason: "prerequisite", message: text });
-          err(text);
-          return ExitCode.usage;
         }
-      }
-      err(CRAFT_USAGE);
-      return ExitCode.usage;
-    });
-  },
-};
+        err(CRAFT_USAGE);
+        return ExitCode.usage;
+      });
+    },
+  };
 
-export const inventoryCommands: CliCommand[] = [playerInventoryCommand, containerCommand, craftCommand];
+  return [playerInventoryCommand, containerCommand, craftCommand];
+}

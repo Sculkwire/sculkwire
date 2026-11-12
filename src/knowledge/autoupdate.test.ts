@@ -1,15 +1,14 @@
 /** Data sources follow their upstream on their own: fake upstreams and a temp cache, no network. */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { backgroundDownloadsAllowed } from "../core/background.ts";
-import { calibration } from "../validate/schema.ts";
 import { isInFlight } from "./net.ts";
-import { ensureBedrockSamples } from "./samples.ts";
+import { ensureBedrockSamples, writeSamplesMarker } from "./samples.ts";
 import { formatSources, sourceStatus } from "./store.ts";
 import { CHECK_INTERVAL_MS } from "./tracked.ts";
-import { ensureTypings } from "./typings.ts";
+import { ensureTypings, writeTypingsMeta } from "./typings.ts";
 import { getPins, type PinsUpstream, readPins, settlePinsRefresh, updatePins } from "./versions.ts";
 
 const work = mkdtempSync(join(tmpdir(), "sculk-autoupdate-test-"));
@@ -98,7 +97,7 @@ describe("cached copies keep answering while a newer one is missing", () => {
     await updatePins({ now: Date.now(), upstream });
     const old = join(cache, "knowledge", "samples", "v1.26.60.5");
     mkdirSync(join(old, "metadata"), { recursive: true });
-    writeFileSync(join(old, ".sculkwire-samples.json"), JSON.stringify({ tag: "v1.26.60.5", commit: "x", parts: ["metadata"], images: false }));
+    await writeSamplesMarker(old, { tag: "v1.26.60.5", commit: "x", parts: ["metadata"], images: false });
     const r = await ensureBedrockSamples({ channel: "stable", offline: true, parts: ["metadata"] });
     expect(r).toMatchObject({ tag: "v1.26.60.5", version: "1.26.60.5", root: old });
     // An explicitly requested version is never substituted.
@@ -111,7 +110,7 @@ describe("cached copies keep answering while a newer one is missing", () => {
     await updatePins({ now: Date.now(), upstream });
     const old = join(cache, "knowledge", "samples", "v1.26.60.5");
     mkdirSync(join(old, "metadata"), { recursive: true });
-    writeFileSync(join(old, ".sculkwire-samples.json"), JSON.stringify({ tag: "v1.26.60.5", commit: "x", parts: ["metadata"], images: false }));
+    await writeSamplesMarker(old, { tag: "v1.26.60.5", commit: "x", parts: ["metadata"], images: false });
     // Online: the previous checkout answers and no checkout of the new tag is started (`checkout` runs under `single`).
     expect(await ensureBedrockSamples({ channel: "stable", parts: ["metadata"] })).toMatchObject({ tag: "v1.26.60.5" });
     expect(isInFlight("samples:v1.26.61.1")).toBe(false);
@@ -122,27 +121,11 @@ describe("cached copies keep answering while a newer one is missing", () => {
     await updatePins({ now: Date.now(), upstream });
     const prev = join(cache, "knowledge", "typings", "previous0000000");
     mkdirSync(join(prev, "node_modules", "@minecraft", "server"), { recursive: true });
-    writeFileSync(join(prev, "typings.json"), JSON.stringify({ channel: "stable", beta: false, packages: { "@minecraft/server": "1.9.0" } }));
-    writeFileSync(join(prev, ".complete"), "");
+    await writeTypingsMeta(prev, { channel: "stable", beta: false, packages: { "@minecraft/server": "1.9.0" } });
     const t = await ensureTypings({ channel: "stable", offline: true });
     expect(t).toMatchObject({ nodeModulesDir: join(prev, "node_modules"), packages: { "@minecraft/server": "1.9.0" } });
     // Requested module versions the previous install lacks are not substituted.
     await expect(ensureTypings({ channel: "stable", offline: true, modules: { "@minecraft/server": "2.0.0" } })).rejects.toThrow();
-  });
-});
-
-describe("vanilla calibration", () => {
-  it("is keyed by the schema sources, so a new rockide release recalibrates", async () => {
-    let runs = 0;
-    const files = async () => {
-      runs++;
-      return [];
-    };
-    await calibration("vanilla-id", { rockideSchemasDir: join(work, "rockide", "v1") }, files);
-    await calibration("vanilla-id", { rockideSchemasDir: join(work, "rockide", "v1") }, files);
-    expect(runs).toBe(1);
-    await calibration("vanilla-id", { rockideSchemasDir: join(work, "rockide", "v2") }, files);
-    expect(runs).toBe(2);
   });
 });
 

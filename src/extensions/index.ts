@@ -15,6 +15,7 @@ import { delimiter, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CliCommand } from "../core/cli.ts";
+import { errorMessage } from "../core/errors.ts";
 import { configDir } from "../core/paths.ts";
 import { extensionHost, type ExtensionHost } from "./host.ts";
 
@@ -37,10 +38,6 @@ export interface LoadOptions {
 
 function stderr(line: string): void {
   process.stderr.write(`${line}\n`);
-}
-
-function message(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /** Candidate directories: `SCULKWIRE_EXTENSIONS` first, then the subdirectories of `root`. */
@@ -76,7 +73,7 @@ function entryOf(dir: string): string {
   try {
     pkg = JSON.parse(readFileSync(manifest, "utf8"));
   } catch (err) {
-    throw new Error(`cannot read ${manifest}: ${message(err)}`);
+    throw new Error(`cannot read ${manifest}: ${errorMessage(err)}`);
   }
   const entry = (pkg as { sculkwire?: { extension?: unknown } } | null)?.sculkwire?.extension;
   if (typeof entry !== "string" || !entry) throw new Error(`${manifest} has no "sculkwire": { "extension": "<entry file>" }`);
@@ -115,7 +112,7 @@ export async function readExtensions(options: LoadOptions = {}): Promise<Extensi
     try {
       out.push(await loadOne(dir, host));
     } catch (err) {
-      warn(`sculkwire: extension ${dir} skipped: ${message(err)}`);
+      warn(`sculkwire: extension ${dir} skipped: ${errorMessage(err)}`);
     }
   }
   return out;
@@ -134,6 +131,6 @@ export function registerExtension(server: McpServer, ext: Extension, warn: (line
   try {
     ext.register?.(server);
   } catch (err) {
-    warn(`sculkwire: extension ${ext.name} failed to register its tools: ${message(err)}`);
+    warn(`sculkwire: extension ${ext.name} failed to register its tools: ${errorMessage(err)}`);
   }
 }

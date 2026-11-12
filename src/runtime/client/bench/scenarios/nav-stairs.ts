@@ -1,5 +1,5 @@
-import { blocks, course } from "./nav-kit.ts";
-import type { Vec3 } from "../../player.ts";
+import { blocks, course } from "../navkit.ts";
+import type { Vec3 } from "../../types.ts";
 
 const AREA = { radius: 16, height: 8 };
 

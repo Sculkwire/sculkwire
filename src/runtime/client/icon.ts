@@ -15,7 +15,7 @@
  */
 import { createHash } from "node:crypto";
 import { encodeFlatJpeg, type Rgb } from "./jpeg.ts";
-import type { Pixels } from "./screens.ts";
+import type { Pixels } from "./png.ts";
 
 export type { Rgb } from "./jpeg.ts";
 

@@ -4,7 +4,7 @@
  * The helper spreads each scan over game ticks, so sections are asked for nearest first in small queries that are
  * all in flight at once: the blocks around the player arrive first and planning can start before the rest.
  */
-import type { PlayerWorld, Vec3 } from "../player.ts";
+import type { PlayerWorld, Vec3 } from "../types.ts";
 
 /**
  * Block classes (the helper's `grid` query):
@@ -40,23 +40,6 @@ export function decodeRegions(text: string, sx: number, sy: number, sz: number):
   return out;
 }
 
-/** Grid built from text layers, for tests: `layers[y][z][x]`, starting at `origin`. */
-export class ArrayGrid implements BlockGrid {
-  readonly origin: Vec3;
-  readonly #layers: readonly (readonly string[])[];
-
-  constructor(layers: readonly (readonly string[])[], origin: Vec3 = { x: 0, y: 0, z: 0 }) {
-    this.#layers = layers;
-    this.origin = origin;
-  }
-
-  at(x: number, y: number, z: number): BlockClass {
-    const row = this.#layers[y - this.origin.y]?.[z - this.origin.z];
-    const c = row?.[x - this.origin.x];
-    return (c ?? "u") as BlockClass;
-  }
-}
-
 export const SECTION = 16;
 /**
  * Sections per helper query. Small queries let the nearest blocks come back after a tick or two (the helper scans
@@ -74,7 +57,7 @@ interface Section {
 const UNKNOWN = "u".charCodeAt(0);
 
 /** Statistics of the helper's scans, for the result message, the bench and tests. */
-export interface ScanStats {
+interface ScanStats {
   /** Queries answered and blocks fetched. */
   fetches: number;
   fetchedBlocks: number;

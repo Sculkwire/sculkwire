@@ -35,6 +35,20 @@ export function compareGameVersions(a: GameVersion, b: GameVersion): number {
   return a.major - b.major || a.minor - b.minor || a.patch - b.patch || (a.build ?? -1) - (b.build ?? -1);
 }
 
+/** Numeric tuples compared element-wise; a missing element counts as 0 (`[1, 21]` equals `[1, 21, 0]`). */
+export function compareTuples(a: readonly number[], b: readonly number[]): number {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] ?? 0) - (b[i] ?? 0);
+    if (d) return d;
+  }
+  return 0;
+}
+
+/** Dotted numeric versions (`1.21.60`, `0.1.4`) compared part by part. */
+export function compareDotted(a: string, b: string): number {
+  return compareTuples(a.split(".").map(Number), b.split(".").map(Number));
+}
+
 /** A concrete, resolved target: which channel and exactly which build the data describes. */
 export interface VersionTag {
   channel: Channel;

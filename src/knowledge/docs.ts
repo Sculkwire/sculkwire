@@ -8,22 +8,20 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { backgroundDownloadsAllowed } from "../core/background.ts";
 import { cacheDir } from "../core/paths.ts";
-import { type Channel, parseGameVersion } from "../core/version.ts";
+import { readJsonOr, writeJsonAtomic } from "../core/fs.ts";
+import { type Channel, compareTuples, parseGameVersion } from "../core/version.ts";
 import { fetchAndCheckout, headCommit, sparseClone } from "./git.ts";
-import { writeJsonAtomic } from "../core/fs.ts";
 import { OfflineMissingError, progress, runOk, single } from "./net.ts";
-import { chunkMarkdown, excerpt, type IndexedDoc, SearchIndex } from "./search.ts";
-import { CHECK_INTERVAL_MS, RETRY_AFTER_FAILURE_MS } from "./tracked.ts";
+import { chunkMarkdown, excerpt, type IndexedDoc, INDEX_FORMAT, SearchIndex } from "./search.ts";
+import { CHECK_INTERVAL_MS, upstreamBackoff } from "./tracked.ts";
 import { getPins, readPins } from "./versions.ts";
 
-export const DOCS_REPO = "https://github.com/MicrosoftDocs/minecraft-creator";
+const DOCS_REPO = "https://github.com/MicrosoftDocs/minecraft-creator";
 export const DOCS_ATTRIBUTION =
   "Microsoft Learn Minecraft Creator docs (MicrosoftDocs/minecraft-creator), CC-BY-4.0, https://creativecommons.org/licenses/by/4.0/";
 const DOCS_PATTERNS = ["/creator/**/*.md", "/reference-docs-metadata.json"];
 /** Superseded Script API versions; indexing them buries current results. */
 const SKIP_DIRS = ["creator/PriorScriptAPI/"];
-/** Bump when chunking or tokenization changes so persisted indexes rebuild. */
-const INDEX_FORMAT = 1;
 
 export interface DocsCheckout {
   root: string;
@@ -71,23 +69,12 @@ async function stableCommit(dir: string, stableVersion: string): Promise<{ commi
     const docsVersion = await docsVersionAt(dir, commit);
     const v = parseGameVersion(docsVersion);
     if (!v || !target) continue;
-    const cmp = v.major - target.major || v.minor - target.minor || v.patch - target.patch;
-    if (cmp <= 0) return { commit, docsVersion };
+    if (compareTuples([v.major, v.minor, v.patch], [target.major, target.minor, target.patch]) <= 0) return { commit, docsVersion };
   }
   throw new Error(`no minecraft-creator commit documents ${stableVersion} or older`);
 }
 
-async function readMarker(dir: string): Promise<Marker | undefined> {
-  try {
-    return JSON.parse(await readFile(join(dir, MARKER), "utf8")) as Marker;
-  } catch {
-    return undefined;
-  }
-}
-
-/** Per channel: when the background check last failed (per process), and checks in flight. */
-const checkFailures = new Map<Channel, number>();
-const checking = new Set<Channel>();
+const readMarker = (dir: string): Promise<Marker | undefined> => readJsonOr<Marker>(join(dir, MARKER));
 
 /** Compare `main` and the stable pin with the checkout; fetch and re-index when either moved. */
 async function checkForUpdate(channel: Channel, marker: Marker): Promise<void> {
@@ -97,7 +84,12 @@ async function checkForUpdate(channel: Channel, marker: Marker): Promise<void> {
   const stable = (await readPins())?.channels.stable.samples.version;
   const moved = head !== marker.head || (channel === "stable" && !!stable && stable !== marker.stable);
   if (!moved) {
-    await writeJsonAtomic(join(docsDir(channel), MARKER), { ...marker, checkedAt: new Date().toISOString() } satisfies Marker);
+    // Under the checkout's lock, so a refresh running at the same time is not overwritten with the older marker.
+    await single(`docs:${channel}`, async () => {
+      const checked: Marker = { ...marker, checkedAt: new Date().toISOString() };
+      await writeJsonAtomic(join(docsDir(channel), MARKER), checked);
+      return checked;
+    });
     return;
   }
   await ensureCreatorDocs({ channel, refresh: true });
@@ -146,15 +138,12 @@ export async function ensureCreatorDocs(opts: {
     return marker;
   });
   const due = !marker.checkedAt || !(Date.now() - Date.parse(marker.checkedAt) < CHECK_INTERVAL_MS);
-  const failed = checkFailures.get(opts.channel) ?? 0;
-  if (!opts.offline && due && backgroundDownloadsAllowed() && !checking.has(opts.channel) && Date.now() - failed >= RETRY_AFTER_FAILURE_MS) {
-    checking.add(opts.channel);
-    checkForUpdate(opts.channel, marker)
-      .catch((err: unknown) => {
-        checkFailures.set(opts.channel, Date.now());
-        progress(`minecraft-creator docs (${opts.channel}) update failed (${err instanceof Error ? err.message : String(err)}); keeping ${marker.docsVersion}`);
-      })
-      .finally(() => checking.delete(opts.channel));
+  if (!opts.offline && due && backgroundDownloadsAllowed()) {
+    upstreamBackoff.background(
+      `docs:${opts.channel}`,
+      () => checkForUpdate(opts.channel, marker),
+      (reason) => `minecraft-creator docs (${opts.channel}) update failed (${reason}); keeping ${marker.docsVersion}`,
+    );
   }
   const v = parseGameVersion(marker.docsVersion);
   const version =
@@ -166,9 +155,6 @@ export async function ensureCreatorDocs(opts: {
 export async function docsStatus(channel: Channel): Promise<{ commit: string; docsVersion: string; head?: string; checkedAt?: string } | undefined> {
   return readMarker(docsDir(channel));
 }
-
-// ---------------------------------------------------------------------------------------------
-// Index
 
 export interface DocChunk extends IndexedDoc {
   path: string;

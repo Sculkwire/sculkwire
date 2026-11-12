@@ -33,21 +33,16 @@
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { CliCommand } from "../../core/cli.ts";
+import { err, type CliCommand } from "../../core/cli.ts";
 import { ExitCode } from "../../core/diagnostic.ts";
-import {
-  engine,
-  isRecord,
-  isSetupFailure,
-  type EngineFailure,
-  type EngineResult,
-  type EngineSession,
-} from "./engine.ts";
-import { parseSlot, parseSlots, type Slot } from "./inventory.ts";
-
-/** Reading a screen touches every slot it shows; an act or a craft runs the game's own request. */
-const SCREEN_TIMEOUT_MS = 20_000;
-const ACT_TIMEOUT_MS = 60_000;
+import { ok, type ToolResult } from "../../core/mcp.ts";
+import { failed, oneShot, parseCommandLine, printJson, stringOption } from "./cliutil.ts";
+import { dimensionName, dimensionParam, dimensionSchema } from "./dimension.ts";
+import { engine, type EngineSession } from "./engine.ts";
+import { failureSchema, invalid, malformed, type EngineFailure, type EngineResult } from "./failure.ts";
+import { itemSlotSchema, parseSlot, parseSlots, type Slot } from "./slot.ts";
+import { failureResult, invalidParamsResult } from "./toolresult.ts";
+import { countOrUndefined, integerOrUndefined, isObjectLike, isPlainObject, nonEmptyText } from "./wire.ts";
 
 /** The faces a block can be used on, in the game's own order (0 = down, 1 = up, then north, south, west, east). */
 export const BLOCK_FACES = ["down", "up", "north", "south", "west", "east"] as const;
@@ -97,34 +92,6 @@ export const SCREEN_ACTIONS = [
   "take_result",
 ] as const;
 export type ScreenActAction = (typeof SCREEN_ACTIONS)[number];
-
-/**
- * The dimensions the agent takes by name, in the game's own numbering (`VanillaDimensions`: 0, 1, 2). The agent and the
- * helper pack both take the bare name; callers may also give the `minecraft:` id or the number `engine_player` reports.
- */
-export const DIMENSIONS = ["overworld", "nether", "the_end"] as const;
-export type Dimension = (typeof DIMENSIONS)[number];
-
-/** Every spelling a dimension input accepts: the bare name, the `minecraft:` id, or the numeric id 0, 1 or 2. */
-export const dimensionSchema = z
-  .union([z.enum([...DIMENSIONS, ...DIMENSIONS.map((name) => `minecraft:${name}` as const)]), z.number().int().min(0).max(2)])
-  .describe("dimension: overworld, nether or the_end, as the bare name, the minecraft: id or the numeric id 0, 1 or 2");
-
-/** The bare name the agent takes for a dimension input (also a numeric id in text, as the CLI passes it), or undefined. */
-export function dimensionName(value: string | number): Dimension | undefined {
-  if (typeof value === "number") return Number.isInteger(value) ? DIMENSIONS[value] : undefined;
-  const text = value.trim().toLowerCase();
-  if (/^\d+$/.test(text)) return DIMENSIONS[Number(text)];
-  const name = text.startsWith("minecraft:") ? text.slice("minecraft:".length) : text;
-  return (DIMENSIONS as readonly string[]).includes(name) ? (name as Dimension) : undefined;
-}
-
-/** The `dimension` parameter for the agent, `{}` when none is given, or why the value is not a dimension. */
-export function dimensionParam(value: string | number | undefined): { dimension?: Dimension } | string {
-  if (value === undefined || (typeof value === "string" && !value.trim())) return {};
-  const name = dimensionName(value);
-  return name ? { dimension: name } : `dimension must be overworld, nether or the_end (bare, minecraft: or 0, 1, 2), not ${value}`;
-}
 
 /** A block to use like a right click; `dimension` is a dimension (`nether`, `minecraft:nether` or 1). */
 export interface BlockUse {
@@ -302,79 +269,19 @@ export interface ScreenActRequest {
   beaconSecondary?: string;
 }
 
-/**
- * The recursive slot shape, one definition shared with `inventory.ts`: a slot inside a screen's container and a slot
- * in the player's inventory are the same thing, so both output schemas use this. One instance that refers to itself:
- * the JSON Schema conversion finds the cycle by identity and writes a `$ref`. A schema built anew at every level
- * never repeats, and the conversion recurses until the stack overflows.
- */
-export interface SlotSchema {
-  item: string;
-  count: number;
-  data?: number;
-  name?: string;
-  durability?: { damage: number; max: number };
-  enchantments: { id: string; level: number }[];
-  lore?: string[];
-  /** Positional: an empty slot inside the container item is null. */
-  contents?: (SlotSchema | null)[];
-}
-
-export const itemSlotSchema: z.ZodType<SlotSchema> = z.lazy(() =>
-  z.object({
-    item: z.string(),
-    count: z.number(),
-    data: z.number().optional(),
-    name: z.string().optional(),
-    durability: z.object({ damage: z.number(), max: z.number() }).optional(),
-    enchantments: z.array(z.object({ id: z.string(), level: z.number() })),
-    lore: z.array(z.string()).optional(),
-    contents: z.array(itemSlotSchema.nullable()).optional(),
-  }),
-);
-
-function invalid(messageText: string): EngineFailure {
-  return { ok: false, code: -32602, reason: "invalid_params", message: messageText };
-}
-
-/** The agent answered with a shape this client does not know, so the value cannot be trusted. */
-function malformed(method: string, value: unknown): EngineFailure {
-  return { ok: false, code: -32000, reason: "protocol", message: `${method} answered ${JSON.stringify(value)}` };
-}
-
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
-/** A whole number from 0 up, as every count, slot index and tick count on the wire is. */
-function count(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
-}
-
-/** Non-empty trimmed text, or undefined: an id, a screen name, an effect. */
-function text(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  return trimmed ? trimmed : undefined;
-}
-
-/* -------------------------------------------------------------------------------------------------------------- */
-/* Parsers                                                                                                         */
-/* -------------------------------------------------------------------------------------------------------------- */
-
 /** An `interact.block` or `interact.entity` answer. A screen that opened is a change, whatever `changed` says. */
 export function parseInteract(raw: unknown, target: "block" | "entity"): InteractOutcome | undefined {
-  if (!isRecord(raw) || Array.isArray(raw)) return undefined;
+  if (!isPlainObject(raw)) return undefined;
   if (raw.screen !== undefined && raw.screen !== null && typeof raw.screen !== "string") return undefined;
   if (raw.changed !== undefined && typeof raw.changed !== "boolean") return undefined;
-  const screen = text(raw.screen) ?? null;
+  const screen = nonEmptyText(raw.screen) ?? null;
   return { target, screen, changed: raw.changed === true || screen !== null };
 }
 
 /** Every container of a `screen.state` answer; an absent map is a screen that shows no container. */
 function parseContainers(raw: unknown): Record<string, Slot[]> | undefined {
   if (raw === undefined) return {};
-  if (!isRecord(raw) || Array.isArray(raw)) return undefined;
+  if (!isPlainObject(raw)) return undefined;
   const out: Record<string, Slot[]> = {};
   for (const [name, value] of Object.entries(raw)) {
     const slots = parseSlots(value);
@@ -382,11 +289,6 @@ function parseContainers(raw: unknown): Record<string, Slot[]> | undefined {
     out[name] = slots;
   }
   return out;
-}
-
-/** A whole number of any sign, as an `i32` the agent reads from the game is (a selection of -1 is none). */
-function integer(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isInteger(value) ? value : undefined;
 }
 
 /** A fraction 0..1, as the furnace and brewing progress is. */
@@ -418,40 +320,40 @@ function arrayOf<T>(value: unknown, read: (entry: unknown, position: number) => 
 
 /** An entry's 0-based index: the agent's own, or its position when the agent leaves it out. */
 function indexOf(value: unknown, position: number): number | undefined {
-  return value === undefined ? position : count(value);
+  return value === undefined ? position : countOrUndefined(value);
 }
 
 function parseOptionEnchant(raw: unknown): OptionEnchant | undefined {
-  if (!isRecord(raw) || Array.isArray(raw)) return undefined;
-  const id = integer(raw.id);
-  const level = integer(raw.level);
+  if (!isPlainObject(raw)) return undefined;
+  const id = integerOrUndefined(raw.id);
+  const level = integerOrUndefined(raw.level);
   return id === undefined || level === undefined ? undefined : { ...raw, id, level };
 }
 
 function parseEnchantOption(raw: unknown, position: number): EnchantOption | undefined {
-  if (!isRecord(raw) || Array.isArray(raw)) return undefined;
+  if (!isPlainObject(raw)) return undefined;
   const option = indexOf(raw.option, position);
-  const cost = orNull(raw.cost, integer);
+  const cost = orNull(raw.cost, integerOrUndefined);
   const hint = orNull(raw.hint, rawText);
-  const level = orNull(raw.level, integer);
-  const lapis = raw.lapis === undefined ? null : orNull(raw.lapis, integer);
-  const levelsTaken = raw.levelsTaken === undefined ? null : orNull(raw.levelsTaken, integer);
+  const level = orNull(raw.level, integerOrUndefined);
+  const lapis = raw.lapis === undefined ? null : orNull(raw.lapis, integerOrUndefined);
+  const levelsTaken = raw.levelsTaken === undefined ? null : orNull(raw.levelsTaken, integerOrUndefined);
   const enchants = raw.enchants === undefined ? [] : arrayOf(raw.enchants, parseOptionEnchant);
-  const netId = orNull(raw.netId, count);
+  const netId = orNull(raw.netId, countOrUndefined);
   if (option === undefined || cost === undefined || hint === undefined || level === undefined) return undefined;
   if (lapis === undefined || levelsTaken === undefined || enchants === undefined || netId === undefined) return undefined;
   return { ...raw, option, cost, hint, level, lapis, levelsTaken, enchants, netId };
 }
 
 function parseTradeOffer(raw: unknown, position: number): TradeOffer | undefined {
-  if (!isRecord(raw) || Array.isArray(raw)) return undefined;
+  if (!isPlainObject(raw)) return undefined;
   const index = indexOf(raw.index, position);
   const buyA = parseSlot(raw.buyA ?? null);
   const buyB = parseSlot(raw.buyB ?? null);
   const sell = parseSlot(raw.sell ?? null);
-  const uses = orNull(raw.uses, integer);
-  const maxUses = orNull(raw.maxUses, integer);
-  const netId = orNull(raw.netId, count);
+  const uses = orNull(raw.uses, integerOrUndefined);
+  const maxUses = orNull(raw.maxUses, integerOrUndefined);
+  const netId = orNull(raw.netId, countOrUndefined);
   if (index === undefined || buyA === undefined || buyB === undefined || sell === undefined) return undefined;
   if (uses === undefined || maxUses === undefined || netId === undefined) return undefined;
   if (typeof raw.locked !== "boolean") return undefined;
@@ -459,40 +361,40 @@ function parseTradeOffer(raw: unknown, position: number): TradeOffer | undefined
 }
 
 function parseStonecutterRecipe(raw: unknown, position: number): StonecutterRecipe | undefined {
-  if (!isRecord(raw) || Array.isArray(raw)) return undefined;
+  if (!isPlainObject(raw)) return undefined;
   const index = indexOf(raw.index, position);
   const result = parseSlot(raw.result ?? null);
-  const netId = orNull(raw.netId, count);
+  const netId = orNull(raw.netId, countOrUndefined);
   if (index === undefined || result === undefined || netId === undefined) return undefined;
   return { ...raw, index, result, netId };
 }
 
 /** A beacon effect: the agent's name for it, or the numeric id of one it does not name. */
 function beaconEffect(value: unknown): string | number | undefined {
-  return typeof value === "string" ? value : count(value);
+  return typeof value === "string" ? value : countOrUndefined(value);
 }
 
 /** The kinds whose state the agent decodes; any other kind's data passes through as the agent sent it. */
-const DECODED_KINDS: Record<string, true> = {
-  trade: true,
-  stonecutter: true,
-  enchanting_table: true,
-  furnace: true,
-  blast_furnace: true,
-  smoker: true,
-  brewing_stand: true,
-  grindstone: true,
-  smithing_table: true,
-  cartography_table: true,
-  anvil: true,
-  beacon: true,
-  loom: true,
-};
+const DECODED_KINDS: ReadonlySet<string> = new Set([
+  "trade",
+  "stonecutter",
+  "enchanting_table",
+  "furnace",
+  "blast_furnace",
+  "smoker",
+  "brewing_stand",
+  "grindstone",
+  "smithing_table",
+  "cartography_table",
+  "anvil",
+  "beacon",
+  "loom",
+]);
 
 /** Each field a decoded kind reports, and how it reads; undefined is a value of the wrong shape. */
 const DATA_FIELDS: Record<string, (value: unknown) => unknown> = {
   offers: (value) => arrayOf(value, parseTradeOffer),
-  selected: (value) => orNull(value, integer),
+  selected: (value) => orNull(value, integerOrUndefined),
   trader: (value) => orNull(value, rawText),
   recipes: (value) => arrayOf(value, parseStonecutterRecipe),
   result: (value) => parseSlot(value ?? null),
@@ -502,7 +404,7 @@ const DATA_FIELDS: Record<string, (value: unknown) => unknown> = {
   brew: (value) => orNull(value, fraction),
   fuel: (value) => orNull(value, fraction),
   inputs: parseContainers,
-  xpCost: (value) => orNull(value, integer),
+  xpCost: (value) => orNull(value, integerOrUndefined),
   tooExpensive: (value) => orNull(value, (flag) => (typeof flag === "boolean" ? flag : undefined)),
   name: (value) => orNull(value, rawText),
   primary: (value) => orNull(value, beaconEffect),
@@ -518,9 +420,9 @@ const DATA_FIELDS: Record<string, (value: unknown) => unknown> = {
  */
 export function parseScreenData(raw: unknown, kind: string): ScreenData | null | undefined {
   if (raw === undefined || raw === null) return null;
-  if (!isRecord(raw) || Array.isArray(raw)) return undefined;
+  if (!isPlainObject(raw)) return undefined;
   const data: ScreenData = { ...raw };
-  if (DECODED_KINDS[kind] !== true) return data;
+  if (!DECODED_KINDS.has(kind)) return data;
   if (raw.unavailable !== undefined) {
     const anchor = orNull(raw.anchor, rawText);
     if (typeof raw.unavailable !== "string" || anchor === undefined) return undefined;
@@ -537,8 +439,8 @@ export function parseScreenData(raw: unknown, kind: string): ScreenData | null |
 
 /** One open screen: its name, its family, its containers and its own data. */
 export function parseScreenState(raw: unknown): ScreenState | undefined {
-  if (!isRecord(raw) || Array.isArray(raw)) return undefined;
-  const screen = text(raw.screen);
+  if (!isPlainObject(raw)) return undefined;
+  const screen = nonEmptyText(raw.screen);
   if (!screen) return undefined;
   const containers = parseContainers(raw.containers);
   if (!containers) return undefined;
@@ -550,28 +452,28 @@ export function parseScreenState(raw: unknown): ScreenState | undefined {
 
 /** A move answer: `{moved}`; a record without a count still says the move went through. */
 export function parseScreenMove(raw: unknown): { moved?: number } | undefined {
-  if (!isRecord(raw) || Array.isArray(raw)) return undefined;
+  if (!isPlainObject(raw)) return undefined;
   if (raw.moved === undefined) return {};
-  const moved = count(raw.moved);
+  const moved = countOrUndefined(raw.moved);
   return moved === undefined ? undefined : { moved };
 }
 
 export function parseScreenAct(raw: unknown): ScreenActOutcome | undefined {
-  if (!isRecord(raw) || Array.isArray(raw)) return undefined;
+  if (!isPlainObject(raw)) return undefined;
   if (typeof raw.done !== "boolean") return undefined;
   const result = parseSlot(raw.result === undefined ? null : raw.result);
   const consumed = parseSlots(raw.consumed === undefined ? [] : raw.consumed);
   if (result === undefined || !consumed) return undefined;
   const act: ScreenActOutcome = { done: raw.done, result, consumed };
   if (raw.xpCost !== undefined) {
-    const xpCost = count(raw.xpCost);
+    const xpCost = countOrUndefined(raw.xpCost);
     if (xpCost === undefined) return undefined;
     act.xpCost = xpCost;
   }
   // The agent answers `reason: null` when nothing was refused (live: every successful trade and stonecut).
   if (raw.reason !== undefined && raw.reason !== null) {
     if (typeof raw.reason !== "string") return undefined;
-    const reason = text(raw.reason);
+    const reason = nonEmptyText(raw.reason);
     if (reason) act.reason = reason;
   }
   return act;
@@ -583,16 +485,12 @@ export function parseScreenAct(raw: unknown): ScreenActOutcome | undefined {
  */
 export function parseScreenClose(raw: unknown): ScreenCloseOutcome | undefined {
   if (raw === undefined || raw === null) return { closed: true };
-  if (!isRecord(raw) || Array.isArray(raw)) return undefined;
+  if (!isPlainObject(raw)) return undefined;
   if (raw.closed !== undefined && typeof raw.closed !== "boolean") return undefined;
   const closed = typeof raw.closed === "boolean" ? raw.closed : true;
   const escapes = raw.escapes;
   return typeof escapes === "number" && Number.isInteger(escapes) && escapes >= 0 ? { closed, escapes } : { closed };
 }
-
-/* -------------------------------------------------------------------------------------------------------------- */
-/* Parameters                                                                                                      */
-/* -------------------------------------------------------------------------------------------------------------- */
 
 /** `interact.block` parameters, or why the use cannot be expressed. */
 export function interactBlockParams(use: BlockUse): Record<string, unknown> | string {
@@ -634,7 +532,7 @@ export function parseSlotRef(text: string): ScreenSlotRef | string {
 }
 
 function slotRefParams(ref: ScreenSlotRef, what: string): Record<string, unknown> | string {
-  if (!isRecord(ref)) return `${what} must be {container, slot}`;
+  if (!isObjectLike(ref)) return `${what} must be {container, slot}`;
   const container = typeof ref.container === "string" ? ref.container.trim() : "";
   if (!container) return `${what}.container must name a container the screen reports`;
   if (!Number.isInteger(ref.slot) || ref.slot < 0) return `${what}.slot must be a whole slot index from 0`;
@@ -663,7 +561,7 @@ export function screenActParams(request: ScreenActRequest): Record<string, unkno
     return "times must be an integer from 1 to 1000";
   }
   if (request.action === "craft") {
-    const recipe = typeof request.recipe === "string" ? text(request.recipe) : undefined;
+    const recipe = typeof request.recipe === "string" ? nonEmptyText(request.recipe) : undefined;
     if (!recipe) return "craft needs recipe: the id the screen lists";
     params.recipe = recipe;
     if (request.times !== undefined) params.times = request.times;
@@ -687,7 +585,7 @@ export function screenActParams(request: ScreenActRequest): Record<string, unkno
     return params;
   }
   if (request.action === "loom") {
-    const pattern = text(request.pattern);
+    const pattern = nonEmptyText(request.pattern);
     if (!pattern) return "loom needs pattern: the pattern id the screen lists";
     params.pattern = pattern;
     return params;
@@ -706,10 +604,10 @@ export function screenActParams(request: ScreenActRequest): Record<string, unkno
     return params;
   }
   if (request.action === "beacon") {
-    const primary = text(request.beaconPrimary);
+    const primary = nonEmptyText(request.beaconPrimary);
     if (!primary) return "beacon needs primary: the effect id, e.g. minecraft:speed";
     params.primary = primary;
-    const secondary = text(request.beaconSecondary);
+    const secondary = nonEmptyText(request.beaconSecondary);
     if (secondary) params.secondary = secondary;
     return params;
   }
@@ -717,15 +615,10 @@ export function screenActParams(request: ScreenActRequest): Record<string, unkno
   return params;
 }
 
-/* -------------------------------------------------------------------------------------------------------------- */
-/* Typed calls                                                                                                     */
-/* -------------------------------------------------------------------------------------------------------------- */
-
-/** `interact.block`: use a block like a right click and answer the screen it opened. */
 export async function interactBlock(use: BlockUse, session: EngineSession = engine): Promise<EngineResult<InteractOutcome>> {
   const params = interactBlockParams(use);
   if (typeof params === "string") return invalid(params);
-  const result = await session.call<unknown>("interact.block", params, { timeoutMs: SCREEN_TIMEOUT_MS });
+  const result = await session.call<unknown>("interact.block", params);
   if (!result.ok) return result;
   const outcome = parseInteract(result.value, "block");
   return outcome ? { ok: true, value: outcome } : malformed("interact.block", result.value);
@@ -735,15 +628,14 @@ export async function interactBlock(use: BlockUse, session: EngineSession = engi
 export async function interactEntity(id: string, session: EngineSession = engine): Promise<EngineResult<InteractOutcome>> {
   const params = interactEntityParams(id);
   if (typeof params === "string") return invalid(params);
-  const result = await session.call<unknown>("interact.entity", params, { timeoutMs: SCREEN_TIMEOUT_MS });
+  const result = await session.call<unknown>("interact.entity", params);
   if (!result.ok) return result;
   const outcome = parseInteract(result.value, "entity");
   return outcome ? { ok: true, value: outcome } : malformed("interact.entity", result.value);
 }
 
-/** `screen.state`: the screen the game has open, with its containers and its own data. */
 export async function screenState(session: EngineSession = engine): Promise<EngineResult<ScreenState>> {
-  const result = await session.call<unknown>("screen.state", {}, { timeoutMs: SCREEN_TIMEOUT_MS });
+  const result = await session.call<unknown>("screen.state", {});
   if (!result.ok) return result;
   const state = parseScreenState(result.value);
   return state ? { ok: true, value: state } : malformed("screen.state", result.value);
@@ -753,7 +645,7 @@ export async function screenState(session: EngineSession = engine): Promise<Engi
 export async function screenMove(request: ScreenMoveRequest, session: EngineSession = engine): Promise<EngineResult<ScreenMoveOutcome>> {
   const params = screenMoveParams(request);
   if (typeof params === "string") return invalid(params);
-  const result = await session.call<unknown>("screen.move", params, { timeoutMs: SCREEN_TIMEOUT_MS });
+  const result = await session.call<unknown>("screen.move", params);
   if (!result.ok) return result;
   const move = parseScreenMove(result.value);
   if (!move) return malformed("screen.move", result.value);
@@ -761,27 +653,21 @@ export async function screenMove(request: ScreenMoveRequest, session: EngineSess
   return { ok: true, value: { moved: move.moved ?? request.count ?? 1 } };
 }
 
-/** `screen.act`: the screen's own action through the game's own request. */
 export async function screenAct(request: ScreenActRequest, session: EngineSession = engine): Promise<EngineResult<ScreenActOutcome>> {
   const params = screenActParams(request);
   if (typeof params === "string") return invalid(params);
-  const result = await session.call<unknown>("screen.act", params, { timeoutMs: ACT_TIMEOUT_MS });
+  const result = await session.call<unknown>("screen.act", params);
   if (!result.ok) return result;
   const act = parseScreenAct(result.value);
   return act ? { ok: true, value: act } : malformed("screen.act", result.value);
 }
 
-/** `screen.close`: close the open screen like Escape. */
 export async function screenClose(session: EngineSession = engine): Promise<EngineResult<ScreenCloseOutcome>> {
-  const result = await session.call<unknown>("screen.close", {}, { timeoutMs: SCREEN_TIMEOUT_MS });
+  const result = await session.call<unknown>("screen.close", {});
   if (!result.ok) return result;
   const close = parseScreenClose(result.value);
   return close ? { ok: true, value: close } : malformed("screen.close", result.value);
 }
-
-/* -------------------------------------------------------------------------------------------------------------- */
-/* Text for tool results and CLI hints                                                                             */
-/* -------------------------------------------------------------------------------------------------------------- */
 
 /** One line for an interaction: what opened, or that nothing did. */
 export function interactText(outcome: InteractOutcome): string {
@@ -846,49 +732,19 @@ export function screenActText(act: ScreenActOutcome): string {
   return `done${made}${consumed}${xp}`;
 }
 
-/* -------------------------------------------------------------------------------------------------------------- */
-/* MCP                                                                                                             */
-/* -------------------------------------------------------------------------------------------------------------- */
-
-type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
-type ToolResult = { content: Content[]; structuredContent?: Record<string, unknown>; isError?: boolean };
-
-function ok(contentText: string, structured: object): ToolResult {
-  return { content: [{ type: "text", text: contentText }], structuredContent: { ...structured } };
-}
-
-function failureOf(failure: EngineFailure): ToolResult {
-  const anchor = failure.anchor ? ` anchor ${failure.anchor}` : "";
-  const contentText = `${failure.reason} (${failure.code})${anchor}: ${failure.message}`;
-  return { content: [{ type: "text", text: contentText }], structuredContent: { ...failure }, isError: true };
-}
-
-function failedWith(err: unknown): ToolResult {
-  const contentText = messageOf(err);
-  return { content: [{ type: "text", text: contentText }], structuredContent: { ok: false, reason: "prerequisite", message: contentText }, isError: true };
-}
-
 /** These methods have no fallback, so a missing or older agent is answered as the requirement it is. */
 function agentRequired(failure: EngineFailure): ToolResult {
   if (failure.reason === "not_attached") {
-    return failureOf({ ...failure, message: `${failure.message}; this needs the in-game agent (engine_attach)` });
+    return failureResult({ ...failure, message: `${failure.message}; this needs the in-game agent (engine_attach)` });
   }
   if (failure.reason === "unknown_method") {
-    return failureOf({ ...failure, message: `${failure.message}; this agent has no screen methods: rebuild it with engine_attach` });
+    return failureResult({ ...failure, message: `${failure.message}; this agent has no screen methods: rebuild it with engine_attach` });
   }
-  return failureOf(failure);
+  return failureResult(failure);
 }
 
 /** Output schemas, built from the zod sculkwire depends on. */
 function schemas() {
-  const failureSchema = {
-    ok: z.boolean(),
-    code: z.number().optional(),
-    reason: z.string().optional(),
-    anchor: z.string().optional(),
-    message: z.string().optional(),
-  };
-
   const maybeSlot = itemSlotSchema.nullable();
   const slotRefSchema = z.object({ container: z.string(), slot: z.number() });
 
@@ -1000,20 +856,16 @@ export function registerWorkstationTools(server: McpServer): void {
       outputSchema: interactSchema,
     },
     async ({ target, x, y, z: bz, dimension, face, id }) => {
-      try {
-        if (target === "entity") {
-          if (id === undefined) return failureOf(invalid("entity needs id: an entity's unique id"));
-          const result = await interactEntity(id);
-          if (!result.ok) return agentRequired(result);
-          return ok(interactText(result.value), { ok: true, ...result.value });
-        }
-        if (x === undefined || y === undefined || bz === undefined) return failureOf(invalid("block needs x, y and z"));
-        const result = await interactBlock({ x, y, z: bz, ...(dimension !== undefined ? { dimension } : {}), ...(face ? { face } : {}) });
+      if (target === "entity") {
+        if (id === undefined) return invalidParamsResult("entity needs id: an entity's unique id");
+        const result = await interactEntity(id);
         if (!result.ok) return agentRequired(result);
         return ok(interactText(result.value), { ok: true, ...result.value });
-      } catch (err) {
-        return failedWith(err);
       }
+      if (x === undefined || y === undefined || bz === undefined) return invalidParamsResult("block needs x, y and z");
+      const result = await interactBlock({ x, y, z: bz, ...(dimension !== undefined ? { dimension } : {}), ...(face ? { face } : {}) });
+      if (!result.ok) return agentRequired(result);
+      return ok(interactText(result.value), { ok: true, ...result.value });
     },
   );
 
@@ -1056,116 +908,49 @@ export function registerWorkstationTools(server: McpServer): void {
       outputSchema: screenSchema,
     },
     async ({ action, from, to, count: items, act, recipe, times, name, pattern, option, offer, primary, secondary }) => {
-      try {
-        if (action === "state") {
-          const result = await screenState();
-          if (!result.ok) return agentRequired(result);
-          return ok(screenStateText(result.value), { ok: true, action, ...result.value });
-        }
-        if (action === "close") {
-          const result = await screenClose();
-          if (!result.ok) return agentRequired(result);
-          const summary = result.value.closed ? "screen closed" : "the game kept the screen open";
-          return ok(summary, { ok: true, action, ...result.value });
-        }
-        if (action === "move") {
-          if (!from || !to) return failureOf(invalid("move needs from and to: {container, slot} each"));
-          const result = await screenMove({ from, to, ...(items !== undefined ? { count: items } : {}) });
-          if (!result.ok) return agentRequired(result);
-          return ok(`moved ${result.value.moved} item(s): ${from.container} ${from.slot} to ${to.container} ${to.slot}`, {
-            ok: true,
-            action,
-            ...result.value,
-            from,
-            to,
-          });
-        }
-        if (act === undefined) return failureOf(invalid(`act needs act: one of ${SCREEN_ACTIONS.join(", ")}`));
-        const result = await screenAct({
-          action: act,
-          ...(recipe !== undefined ? { recipe } : {}),
-          ...(times !== undefined ? { times } : {}),
-          ...(name !== undefined ? { name } : {}),
-          ...(pattern !== undefined ? { pattern } : {}),
-          ...(option !== undefined ? { option } : {}),
-          ...(offer !== undefined ? { offer } : {}),
-          ...(primary !== undefined ? { beaconPrimary: primary } : {}),
-          ...(secondary !== undefined ? { beaconSecondary: secondary } : {}),
-        });
+      if (action === "state") {
+        const result = await screenState();
         if (!result.ok) return agentRequired(result);
-        return ok(screenActText(result.value), { ok: true, action, ...result.value });
-      } catch (err) {
-        return failedWith(err);
+        return ok(screenStateText(result.value), { ok: true, action, ...result.value });
       }
+      if (action === "close") {
+        const result = await screenClose();
+        if (!result.ok) return agentRequired(result);
+        const summary = result.value.closed ? "screen closed" : "the game kept the screen open";
+        return ok(summary, { ok: true, action, ...result.value });
+      }
+      if (action === "move") {
+        if (!from || !to) return invalidParamsResult("move needs from and to: {container, slot} each");
+        const result = await screenMove({ from, to, ...(items !== undefined ? { count: items } : {}) });
+        if (!result.ok) return agentRequired(result);
+        return ok(`moved ${result.value.moved} item(s): ${from.container} ${from.slot} to ${to.container} ${to.slot}`, {
+          ok: true,
+          action,
+          ...result.value,
+          from,
+          to,
+        });
+      }
+      if (act === undefined) return invalidParamsResult(`act needs act: one of ${SCREEN_ACTIONS.join(", ")}`);
+      const result = await screenAct({
+        action: act,
+        ...(recipe !== undefined ? { recipe } : {}),
+        ...(times !== undefined ? { times } : {}),
+        ...(name !== undefined ? { name } : {}),
+        ...(pattern !== undefined ? { pattern } : {}),
+        ...(option !== undefined ? { option } : {}),
+        ...(offer !== undefined ? { offer } : {}),
+        ...(primary !== undefined ? { beaconPrimary: primary } : {}),
+        ...(secondary !== undefined ? { beaconSecondary: secondary } : {}),
+      });
+      if (!result.ok) return agentRequired(result);
+      return ok(screenActText(result.value), { ok: true, action, ...result.value });
     },
   );
 }
 
-/* -------------------------------------------------------------------------------------------------------------- */
-/* CLI                                                                                                             */
-/* -------------------------------------------------------------------------------------------------------------- */
-
-function out(value: unknown): void {
-  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
-}
-
-function err(contentText: string): void {
-  process.stderr.write(`${contentText}\n`);
-}
-
-/** The failure as JSON, and the exit code it maps to. */
-function failed(failure: EngineFailure): number {
-  out(failure);
-  const anchor = failure.anchor ? ` (anchor ${failure.anchor})` : "";
-  err(`${failure.reason}: ${failure.message}${anchor}`);
-  // These methods have no fallback: a missing agent and one too old for them are both setup to fix.
-  if (failure.reason === "unknown_method") {
-    err("this agent has no screen methods: rebuild it with sculk engine attach");
-    return ExitCode.usage;
-  }
-  if (isSetupFailure(failure)) {
-    if (failure.reason === "not_attached") err("this needs the in-game agent: run sculk engine attach first");
-    return ExitCode.usage;
-  }
-  return ExitCode.findings;
-}
-
-/** One CLI call is one process, so the agent socket must not keep it alive after the answer is printed. */
-async function oneShot(body: () => Promise<number>): Promise<number> {
-  try {
-    return await body();
-  } finally {
-    engine.close();
-  }
-}
-
-/** A flag's value, when it was given. */
-function flagOf(args: string[], name: string): string | undefined {
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === undefined) break;
-    if (arg === `--${name}`) return args[i + 1];
-    if (arg.startsWith(`--${name}=`)) return arg.slice(name.length + 3);
-  }
-  return undefined;
-}
-
-/** The arguments left once every `--flag value` pair is taken out. */
-function positionalsOf(args: string[], names: readonly string[]): string[] {
-  const rest: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === undefined) break;
-    const name = names.find((candidate) => arg === `--${candidate}`);
-    if (name !== undefined) {
-      i++;
-      continue;
-    }
-    if (names.some((candidate) => arg.startsWith(`--${candidate}=`))) continue;
-    rest.push(arg);
-  }
-  return rest;
-}
+/** These methods have no fallback: a missing agent is setup to fix. */
+const NEEDS_AGENT = "this needs the in-game agent: run sculk engine attach first";
 
 const INTERACT_USAGE =
   "usage: sculk interact block <x> <y> <z> [--dimension overworld|nether|the_end] [--face up|down|north|south|east|west] | sculk interact entity <unique-id>";
@@ -1175,36 +960,24 @@ const interactBlockCommand: CliCommand = {
   summary: "Use a block like a right click and say what opened: interact block <x> <y> <z> [--face up] (needs the agent)",
   async run(args) {
     return oneShot(async () => {
-      const coords = positionalsOf(args, ["dimension", "face"]);
-      const dimension = flagOf(args, "dimension");
-      const face = flagOf(args, "face");
+      const line = parseCommandLine(args, { dimension: { type: "string" }, face: { type: "string" } });
+      if (!line) return ExitCode.usage;
+      const dimension = stringOption(line, "dimension");
+      const face = stringOption(line, "face");
       if (
-        coords.length !== 3 ||
+        line.positionals.length !== 3 ||
         (face !== undefined && !(BLOCK_FACES as readonly string[]).includes(face)) ||
         (dimension !== undefined && !dimensionName(dimension))
       ) {
         err(INTERACT_USAGE);
         return ExitCode.usage;
       }
-      const [cx, cy, cz] = coords.map(Number);
-      try {
-        const result = await interactBlock({
-          x: cx ?? NaN,
-          y: cy ?? NaN,
-          z: cz ?? NaN,
-          ...(dimension ? { dimension } : {}),
-          ...(face ? { face: face as BlockFace } : {}),
-        });
-        if (!result.ok) return failed(result);
-        out(result.value);
-        err(interactText(result.value));
-        return ExitCode.ok;
-      } catch (e) {
-        const contentText = messageOf(e);
-        out({ ok: false, reason: "prerequisite", message: contentText });
-        err(contentText);
-        return ExitCode.usage;
-      }
+      const [x, y, z] = line.positionals.map(Number) as [number, number, number];
+      const result = await interactBlock({ x, y, z, ...(dimension ? { dimension } : {}), ...(face ? { face: face as BlockFace } : {}) });
+      if (!result.ok) return failed(result, NEEDS_AGENT);
+      printJson(result.value);
+      err(interactText(result.value));
+      return ExitCode.ok;
     });
   },
 };
@@ -1214,23 +987,18 @@ const interactEntityCommand: CliCommand = {
   summary: "Use an entity like a right click (a villager's trades, a horse's screen, a chest boat): interact entity <id>",
   async run(args) {
     return oneShot(async () => {
-      const id = args.join(" ").trim();
-      if (args.length !== 1 || !id) {
+      const line = parseCommandLine(args);
+      if (!line) return ExitCode.usage;
+      const id = line.positionals.join(" ").trim();
+      if (line.positionals.length !== 1 || !id) {
         err(INTERACT_USAGE);
         return ExitCode.usage;
       }
-      try {
-        const result = await interactEntity(id);
-        if (!result.ok) return failed(result);
-        out(result.value);
-        err(interactText(result.value));
-        return ExitCode.ok;
-      } catch (e) {
-        const contentText = messageOf(e);
-        out({ ok: false, reason: "prerequisite", message: contentText });
-        err(contentText);
-        return ExitCode.usage;
-      }
+      const result = await interactEntity(id);
+      if (!result.ok) return failed(result, NEEDS_AGENT);
+      printJson(result.value);
+      err(interactText(result.value));
+      return ExitCode.ok;
     });
   },
 };
@@ -1238,29 +1006,22 @@ const interactEntityCommand: CliCommand = {
 const SCREEN_USAGE =
   "usage: sculk screen state | sculk screen move <container:slot> <container:slot> [--count N] | sculk screen act <action> [--recipe id|index] [--times N] [--name text] [--pattern id] [--option 0|1|2] [--offer N] [--primary effect] [--secondary effect] | sculk screen close";
 
-const SCREEN_ACT_FLAGS = ["recipe", "times", "name", "pattern", "option", "offer", "primary", "secondary"] as const;
-
 const screenStateCommand: CliCommand = {
   name: "screen state",
   summary: "The open screen: its kind, its containers and its own data (anvil, offers, furnace progress, ...) (needs the agent)",
   async run(args) {
     return oneShot(async () => {
-      if (args.length) {
+      const line = parseCommandLine(args);
+      if (!line) return ExitCode.usage;
+      if (line.positionals.length) {
         err("screen state takes no arguments");
         return ExitCode.usage;
       }
-      try {
-        const result = await screenState();
-        if (!result.ok) return failed(result);
-        out(result.value);
-        err(screenStateText(result.value));
-        return ExitCode.ok;
-      } catch (e) {
-        const contentText = messageOf(e);
-        out({ ok: false, reason: "prerequisite", message: contentText });
-        err(contentText);
-        return ExitCode.usage;
-      }
+      const result = await screenState();
+      if (!result.ok) return failed(result, NEEDS_AGENT);
+      printJson(result.value);
+      err(screenStateText(result.value));
+      return ExitCode.ok;
     });
   },
 };
@@ -1270,12 +1031,13 @@ const screenMoveCommand: CliCommand = {
   summary: "Move items inside the open screen: screen move <container:slot> <container:slot> [--count N] (needs the agent)",
   async run(args) {
     return oneShot(async () => {
-      const positionals = positionalsOf(args, ["count"]);
-      if (positionals.length !== 2) {
+      const line = parseCommandLine(args, { count: { type: "string" } });
+      if (!line) return ExitCode.usage;
+      if (line.positionals.length !== 2) {
         err(SCREEN_USAGE);
         return ExitCode.usage;
       }
-      const [fromText, toText] = positionals as [string, string];
+      const [fromText, toText] = line.positionals as [string, string];
       const from = parseSlotRef(fromText);
       if (typeof from === "string") {
         err(from);
@@ -1286,23 +1048,18 @@ const screenMoveCommand: CliCommand = {
         err(to);
         return ExitCode.usage;
       }
-      const countText = flagOf(args, "count");
+      const countText = stringOption(line, "count");
       const items = countText === undefined ? undefined : Number(countText);
-      try {
-        const result = await screenMove({ from, to, ...(items !== undefined ? { count: items } : {}) });
-        if (!result.ok) return failed(result);
-        out({ ...result.value, from, to });
-        err(`moved ${result.value.moved} item(s): ${from.container} ${from.slot} to ${to.container} ${to.slot}`);
-        return ExitCode.ok;
-      } catch (e) {
-        const contentText = messageOf(e);
-        out({ ok: false, reason: "prerequisite", message: contentText });
-        err(contentText);
-        return ExitCode.usage;
-      }
+      const result = await screenMove({ from, to, ...(items !== undefined ? { count: items } : {}) });
+      if (!result.ok) return failed(result, NEEDS_AGENT);
+      printJson({ ...result.value, from, to });
+      err(`moved ${result.value.moved} item(s): ${from.container} ${from.slot} to ${to.container} ${to.slot}`);
+      return ExitCode.ok;
     });
   },
 };
+
+const SCREEN_ACT_FLAGS = ["recipe", "times", "name", "pattern", "option", "offer", "primary", "secondary"] as const;
 
 const screenActCommand: CliCommand = {
   name: "screen act",
@@ -1311,64 +1068,59 @@ const screenActCommand: CliCommand = {
     "beacon|take_result [its parameters] (needs the agent)",
   async run(args) {
     return oneShot(async () => {
-      const positionals = positionalsOf(args, SCREEN_ACT_FLAGS);
-      const [action, ...rest] = positionals;
+      const line = parseCommandLine(args, Object.fromEntries(SCREEN_ACT_FLAGS.map((flag) => [flag, { type: "string" as const }])));
+      if (!line) return ExitCode.usage;
+      const [action, ...rest] = line.positionals;
       if (!action || rest.length) {
         err(SCREEN_USAGE);
         return ExitCode.usage;
       }
-      const number = (name: string): number | undefined => {
-        const value = flagOf(args, name);
+      const text = (name: (typeof SCREEN_ACT_FLAGS)[number]) => stringOption(line, name);
+      const number = (name: (typeof SCREEN_ACT_FLAGS)[number]): number | undefined => {
+        const value = text(name);
         return value === undefined ? undefined : Number(value);
       };
       const request: ScreenActRequest = {
         action: action as ScreenActAction,
-        ...(flagOf(args, "recipe") !== undefined ? { recipe: flagOf(args, "recipe") } : {}),
-        ...(number("times") !== undefined ? { times: number("times") } : {}),
-        ...(flagOf(args, "name") !== undefined ? { name: flagOf(args, "name") } : {}),
-        ...(flagOf(args, "pattern") !== undefined ? { pattern: flagOf(args, "pattern") } : {}),
-        ...(number("option") !== undefined ? { option: number("option") } : {}),
-        ...(number("offer") !== undefined ? { offer: number("offer") } : {}),
-        ...(flagOf(args, "primary") !== undefined ? { beaconPrimary: flagOf(args, "primary") } : {}),
-        ...(flagOf(args, "secondary") !== undefined ? { beaconSecondary: flagOf(args, "secondary") } : {}),
+        ...optional("recipe", text("recipe")),
+        ...optional("times", number("times")),
+        ...optional("name", text("name")),
+        ...optional("pattern", text("pattern")),
+        ...optional("option", number("option")),
+        ...optional("offer", number("offer")),
+        ...optional("beaconPrimary", text("primary")),
+        ...optional("beaconSecondary", text("secondary")),
       };
-      try {
-        const result = await screenAct(request);
-        if (!result.ok) return failed(result);
-        out(result.value);
-        err(screenActText(result.value));
-        return ExitCode.ok;
-      } catch (e) {
-        const contentText = messageOf(e);
-        out({ ok: false, reason: "prerequisite", message: contentText });
-        err(contentText);
-        return ExitCode.usage;
-      }
+      const result = await screenAct(request);
+      if (!result.ok) return failed(result, NEEDS_AGENT);
+      printJson(result.value);
+      err(screenActText(result.value));
+      return ExitCode.ok;
     });
   },
 };
+
+/** `{ [key]: value }` when the value was given, `{}` otherwise. */
+function optional<K extends string, V>(key: K, value: V | undefined): { [P in K]?: V } {
+  return value === undefined ? {} : ({ [key]: value } as { [P in K]?: V });
+}
 
 const screenCloseCommand: CliCommand = {
   name: "screen close",
   summary: "Close the open screen like Escape (needs the agent)",
   async run(args) {
     return oneShot(async () => {
-      if (args.length) {
+      const line = parseCommandLine(args);
+      if (!line) return ExitCode.usage;
+      if (line.positionals.length) {
         err("screen close takes no arguments");
         return ExitCode.usage;
       }
-      try {
-        const result = await screenClose();
-        if (!result.ok) return failed(result);
-        out(result.value);
-        err(result.value.closed ? "screen closed" : "the game kept the screen open");
-        return ExitCode.ok;
-      } catch (e) {
-        const contentText = messageOf(e);
-        out({ ok: false, reason: "prerequisite", message: contentText });
-        err(contentText);
-        return ExitCode.usage;
-      }
+      const result = await screenClose();
+      if (!result.ok) return failed(result, NEEDS_AGENT);
+      printJson(result.value);
+      err(result.value.closed ? "screen closed" : "the game kept the screen open");
+      return ExitCode.ok;
     });
   },
 };

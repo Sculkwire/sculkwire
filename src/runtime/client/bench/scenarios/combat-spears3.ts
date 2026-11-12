@@ -1,4 +1,5 @@
 import { combat, FIGHTER } from "../kit.ts";
+import { num } from "../types.ts";
 
 /**
  * Three husks with iron spears at day. A spear husk does not walk in and swing: it lowers the spear, charges
@@ -18,5 +19,5 @@ export default combat({
     { type: "husk", at: { dx: 0, dy: 0, dz: 10 }, held: "iron_spear" },
     { type: "husk", at: { dx: 2, dy: 0, dz: 10 }, held: "iron_spear" },
   ],
-  success: (o, extra) => o.kills + (typeof extra.otherDeaths === "number" ? extra.otherDeaths : 0) >= 3 && o.deaths === 0,
+  success: (o, extra) => o.kills + num(extra, "otherDeaths", 0) >= 3 && o.deaths === 0,
 });

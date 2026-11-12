@@ -4,6 +4,7 @@
  * the end of the bench. Pure, so the tests check the parsing and the values.
  */
 import type { GameSetting, SettingValue } from "../../engine/engine.ts";
+import { parseEnumList } from "./stance.ts";
 
 export type BenchView = "first" | "third";
 
@@ -14,9 +15,7 @@ const VIEWS: readonly BenchView[] = ["first", "third"];
 
 /** `first`, `third` or `first,third` (any order, spaces allowed, repeats dropped). Undefined for anything else. */
 export function parseViews(text: string): BenchView[] | undefined {
-  const parts = text.split(",").map((p) => p.trim().toLowerCase());
-  if (parts.length === 0 || parts.some((p) => !(VIEWS as readonly string[]).includes(p))) return undefined;
-  return [...new Set(parts as BenchView[])];
+  return parseEnumList(text, VIEWS);
 }
 
 /** The value of `game_thirdperson` for a view, in the type the game reports for the option. */

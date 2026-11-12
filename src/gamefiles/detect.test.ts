@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { gameDirCandidates, NO_WINDOWS_PROBE, parseWindowsProbe, windowsGameDirs } from "./detect.ts";
+import { appxToGameVersion, gameDirCandidates, NO_WINDOWS_PROBE, parseWindowsProbe, windowsGameDirs } from "./detect.ts";
 
 describe("gameDirCandidates", () => {
   it("probes the Xbox app GDK installs and ;-separated SCULKWIRE_GAME_DIRS on Windows", () => {
@@ -52,5 +52,21 @@ describe("gameDirCandidates", () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  });
+
+  // The client install (`gamefiles/install.ts`) reads the same root, so `game_builds` and the client agree.
+  it.skipIf(process.platform === "win32")("probes the mcbe-gdk-linux root that SCULKWIRE_GDK_ROOT or XDG_DATA_HOME names", () => {
+    expect(gameDirCandidates({ SCULKWIRE_GDK_ROOT: "/gdk" }, "linux", "/nohome")[0]).toBe("/gdk/game");
+    expect(gameDirCandidates({ XDG_DATA_HOME: "/data" }, "linux", "/nohome")[0]).toBe("/data/mcbe-gdk-linux/game");
+    expect(gameDirCandidates({ XDG_DATA_HOME: "" }, "linux", "/nohome")[0]).toBe("/nohome/.local/share/mcbe-gdk-linux/game");
+  });
+});
+
+describe("appxToGameVersion", () => {
+  it("unpacks patch and revision from the appx identity", () => {
+    expect(appxToGameVersion("1.21.12001.0")).toEqual({ major: 1, minor: 21, patch: 120, build: 1 });
+    expect(appxToGameVersion("1.26.6030.0")).toEqual({ major: 1, minor: 26, patch: 60, build: 30 });
+    expect(appxToGameVersion("1.26.603")).toBeUndefined();
+    expect(appxToGameVersion("garbage")).toBeUndefined();
   });
 });

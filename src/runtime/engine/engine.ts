@@ -6,9 +6,8 @@
  * connected session only refreshes `engine.status`. An idle one injects again, which is safe because `buildAgent`
  * caches by source hash and the injector is given the same DLL path.
  *
- * Method failures are values, not exceptions. RPC error codes become `{ ok: false, code, reason, anchor? }` so CLI
- * exit codes and MCP results stay mechanical. Attach failures throw `EngineAttachError`, because nothing is running
- * yet and the caller has a prerequisite to fix.
+ * Method failures are values (`failure.ts`). Attach failures throw `EngineAttachError`, because nothing is running yet
+ * and the caller has a prerequisite to fix.
  *
  * Supported targets: any PC (GDK) install sculkwire finds, retail or otherwise. On Linux and macOS the injector runs
  * inside the install's own Wine or Proton prefix (Flarial, mcbe-gdk-installer, Bottles, Lutris…), on Windows natively.
@@ -20,16 +19,20 @@ import { copyFile, mkdir, open, readdir, rename, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
+import { errorMessage } from "../../core/errors.ts";
 import { cacheDir } from "../../core/paths.ts";
 import { gameDirCandidates } from "../../gamefiles/detect.ts";
+import { GAME_EXE } from "../../gamefiles/gdk.ts";
 import { findInstall, type ClientInstall } from "../../gamefiles/install.ts";
-import { DIFFICULTIES, type Difficulty } from "../../gamefiles/worlds.ts";
+import { DIFFICULTIES, GAME_TYPES, difficultyOf, gameTypeOf, type Difficulty, type GameType } from "../../gamefiles/worlds.ts";
 import { gamePath } from "./gamepath.ts";
 import { buildAgent, type AgentBuild } from "./build.ts";
 import { AgentClient, AgentClientError, AgentRpcError } from "./client.ts";
-import { injectClient, type InjectionResult } from "./inject.ts";
+import { invalid, malformed, RPC_REASONS, type EngineFailure, type EngineResult } from "./failure.ts";
+import { injectAgent, type InjectionResult } from "./inject.ts";
 import type { FocusWatchState, HostFocus } from "./focus.ts";
 import { InputLock, parseLockState } from "./lock.ts";
+import { INPUT_TIMEOUT_MS, METHODS, methodTimeout, type MethodName } from "./methods.ts";
 import { recompressPngFile } from "./png.ts";
 import {
   clickParams,
@@ -44,20 +47,14 @@ import {
   type UiKeyAction,
   type UiScreen,
 } from "./ui.ts";
+import { isFiniteNumber, isObjectLike } from "./wire.ts";
 
 /** Default agent port. The DLL's own `SCULKWIRE_AGENT_PORT` override is forwarded from the launcher's environment. */
 export const ENGINE_DEFAULT_PORT = 19160;
 
 const DEFAULT_TIMEOUT_MS = 15_000;
-const COMMAND_TIMEOUT_MS = 30_000;
-const STEP_TIMEOUT_MS = 60_000;
-const SCREENSHOT_TIMEOUT_MS = 60_000;
 /** How long to look for the PNG after the game accepted the request. The engine writes it asynchronously. */
 const SCREENSHOT_FILE_WAIT_MS = 20_000;
-/** `input.*` answer before the next frame, so a slow answer means the drain is stuck rather than busy. */
-const INPUT_TIMEOUT_MS = 2_000;
-/** `ui.*` answer on the game's next UI frame, so a slow answer means the frame hook is not running. */
-const UI_TIMEOUT_MS = 5_000;
 /** How long `engine_attach` waits for a freshly injected agent to finish resolving its anchors (about 10 s live). */
 const ATTACH_RESOLVE_MS = 60_000;
 const ATTACH_RESOLVE_POLL_MS = 250;
@@ -281,9 +278,6 @@ export interface SettingEdit {
   saved?: boolean;
 }
 
-export const GAME_TYPES = ["survival", "creative", "adventure", "spectator"] as const;
-export type GameType = (typeof GAME_TYPES)[number];
-
 /**
  * What the loaded level itself says (`world.settings`). A field the engine cannot read is null, never guessed; game
  * rules are the level's own keys of the same name (`keepinventory`, `dodaylightcycle`, ...).
@@ -317,17 +311,8 @@ export interface WorldChange {
   weather?: { rain: boolean; lightning: boolean };
 }
 
-function finite(v: unknown): v is number {
-  return typeof v === "number" && Number.isFinite(v);
-}
-
-/** Plain object guard for the JSON the agent sends. */
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function vec(v: unknown, n: 2 | 3): number[] | undefined {
-  return Array.isArray(v) && v.length >= n && v.slice(0, n).every(finite) ? (v.slice(0, n) as number[]) : undefined;
+  return Array.isArray(v) && v.length >= n && v.slice(0, n).every(isFiniteNumber) ? (v.slice(0, n) as number[]) : undefined;
 }
 
 /** A `tick` notification's params, or undefined when it lacks the position or rotation. */
@@ -336,21 +321,21 @@ export function parseTick(raw: unknown): EngineTick | undefined {
   const r = raw as Record<string, unknown>;
   const position = vec(r.position, 3);
   const rotation = vec(r.rotation, 2);
-  if (!finite(r.tick) || !position || !rotation) return undefined;
+  if (!isFiniteNumber(r.tick) || !position || !rotation) return undefined;
   return {
     tick: r.tick,
     position: position as [number, number, number],
     rotation: rotation as [number, number],
     velocity: (vec(r.velocity, 3) ?? [0, 0, 0]) as [number, number, number],
     onGround: typeof r.onGround === "boolean" ? r.onGround : null,
-    health: finite(r.health) ? r.health : null,
-    selectedSlot: finite(r.selectedSlot) ? r.selectedSlot : null,
+    health: isFiniteNumber(r.health) ? r.health : null,
+    selectedSlot: isFiniteNumber(r.selectedSlot) ? r.selectedSlot : null,
   };
 }
 
 /** A `settings.list` or `settings.get` entry, or undefined when the engine sent something else. */
 export function parseSetting(raw: unknown): GameSetting | undefined {
-  if (!isRecord(raw)) return undefined;
+  if (!isObjectLike(raw)) return undefined;
   const r = raw;
   const value = settingValue(r.value);
   if (typeof r.id !== "string" || !r.id || value === undefined) return undefined;
@@ -362,55 +347,42 @@ export function parseSetting(raw: unknown): GameSetting | undefined {
         ? "float"
         : "string";
   const setting: GameSetting = { id: r.id, type, value };
-  if (finite(r.min)) setting.min = r.min;
-  if (finite(r.max)) setting.max = r.max;
+  if (isFiniteNumber(r.min)) setting.min = r.min;
+  if (isFiniteNumber(r.max)) setting.max = r.max;
   if (Array.isArray(r.values) && r.values.every((v) => typeof v === "string")) setting.values = [...(r.values as string[])];
   return setting;
 }
 
 function settingValue(v: unknown): SettingValue | undefined {
   if (typeof v === "boolean" || typeof v === "string") return v;
-  return finite(v) ? v : undefined;
+  return isFiniteNumber(v) ? v : undefined;
 }
 
 /** A `world.settings` answer, with every field the engine could not read left null. */
 export function normalizeWorld(raw: unknown): WorldState {
-  const r = isRecord(raw) ? raw : {};
+  const r = isObjectLike(raw) ? raw : {};
   const gamerules: Record<string, boolean | number> = {};
-  if (isRecord(r.gamerules)) {
-    for (const [name, value] of Object.entries(r.gamerules)) if (typeof value === "boolean" || finite(value)) gamerules[name] = value;
+  if (isObjectLike(r.gamerules)) {
+    for (const [name, value] of Object.entries(r.gamerules)) if (typeof value === "boolean" || isFiniteNumber(value)) gamerules[name] = value;
   }
-  const weather = isRecord(r.weather) ? r.weather : undefined;
+  const weather = isObjectLike(r.weather) ? r.weather : undefined;
   const spawn =
-    Array.isArray(r.spawn) && r.spawn.length >= 3 && r.spawn.slice(0, 3).every(finite) ? (r.spawn.slice(0, 3) as [number, number, number]) : null;
+    Array.isArray(r.spawn) && r.spawn.length >= 3 && r.spawn.slice(0, 3).every(isFiniteNumber) ? (r.spawn.slice(0, 3) as [number, number, number]) : null;
   return {
     name: typeof r.name === "string" ? r.name : null,
-    seed: typeof r.seed === "string" || typeof r.seed === "bigint" ? String(r.seed) : finite(r.seed) ? String(r.seed) : null,
+    seed: typeof r.seed === "string" || typeof r.seed === "bigint" ? String(r.seed) : isFiniteNumber(r.seed) ? String(r.seed) : null,
     gameType: gameTypeOf(r.gameType) ?? null,
     difficulty: difficultyOf(r.difficulty) ?? null,
     cheats: typeof r.cheats === "boolean" ? r.cheats : null,
     education: typeof r.education === "boolean" ? r.education : null,
     experiments: Array.isArray(r.experiments) ? r.experiments.filter((e): e is string => typeof e === "string") : [],
     gamerules,
-    time: finite(r.time) ? r.time : null,
+    time: isFiniteNumber(r.time) ? r.time : null,
     dayCycle: typeof r.dayCycle === "boolean" ? r.dayCycle : null,
     weather: weather && typeof weather.rain === "boolean" && typeof weather.lightning === "boolean" ? { rain: weather.rain, lightning: weather.lightning } : null,
     spawn,
-    dimension: typeof r.dimension === "string" || finite(r.dimension) ? (r.dimension as string | number) : null,
+    dimension: typeof r.dimension === "string" || isFiniteNumber(r.dimension) ? (r.dimension as string | number) : null,
   };
-}
-
-/** A difficulty from its name or its level.dat number, or undefined. */
-export function difficultyOf(raw: unknown): Difficulty | undefined {
-  const names = Object.keys(DIFFICULTIES) as Difficulty[];
-  if (typeof raw === "string") return names.find((name) => name === raw);
-  return finite(raw) && Number.isInteger(raw) ? names[raw] : undefined;
-}
-
-/** A game type from its name or its level.dat number, or undefined. */
-export function gameTypeOf(raw: unknown): GameType | undefined {
-  if (typeof raw === "string" && (GAME_TYPES as readonly string[]).includes(raw)) return raw as GameType;
-  return finite(raw) && Number.isInteger(raw) ? GAME_TYPES[raw] : undefined;
 }
 
 /** `world.set` parameters, or why the change cannot be expressed. */
@@ -420,7 +392,7 @@ function worldChangeParams(change: WorldChange): Record<string, unknown> | strin
     const rules: Record<string, boolean | number> = {};
     for (const [name, value] of Object.entries(change.gamerules)) {
       if (!name.trim()) return "a game rule needs a name";
-      if (typeof value !== "boolean" && !finite(value)) return `game rule ${name} must be true, false or a number`;
+      if (typeof value !== "boolean" && !isFiniteNumber(value)) return `game rule ${name} must be true, false or a number`;
       rules[name] = value;
     }
     if (Object.keys(rules).length) params.gamerules = rules;
@@ -443,64 +415,6 @@ function worldChangeParams(change: WorldChange): Record<string, unknown> | strin
   return Object.keys(params).length ? params : "give at least one of gamerules, difficulty, gameType, time or weather";
 }
 
-export type EngineFailureReason =
-  | "anchor_missing"
-  | "not_in_world"
-  | "wrong_thread"
-  | "timeout"
-  | "command_failed"
-  | "path_not_writable"
-  | "scripting_unavailable"
-  | "unknown_method"
-  | "invalid_params"
-  | "not_attached"
-  | "disconnected"
-  | "protocol"
-  | "rpc_error";
-
-export interface EngineFailure {
-  ok: false;
-  /** JSON-RPC error code from the agent, -32602 for input this client rejected, -32000 for transport failures. */
-  code: number;
-  reason: EngineFailureReason;
-  anchor?: string;
-  message: string;
-}
-
-export type EngineResult<T> = { ok: true; value: T } | EngineFailure;
-
-/** Reasons that mean the caller has to fix the setup, so the CLI exits 2 rather than 1. */
-const SETUP_REASONS: Readonly<Partial<Record<EngineFailureReason, boolean>>> = {
-  not_attached: true,
-  disconnected: true,
-  invalid_params: true,
-};
-
-export function isSetupFailure(failure: EngineFailure): boolean {
-  return SETUP_REASONS[failure.reason] === true;
-}
-
-const RPC_REASONS: Readonly<Record<number, EngineFailureReason>> = {
-  [-32601]: "unknown_method",
-  [-32602]: "invalid_params",
-  [-32001]: "anchor_missing",
-  [-32002]: "not_in_world",
-  [-32003]: "wrong_thread",
-  [-32004]: "timeout",
-  [-32006]: "command_failed",
-  [-32007]: "path_not_writable",
-  [-32014]: "scripting_unavailable",
-};
-
-function invalid(message: string): EngineFailure {
-  return { ok: false, code: -32602, reason: "invalid_params", message };
-}
-
-/** The agent answered with a shape this client does not know, so the value cannot be trusted. */
-function malformed(method: string, value: unknown): EngineFailure {
-  return { ok: false, code: -32000, reason: "protocol", message: `${method} answered ${JSON.stringify(value)}` };
-}
-
 /** The chat line typed when the agent has no player command origin yet: no side effect, and its output is dropped. */
 const PRIME_LINE = "testfor @s";
 const CHAT_SCREEN = "chat_screen";
@@ -513,10 +427,6 @@ const PRIME_POLL_MS = 150;
 /** The agent cannot run commands until a player command was seen in this world. */
 function needsOrigin(result: EngineResult<unknown>): result is EngineFailure {
   return !result.ok && result.reason === "anchor_missing" && (result.anchor === "command.origin" || result.anchor === "command.commands");
-}
-
-function message(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /**
@@ -596,15 +506,12 @@ export function engineGameDir(install: ClientInstall, check: EngineClientCheck =
   }
   const gameDir =
     install.gameDir ??
-    (check.candidates ?? (() => gameDirCandidates()))().find((dir) => exists(join(dir, "Minecraft.Windows.exe")));
+    (check.candidates ?? (() => gameDirCandidates()))().find((dir) => exists(join(dir, GAME_EXE)));
   if (!gameDir) {
-    throw new EngineAttachError(
-      "client",
-      `cannot find Minecraft.Windows.exe for ${install.label}: set SCULKWIRE_GAME_DIR to the game folder`,
-    );
+    throw new EngineAttachError("client", `cannot find ${GAME_EXE} for ${install.label}: set SCULKWIRE_GAME_DIR to the game folder`);
   }
-  if (!exists(join(gameDir, "Minecraft.Windows.exe"))) {
-    throw new EngineAttachError("client", `${install.label} has no Minecraft.Windows.exe in ${gameDir}`);
+  if (!exists(join(gameDir, GAME_EXE))) {
+    throw new EngineAttachError("client", `${install.label} has no ${GAME_EXE} in ${gameDir}`);
   }
   return gameDir;
 }
@@ -616,13 +523,6 @@ export interface EngineSessionOptions {
   timeoutMs?: number;
   /** Install whose `screenshots` gallery is searched before an attach has resolved one. */
   install?: ClientInstall;
-}
-
-export interface EngineAttachOptions {
-  /** Skip install detection, for callers that already resolved one. */
-  install?: ClientInstall;
-  /** Recompile the DLL even when the cache entry exists. */
-  force?: boolean;
 }
 
 /** Opens a socket, retrying while the DLL's listener thread starts. */
@@ -651,8 +551,6 @@ export class EngineSession {
   #attaching: Promise<EngineStatus> | undefined;
   #everAttached = false;
   #install: ClientInstall | undefined;
-  #build: AgentBuild | undefined;
-  #injection: InjectionResult | undefined;
   #paused = false;
   #tickListeners = new Set<EngineTickListener>();
   /** The client `stream.subscribe` ran on, and at what interval. A new connection needs a new subscription. */
@@ -660,7 +558,7 @@ export class EngineSession {
   #lastTick: { at: number; tick: EngineTick } | undefined;
   /** The input lock. Its state follows `input.lock` answers and the DLL's `lock` notifications. */
   readonly lock = new InputLock(
-    (params) => this.#call("input.lock", params, { timeoutMs: INPUT_TIMEOUT_MS }),
+    (params) => this.#call("input.lock", params),
     () => this.#ensureCommandOrigin(),
   );
   /** The host focus this process watches (`focus.ts`, driven by `runtime/client/agentprovider.ts`), or undefined when it watches none. */
@@ -682,39 +580,27 @@ export class EngineSession {
     return this.#client?.connected === true;
   }
 
-  get install(): ClientInstall | undefined {
-    return this.#install;
-  }
-
-  get build(): AgentBuild | undefined {
-    return this.#build;
-  }
-
-  get injection(): InjectionResult | undefined {
-    return this.#injection;
-  }
-
   /**
    * Build, inject, connect and verify `engine.status`. Concurrent calls share one attach. A session that is already
    * connected only refreshes its status, so the common MCP path never recompiles or re-injects.
    */
-  async attach(options: EngineAttachOptions = {}): Promise<EngineStatus> {
-    this.#attaching ??= this.#attach(options).finally(() => {
+  async attach(): Promise<EngineStatus> {
+    this.#attaching ??= this.#attach().finally(() => {
       this.#attaching = undefined;
     });
     return this.#attaching;
   }
 
-  async #attach(options: EngineAttachOptions): Promise<EngineStatus> {
+  async #attach(): Promise<EngineStatus> {
     if (this.#everAttached && this.#client?.connected) {
       const current = await this.status();
       if (current.ok) return current.value;
     }
     let install: ClientInstall;
     try {
-      install = options.install ?? (await findInstall());
+      install = await findInstall();
     } catch (err) {
-      throw new EngineAttachError("client", message(err), { cause: err });
+      throw new EngineAttachError("client", errorMessage(err), { cause: err });
     }
     // Any PC (GDK) install works: what has to hold is that the game is the Windows process and its folder exists, so
     // the injector's route agrees with this OS before anything is built or injected. The folder also decides whether
@@ -722,17 +608,17 @@ export class EngineSession {
     const gameDir = engineGameDir(install);
     let build: AgentBuild;
     try {
-      build = await buildAgent({ gameDir, ...(options.force ? { force: true } : {}) });
+      build = await buildAgent({ gameDir });
     } catch (err) {
-      throw new EngineAttachError("build", message(err), { cause: err });
+      throw new EngineAttachError("build", errorMessage(err), { cause: err });
     }
     let injection: InjectionResult;
     try {
-      injection = await injectClient({ install, build });
+      injection = await injectAgent(install, { dll: build.dll, injector: build.injector });
     } catch (err) {
       throw new EngineAttachError(
         "inject",
-        `${message(err)}. Start the game first, then attach, so the injector finds Minecraft.Windows.exe`,
+        `${errorMessage(err)}. Start the game first, then attach, so the injector finds ${GAME_EXE}`,
         { cause: err },
       );
     }
@@ -744,14 +630,12 @@ export class EngineSession {
     } catch (err) {
       throw new EngineAttachError(
         "connect",
-        `injected into pid ${injection.pid}, but nothing accepted a connection on 127.0.0.1:${this.port}: ${message(err)}. ` +
+        `injected into pid ${injection.pid}, but nothing accepted a connection on 127.0.0.1:${this.port}: ${errorMessage(err)}. ` +
           `The agent log is ${join(build.dir, "sculkwire-agent.log")}`,
         { cause: err },
       );
     }
     this.#install = install;
-    this.#build = build;
-    this.#injection = injection;
     const status = await this.#resolvedStatus();
     if (!status.ok) {
       throw new EngineAttachError(
@@ -799,12 +683,6 @@ export class EngineSession {
     }
   }
 
-  /** `engine.resolve`: re-run every anchor recipe, then report the same shape as `engine.status`. */
-  async resolve(): Promise<EngineResult<EngineStatus>> {
-    const result = await this.#call<Partial<EngineStatus> | undefined>("engine.resolve", {});
-    return result.ok ? { ok: true, value: normalizeStatus(result.value) } : result;
-  }
-
   /**
    * `command`. The line runs on the game's main thread through the engine's command dispatcher, as if typed by the
    * local player. A leading slash is optional and a newline is rejected because the engine would split it into several
@@ -818,7 +696,7 @@ export class EngineSession {
     if (/[\r\n]/.test(command)) return invalid("a command cannot contain a newline");
     const line = command.trim().replace(/^\//, "");
     if (!line) return invalid("a command cannot be empty");
-    const run = () => this.#call<EngineCommandResult>("command", { command: line }, { timeoutMs: COMMAND_TIMEOUT_MS });
+    const run = () => this.#call<EngineCommandResult>("command", { command: line });
     const first = await run();
     if (!needsOrigin(first)) return first;
     const primed = await this.#primeCommandOrigin();
@@ -921,7 +799,7 @@ export class EngineSession {
     }
     if (args.step !== undefined) {
       if (!Number.isInteger(args.step) || args.step < 1 || args.step > 600) return invalid("step must be an integer from 1 to 600");
-      const result = await this.#call<EngineTickResult>("tick.step", { count: args.step }, { timeoutMs: STEP_TIMEOUT_MS });
+      const result = await this.#call<EngineTickResult>("tick.step", { count: args.step });
       // A step leaves the simulation paused.
       if (result.ok) this.#paused = true;
       return result;
@@ -946,7 +824,7 @@ export class EngineSession {
     try {
       await mkdir(dirname(unix), { recursive: true });
     } catch (err) {
-      return { ok: false, code: -32007, reason: "path_not_writable", message: `cannot create ${dirname(unix)}: ${message(err)}` };
+      return { ok: false, code: -32007, reason: "path_not_writable", message: `cannot create ${dirname(unix)}: ${errorMessage(err)}` };
     }
     const name = `sculkwire-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
     const requested = join(dirname(unix), `${name}.png`);
@@ -954,7 +832,7 @@ export class EngineSession {
     const searched = install ? galleries(install) : [];
     // Every gallery picture that exists before the request is an older shot, however recent its mtime.
     const before = await galleryPictures(searched);
-    const result = await this.#call<{ named?: unknown } | undefined>("screenshot", { path: gamePath(requested) }, { timeoutMs: SCREENSHOT_TIMEOUT_MS });
+    const result = await this.#call<{ named?: unknown } | undefined>("screenshot", { path: gamePath(requested) });
     if (!result.ok) return result;
     const named = result.value?.named !== false;
     const written = await findScreenshot(requested, searched, named ? undefined : before);
@@ -976,7 +854,7 @@ export class EngineSession {
       if (written.format === "png") await recompressPngFile(target);
       return { ok: true, value: { path: target, bytes: (await stat(target)).size, format: written.format } };
     } catch (err) {
-      return { ok: false, code: -32007, reason: "path_not_writable", message: `cannot copy ${written.file} to ${target}: ${message(err)}` };
+      return { ok: false, code: -32007, reason: "path_not_writable", message: `cannot copy ${written.file} to ${target}: ${errorMessage(err)}` };
     }
   }
 
@@ -991,9 +869,9 @@ export class EngineSession {
    * game reports it (0 = +Z); any finite yaw is wrapped by the engine.
    */
   async look(pitch: number, yaw: number): Promise<EngineResult<{ pitch: number; yaw: number }>> {
-    if (!finite(pitch) || pitch < -90 || pitch > 90) return invalid("pitch must be a number from -90 to 90");
-    if (!finite(yaw)) return invalid("yaw must be a finite number");
-    return this.#call("input.look", { pitch, yaw }, { timeoutMs: INPUT_TIMEOUT_MS });
+    if (!isFiniteNumber(pitch) || pitch < -90 || pitch > 90) return invalid("pitch must be a number from -90 to 90");
+    if (!isFiniteNumber(yaw)) return invalid("yaw must be a finite number");
+    return this.#call("input.look", { pitch, yaw });
   }
 
   /**
@@ -1003,15 +881,14 @@ export class EngineSession {
   async move(move: Partial<EngineMove>): Promise<EngineResult<Record<string, never>>> {
     const forward = move.forward ?? 0;
     const strafe = move.strafe ?? 0;
-    if (!finite(forward) || forward < -1 || forward > 1) return invalid("forward must be a number from -1 to 1");
-    if (!finite(strafe) || strafe < -1 || strafe > 1) return invalid("strafe must be a number from -1 to 1");
+    if (!isFiniteNumber(forward) || forward < -1 || forward > 1) return invalid("forward must be a number from -1 to 1");
+    if (!isFiniteNumber(strafe) || strafe < -1 || strafe > 1) return invalid("strafe must be a number from -1 to 1");
     const params: EngineMove = { forward, strafe, jump: move.jump === true, sneak: move.sneak === true, sprint: move.sprint === true };
-    return this.#call("input.move", params, { timeoutMs: INPUT_TIMEOUT_MS });
+    return this.#call("input.move", params);
   }
 
-  /** `input.release`: drop every held movement input. */
   release(): Promise<EngineResult<unknown>> {
-    return this.#call("input.release", {}, { timeoutMs: INPUT_TIMEOUT_MS });
+    return this.#call("input.release", {});
   }
 
   /**
@@ -1020,7 +897,7 @@ export class EngineSession {
    * type, position}`), null when nothing in reach or an older agent.
    */
   async attack(): Promise<EngineResult<{ hit: string | null; target: Record<string, unknown> | null }>> {
-    const result = await this.#call<{ hit?: unknown; target?: unknown } | undefined>("input.attack", {}, { timeoutMs: INPUT_TIMEOUT_MS });
+    const result = await this.#call<{ hit?: unknown; target?: unknown } | undefined>("input.attack", {});
     if (!result.ok) return result;
     const hit = result.value?.hit;
     const target = result.value?.target;
@@ -1038,7 +915,7 @@ export class EngineSession {
    * agent lets a held button go a second after the last `hold: true`, so a hold is renewed by repeating it.
    */
   use(hold?: boolean): Promise<EngineResult<unknown>> {
-    return this.#call("input.use", hold === undefined ? {} : { hold }, { timeoutMs: INPUT_TIMEOUT_MS });
+    return this.#call("input.use", hold === undefined ? {} : { hold });
   }
 
   /**
@@ -1046,7 +923,7 @@ export class EngineSession {
    * crosshair), `false` lets go. Renewed by repeating `true` within a second, like `use`.
    */
   attackHold(hold: boolean): Promise<EngineResult<unknown>> {
-    return this.#call("input.attack", { hold }, { timeoutMs: INPUT_TIMEOUT_MS });
+    return this.#call("input.attack", { hold });
   }
 
   /** The newest `tick` notification and when it arrived (Date.now()), if any arrived on the current connection. */
@@ -1129,8 +1006,6 @@ export class EngineSession {
     this.#tickListeners.clear();
     this.lock.reset();
     this.#install = undefined;
-    this.#build = undefined;
-    this.#injection = undefined;
   }
 
   async #ensureClient(): Promise<AgentClient> {
@@ -1161,7 +1036,7 @@ export class EngineSession {
     this.#hostFocused = focused;
     const client = this.#client;
     if (!client?.connected) return;
-    const state = await client.call("input.focus", { focused: focused ?? true }, { timeoutMs: INPUT_TIMEOUT_MS }).then(parseLockState, () => undefined);
+    const state = await client.call("input.focus" satisfies MethodName, { focused: focused ?? true }, { timeoutMs: METHODS["input.focus"].timeoutMs }).then(parseLockState, () => undefined);
     if (state) this.lock.update(state);
   }
 
@@ -1176,14 +1051,15 @@ export class EngineSession {
       const state = parseLockState(params);
       if (state) this.lock.update(state);
     });
-    if (this.#hostFocused !== undefined) void client.call("input.focus", { focused: this.#hostFocused }, { timeoutMs: INPUT_TIMEOUT_MS }).catch(() => undefined);
+    if (this.#hostFocused !== undefined) void client.call("input.focus" satisfies MethodName, { focused: this.#hostFocused }, { timeoutMs: METHODS["input.focus"].timeoutMs }).catch(() => undefined);
     return client;
   }
 
-  async #call<T>(method: string, params?: unknown, options: { timeoutMs?: number } = {}): Promise<EngineResult<T>> {
+  async #call<T>(method: MethodName, params?: unknown, options: { timeoutMs?: number } = {}): Promise<EngineResult<T>> {
     try {
       const client = await this.#ensureClient();
-      const value = await client.call<T>(method, params, options);
+      const timeoutMs = options.timeoutMs ?? methodTimeout(method);
+      const value = await client.call<T>(method, params, timeoutMs === undefined ? {} : { timeoutMs });
       return { ok: true, value };
     } catch (err) {
       return this.#failure(err);
@@ -1223,7 +1099,7 @@ export class EngineSession {
         message: err.message,
       };
     }
-    return { ok: false, code: -32000, reason: "protocol", message: message(err) };
+    return { ok: false, code: -32000, reason: "protocol", message: errorMessage(err) };
   }
 
   /** One unresolved anchor is unambiguous. Several means the failing method's anchor cannot be named here. */
@@ -1231,7 +1107,7 @@ export class EngineSession {
     const client = this.#client;
     if (!client?.connected) return undefined;
     try {
-      const raw = await client.call<Partial<EngineStatus> | undefined>("engine.status", {}, { timeoutMs: 1000 });
+      const raw = await client.call<Partial<EngineStatus> | undefined>("engine.status" satisfies MethodName, {}, { timeoutMs: 1000 });
       const missing = normalizeStatus(raw).missing;
       return missing.length === 1 ? missing[0] : undefined;
     } catch {
@@ -1239,7 +1115,6 @@ export class EngineSession {
     }
   }
 
-  /** `settings.list`: the game's own options, filtered by an id substring. */
   async settingsList(filter?: string): Promise<EngineResult<GameSetting[]>> {
     const trimmed = filter?.trim();
     const result = await this.#call<{ settings?: unknown }>("settings.list", trimmed ? { filter: trimmed } : {});
@@ -1299,7 +1174,7 @@ export class EngineSession {
    * `play_screen`, `hud_screen`). Client main thread, no world needed, so it also answers in a menu.
    */
   async uiScreen(): Promise<EngineResult<UiScreen>> {
-    const result = await this.#call<unknown>("ui.screen", {}, { timeoutMs: UI_TIMEOUT_MS });
+    const result = await this.#call<unknown>("ui.screen", {});
     if (!result.ok) return result;
     const screen = parseUiScreen(result.value);
     return screen ? { ok: true, value: screen } : malformed("ui.screen", result.value);
@@ -1311,17 +1186,16 @@ export class EngineSession {
    */
   async uiControls(filter?: string): Promise<EngineResult<UiControl[]>> {
     const trimmed = filter?.trim();
-    const result = await this.#call<unknown>("ui.controls", trimmed ? { filter: trimmed } : {}, { timeoutMs: UI_TIMEOUT_MS });
+    const result = await this.#call<unknown>("ui.controls", trimmed ? { filter: trimmed } : {});
     if (!result.ok) return result;
     const controls = parseUiControls(result.value);
     return controls ? { ok: true, value: controls } : malformed("ui.controls", result.value);
   }
 
-  /** `ui.press`: press a named control of the current screen through the game's own handler. */
   async uiPress(name: string): Promise<EngineResult<unknown>> {
     const control = name.trim();
     if (!control) return invalid("a control name cannot be empty");
-    return this.#call("ui.press", { name: control }, { timeoutMs: UI_TIMEOUT_MS });
+    return this.#call("ui.press", { name: control });
   }
 
   /**
@@ -1331,32 +1205,31 @@ export class EngineSession {
   async uiKey(key: string, action?: UiKeyAction): Promise<EngineResult<unknown>> {
     const params = keyParams(key, action);
     if (typeof params === "string") return invalid(params);
-    return this.#call("ui.key", params, { timeoutMs: UI_TIMEOUT_MS });
+    return this.#call("ui.key", params);
   }
 
-  /** `ui.text`: type into the focused text box of the current screen. */
   async uiText(text: string): Promise<EngineResult<unknown>> {
     const params = textParams(text);
     if (typeof params === "string") return invalid(params);
-    return this.#call("ui.text", params, { timeoutMs: UI_TIMEOUT_MS });
+    return this.#call("ui.text", params);
   }
 
   /** `ui.click`: a click on the current screen at client pixels, the same frame a screenshot shows. */
   async uiClick(x: number, y: number, button?: UiButton): Promise<EngineResult<unknown>> {
     const params = clickParams(x, y, button);
     if (typeof params === "string") return invalid(params);
-    return this.#call("ui.click", params, { timeoutMs: UI_TIMEOUT_MS });
+    return this.#call("ui.click", params);
   }
 
   /** `ui.scroll`: the wheel at a point of the current screen, `delta` whole notches (positive up). */
   async uiScroll(x: number, y: number, delta: number): Promise<EngineResult<unknown>> {
     const params = scrollParams(x, y, delta);
     if (typeof params === "string") return invalid(params);
-    return this.#call("ui.scroll", params, { timeoutMs: UI_TIMEOUT_MS });
+    return this.#call("ui.scroll", params);
   }
 
   /** The generic RPC entry for feature modules that parse their own methods (inventory, containers, crafting). */
-  call<T>(method: string, params?: unknown, options: { timeoutMs?: number } = {}): Promise<EngineResult<T>> {
+  call<T>(method: MethodName, params?: unknown, options: { timeoutMs?: number } = {}): Promise<EngineResult<T>> {
     return this.#call<T>(method, params, options);
   }
 }

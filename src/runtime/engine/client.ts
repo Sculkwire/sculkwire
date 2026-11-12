@@ -7,6 +7,7 @@
  * (e.g. `tick` after `stream.subscribe`); `on(method, listener)` receives its params.
  */
 import { createConnection, type Socket } from "node:net";
+import type { MethodName } from "./methods.ts";
 
 export class AgentClientError extends Error {
   readonly kind: "timeout" | "closed" | "protocol";
@@ -32,24 +33,6 @@ export interface AgentClientOptions {
   port: number;
   /** Per-call timeout; `call` may override. */
   timeoutMs?: number;
-}
-
-export interface AgentInfo {
-  pid: number;
-  exe: string;
-  imageBase: string;
-  imageSize: number;
-  version: string;
-}
-
-export interface AgentModule {
-  name: string;
-  base: string;
-  size: number;
-}
-
-export interface AgentRtti {
-  vtable: string | null;
 }
 
 interface Pending {
@@ -84,8 +67,6 @@ export class AgentClient {
   #lastBadLine: string | undefined;
   /** Notification listeners by method; `*` receives every notification. */
   #listeners = new Map<string, Set<NotificationListener>>();
-  /** Called once when the connection ends, after pending calls were rejected. */
-  #closeListeners = new Set<(reason: string) => void>();
 
   constructor(options: AgentClientOptions) {
     this.host = options.host ?? "127.0.0.1";
@@ -144,19 +125,7 @@ export class AgentClient {
   }
 
   ping(): Promise<string> {
-    return this.call<string>("ping");
-  }
-
-  info(): Promise<AgentInfo> {
-    return this.call<AgentInfo>("info");
-  }
-
-  resolveRtti(name: string): Promise<AgentRtti> {
-    return this.call<AgentRtti>("resolve_rtti", { name });
-  }
-
-  modules(): Promise<AgentModule[]> {
-    return this.call<AgentModule[]>("modules");
+    return this.call<string>("ping" satisfies MethodName);
   }
 
   /**
@@ -176,19 +145,13 @@ export class AgentClient {
     };
   }
 
-  /** Called once when the connection closes or fails, with the reason. Returns the remover. */
-  onClose(listener: (reason: string) => void): () => void {
-    this.#closeListeners.add(listener);
-    return () => this.#closeListeners.delete(listener);
-  }
-
   /** `stream.subscribe`: this connection then receives a `tick` notification every `every` ticks (default 1). */
   subscribe(every?: number): Promise<{ ok: boolean }> {
-    return this.call<{ ok: boolean }>("stream.subscribe", every === undefined ? {} : { every });
+    return this.call<{ ok: boolean }>("stream.subscribe" satisfies MethodName, every === undefined ? {} : { every });
   }
 
   unsubscribe(): Promise<unknown> {
-    return this.call("stream.unsubscribe", {});
+    return this.call("stream.unsubscribe" satisfies MethodName, {});
   }
 
   close(): void {
@@ -196,7 +159,6 @@ export class AgentClient {
     this.#socket?.destroy();
     this.#socket = undefined;
     this.#rejectPending(new AgentClientError("closed", "agent client closed"));
-    this.#emitClose("agent client closed");
   }
 
   #onData(chunk: Buffer): void {
@@ -255,19 +217,6 @@ export class AgentClient {
     this.#closed = true;
     this.#socket = undefined;
     this.#rejectPending(new AgentClientError("closed", reason));
-    this.#emitClose(reason);
-  }
-
-  #emitClose(reason: string): void {
-    const listeners = [...this.#closeListeners];
-    this.#closeListeners.clear();
-    for (const listener of listeners) {
-      try {
-        listener(reason);
-      } catch {
-        // ignored, as for notifications
-      }
-    }
   }
 
   #rejectPending(error: Error): void {

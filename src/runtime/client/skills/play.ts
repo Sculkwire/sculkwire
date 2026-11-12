@@ -7,7 +7,10 @@
  * hostile close aborts it, the tactics fight or flee until it is clear, and the step is tried again. A step is done by
  * its check, never by assumption. A step the built-in checks cannot verify runs until the time limit.
  */
-import { realClock, type ActionResult, type Clock, type EntityInfo, type Loadout, type PlayerAction, type PlayerController, type PlayerState } from "../player.ts";
+import { realClock, type Clock } from "../clock.ts";
+import type { PlayerController } from "../player.ts";
+import type { ActionResult, EntityInfo, Loadout, PlayerAction, PlayerState } from "../types.ts";
+import { errorMessage } from "../../../core/errors.ts";
 import { runTaskStep } from "../tasks/steps.ts";
 import type { TaskEnv, TaskFailure, TaskStep, TaskStepResult } from "../tasks/types.ts";
 import type { Stance } from "./pack.ts";
@@ -66,17 +69,17 @@ const DONE_STREAK = 2;
 const LOADOUT_EVERY_MS = 1000;
 const MAX_TRACE = 300;
 /** A hostile this close aborts a running task step. */
-export const TASK_ABORT_RADIUS = 6;
+const TASK_ABORT_RADIUS = 6;
 /** A task step starts (again) once no hostile is this close and no hit was taken. */
-export const TASK_CLEAR_RADIUS = 8;
+const TASK_CLEAR_RADIUS = 8;
 /** An interrupted task step is tried again this many times, then the plan fails. */
-export const MAX_TASK_RETRIES = 2;
+const MAX_TASK_RETRIES = 2;
 
 /**
  * `goal_unknown`: a part of the goal was not understood (a `free` step) and there was nothing to do for
  * `UNKNOWN_QUIET_MS`, so the run stopped instead of idling to the time limit.
  */
-export type PlayStop = "goal_done" | "timeout" | "died" | "error" | "goal_unknown" | "targets_gone";
+type PlayStop = "goal_done" | "timeout" | "died" | "error" | "goal_unknown" | "targets_gone";
 
 /**
  * `targets_gone` (in the type above): a kill step with a count has none of its targets left alive within the goal
@@ -85,7 +88,7 @@ export type PlayStop = "goal_done" | "timeout" | "died" | "error" | "goal_unknow
 const TARGETS_GONE_MS = 1000;
 
 /** A goal part nobody understood ends the run after this long with nothing to do (only idle, no hostile near). */
-export const UNKNOWN_QUIET_MS = 5000;
+const UNKNOWN_QUIET_MS = 5000;
 /** A hostile this close keeps a not-understood run going: the player defends itself (the tactics' fight range). */
 const QUIET_RADIUS = 16;
 
@@ -102,7 +105,7 @@ export interface PlayStep {
   result: { ok: boolean; message: string; durationMs: number };
 }
 
-export interface PlayStats {
+interface PlayStats {
   decisions: number;
   kills: number;
   killed: Record<string, number>;
@@ -123,7 +126,7 @@ export interface PlayStats {
 }
 
 /** One plan step in the result. */
-export interface PlanStepReport {
+interface PlanStepReport {
   /** The clause of the goal it came from. */
   text: string;
   kind: PlanKind;
@@ -158,7 +161,7 @@ export interface PlayResult {
 }
 
 /** The tactics `allow` permits. `idle` is always in. */
-export function allowedTactics(allow?: readonly string[]): Set<TacticKind> {
+function allowedTactics(allow?: readonly string[]): Set<TacticKind> {
   if (!allow || allow.length === 0) return new Set(TACTICS);
   const unknown = allow.filter((a) => !(TACTICS as readonly string[]).includes(a));
   if (unknown.length) throw new Error(`unknown play tactic(s) ${unknown.join(", ")}; one of ${TACTICS.join(", ")}`);
@@ -173,7 +176,7 @@ function round(n: number, digits = 1): string {
  * The controller action that carries a tactic out. A fight is one continuing action: it starts on the tactic's target
  * and moves on to the next hostile by itself (`all`), choosing whom to strike tick by tick.
  */
-export function tacticAction(t: Tactic, goal: Goal, stepMs: number, timeLeftMs: number, stance?: Stance): PlayerAction {
+function tacticAction(t: Tactic, goal: Goal, stepMs: number, timeLeftMs: number, stance?: Stance): PlayerAction {
   const left = Math.max(1000, timeLeftMs);
   switch (t.kind) {
     case "fight":
@@ -605,7 +608,7 @@ export async function play(
       message = "cancelled";
     } else if (Date.now() < deadline) {
       stoppedBy = "error";
-      message = err instanceof Error ? err.message : String(err);
+      message = errorMessage(err);
     }
   } finally {
     const why = stoppedBy === "timeout" ? "time is up" : stoppedBy === "goal_done" ? "the goal is done" : message;

@@ -8,6 +8,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseOptions } from "../../gamefiles/options.ts";
+import { HELPER_PRINT_PREFIX, HELPER_QUERY_EVENT } from "./helperprotocol.ts";
 
 /** Used when no language file can be read: the parser's own errors. */
 const BUILTIN_FAILURE = /^Syntax error|^Unknown command/i;
@@ -75,7 +76,7 @@ export function debuggerCommandOk(output: readonly string[], failed: FailureMatc
  * command every helper query is sent with.
  */
 export function helperTraffic(message: string): boolean {
-  return message.startsWith("[sculkwire:") || message.includes("sculkwire:query");
+  return message.startsWith(HELPER_PRINT_PREFIX) || message.includes(HELPER_QUERY_EVENT);
 }
 
 /**

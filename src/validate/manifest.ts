@@ -3,8 +3,8 @@
  * UUID uniqueness across packs, pack dependencies by uuid + version, `@minecraft/*` script modules against
  * what the target game ships, capabilities, subpacks, BP <-> RP linkage.
  */
-import type { Channel } from "../core/version.ts";
-import { compareVersionTuples } from "./classify.ts";
+import type { Severity } from "../core/diagnostic.ts";
+import { type Channel, compareDotted, compareTuples } from "../core/version.ts";
 import type { Context, Pack } from "./context.ts";
 
 const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -68,6 +68,13 @@ function fmtVersion(v: unknown): string {
   return Array.isArray(v) ? v.join(".") : JSON.stringify(v);
 }
 
+const M = "manifest.json";
+
+/** Report at `pointer` in the pack's manifest.json. */
+function report(ctx: Context, pack: Pack, pointer: string, severity: Severity, code: string, message: string, hint?: string): Promise<void> {
+  return ctx.at(pack, M, pointer, hint ? { severity, code, message, hint } : { severity, code, message });
+}
+
 export async function checkManifests(ctx: Context, packs: readonly Pack[], opts: ManifestOptions): Promise<void> {
   const supported = opts.scriptModules;
   const uuidToModule = new Map<string, string>();
@@ -75,13 +82,10 @@ export async function checkManifests(ctx: Context, packs: readonly Pack[], opts:
   const byUuid = new Map<string, Pack>();
   for (const p of packs) if (p.info.uuid) byUuid.set(p.info.uuid.toLowerCase(), p);
   const seen = new Map<string, { pack: Pack; pointer: string }[]>();
-  const M = "manifest.json";
 
   for (const pack of packs) {
-    const err = (pointer: string, code: string, message: string, hint?: string) =>
-      ctx.at(pack, M, pointer, hint ? { severity: "error", code, source: "manifest", message, hint } : { severity: "error", code, source: "manifest", message });
-    const warn = (pointer: string, code: string, message: string) =>
-      ctx.at(pack, M, pointer, { severity: "warning", code, source: "manifest", message });
+    const err = (pointer: string, code: string, message: string, hint?: string) => report(ctx, pack, pointer, "error", code, message, hint);
+    const warn = (pointer: string, code: string, message: string) => report(ctx, pack, pointer, "warning", code, message);
     const doc = await ctx.json(pack, M);
     if (!doc || doc.value === undefined) continue; // unreadable: reported by the json check
     const m = obj(doc.value);
@@ -119,29 +123,27 @@ export async function checkManifests(ctx: Context, packs: readonly Pack[], opts:
         await ctx.at(pack, M, "/header", {
           severity: fv >= 2 ? "error" : "warning",
           code: "manifest.min-engine-missing",
-          source: "manifest",
           message: "header.min_engine_version is required",
         });
       } else if (mev !== undefined) {
         const t = vtuple(mev);
         if (!t || (Array.isArray(mev) && !versionOk(mev, 2))) {
           await err("/header/min_engine_version", "manifest.min-engine-invalid", `min_engine_version must be [1, minor, patch], got ${JSON.stringify(mev)}`);
-        } else if (opts.gameVersion && compareVersionTuples(t, opts.gameVersion.slice(0, 3)) > 0) {
+        } else if (opts.gameVersion && compareTuples(t, opts.gameVersion.slice(0, 3)) > 0) {
           await err(
             "/header/min_engine_version",
             "manifest.min-engine-too-new",
             `min_engine_version ${t.join(".")} is newer than Minecraft ${opts.gameVersion.join(".")} (${opts.channel}); the pack will not load`,
             `lower it to ${opts.gameVersion.slice(0, 3).join(", ")} or older`,
           );
-        } else if (!opts.gameVersion && opts.gameVersionEstimate && compareVersionTuples(t, opts.gameVersionEstimate) > 0) {
+        } else if (!opts.gameVersion && opts.gameVersionEstimate && compareTuples(t, opts.gameVersionEstimate) > 0) {
           await ctx.at(pack, M, "/header/min_engine_version", {
             severity: "warning",
             code: "manifest.min-engine-too-new",
-            source: "manifest",
             message: `min_engine_version ${t.join(".")} is newer than ${opts.gameVersionEstimate.join(".")}, the newest version known offline; the pack will not load in older games`,
             hint: "pass samplesRoot (or gameVersion) to check against the exact target game",
           });
-        } else if (compareVersionTuples(t, [1, 13, 0]) < 0) {
+        } else if (compareTuples(t, [1, 13, 0]) < 0) {
           await warn("/header/min_engine_version", "manifest.min-engine-legacy", `min_engine_version ${t.join(".")} enables legacy behavior; use a current version`);
         }
       }
@@ -226,7 +228,7 @@ export async function checkManifests(ctx: Context, packs: readonly Pack[], opts:
       else {
         const want = vtuple(dep.version);
         const have = vtuple(other.info.version);
-        if (!want || !have || compareVersionTuples(want, have) !== 0) {
+        if (!want || !have || compareTuples(want, have) !== 0) {
           await err(
             `${dp}/version`,
             "manifest.dependency-version",
@@ -265,7 +267,6 @@ export async function checkManifests(ctx: Context, packs: readonly Pack[], opts:
       await ctx.at(w.pack, M, w.pointer, {
         severity: "error",
         code: "manifest.uuid-duplicate",
-        source: "manifest",
         message: `UUID ${uid} is also used at ${ctx.label(first.pack, M)}#${first.pointer}; every pack and module needs its own UUID`,
         related: [{ file: ctx.label(first.pack, M), message: "first use" }],
       });
@@ -288,7 +289,6 @@ export async function checkManifests(ctx: Context, packs: readonly Pack[], opts:
       await ctx.at(bp, M, Array.isArray(bp.manifest?.dependencies) ? "/dependencies" : "/header", {
         severity: "warning",
         code: "manifest.pack-link",
-        source: "manifest",
         message: "behavior pack and resource pack do not depend on each other; the RP will not be applied automatically",
       });
     }
@@ -305,9 +305,7 @@ async function scriptDependency(
   hasScript: boolean,
   opts: ManifestOptions,
 ): Promise<void> {
-  const M = "manifest.json";
-  const at = (pointer: string, severity: "error" | "warning", code: string, message: string, hint?: string) =>
-    ctx.at(pack, M, pointer, hint ? { severity, code, source: "manifest", message, hint } : { severity, code, source: "manifest", message });
+  const at = (pointer: string, severity: Severity, code: string, message: string, hint?: string) => report(ctx, pack, pointer, severity, code, message, hint);
   const namePtr = hasModuleName ? `${dp}/module_name` : dp;
   if (!hasScript) await at(dp, "warning", "manifest.script-dependency-unused", `dependency on ${name} but the pack has no script module`);
   if (NPM_ONLY[name]) {
@@ -335,7 +333,7 @@ async function scriptDependency(
       );
     return;
   }
-  const stable = [...ok.keys()].filter((v) => !v.endsWith("-beta")).sort((a, b) => compareVersionTuples(a.split(".").map(Number), b.split(".").map(Number)));
+  const stable = [...ok.keys()].filter((v) => !v.endsWith("-beta")).sort(compareDotted);
   const beta = [...ok.keys()].filter((v) => v.endsWith("-beta"));
   const target = opts.gameVersion ? `Minecraft ${opts.gameVersion.join(".")}` : "the target game";
   const hint = `${target} ships ${name} up to ${stable[stable.length - 1] ?? "none"}${beta.length ? `, beta ${beta.join(", ")}` : ""}`;

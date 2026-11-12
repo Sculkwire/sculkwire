@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { gameDirCandidates } from "./detect.ts";
-import { launcherGameDirs, prefixOf, wineAppDataDirs, wineGameDirs } from "./wine.ts";
+import { launcherGameDirs, wineAppDataDirs, winePrefix, wineGameDirs } from "./wine.ts";
 
 let home: string;
 
@@ -21,6 +21,15 @@ function launcher(name: string, versions: string[]): string {
   return root;
 }
 
+describe("winePrefix", () => {
+  it("finds the Wine prefix an install's data folder lives in, so only that prefix's game is managed", () => {
+    expect(winePrefix("/home/u/.local/share/Flarial/Linux/compatdata/pfx/drive_c/users/steamuser/AppData/Roaming/Minecraft Bedrock")).toBe(
+      "/home/u/.local/share/Flarial/Linux/compatdata/pfx",
+    );
+    expect(winePrefix("C:\\Users\\u\\AppData\\Roaming\\Minecraft Bedrock")).toBeUndefined();
+  });
+});
+
 // POSIX homes with real files; the Wine branch never runs on a Windows host.
 describe.skipIf(process.platform === "win32")("wine prefix game folders", () => {
   beforeEach(() => {
@@ -32,7 +41,7 @@ describe.skipIf(process.platform === "win32")("wine prefix game folders", () => 
     const flarial = launcher("Flarial", ["9.1.0"]);
     const bol = launcher("bedrock-on-linux", ["9.2.0"]);
     const appData = wineAppDataDirs(home);
-    expect(appData.map(prefixOf)).toEqual([join(bol, "compatdata", "pfx"), join(flarial, "compatdata", "pfx")]);
+    expect(appData.map(winePrefix)).toEqual([join(bol, "compatdata", "pfx"), join(flarial, "compatdata", "pfx")]);
   });
 
   it("puts the launcher's settings.json game_dir first, then the other game folders newest first", () => {

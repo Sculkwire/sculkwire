@@ -153,7 +153,6 @@ describe("engine client support", () => {
     sharedComMojang: "",
     userComMojang: "",
     logsDir: "",
-    passesArgs: false,
     wine: true,
     preview: false,
     gameDir: "/games/mc",
@@ -194,14 +193,14 @@ describe("engine method wrappers", () => {
       request.method === "player.state"
         ? reply(request, { position: [1, 2, 3], rotation: [0, 90], dimension: 0 })
         : reply(request, statusResult({ missing: ["x"] }));
-    const resolved = await session.resolve();
+    const resolved = await session.status();
     if (!resolved.ok) throw new Error(resolved.message);
     expect(resolved.value.missing).toEqual(["x"]);
     expect(resolved.value.build).toBe("1.26.60.30");
     const player = await session.playerState();
     if (!player.ok) throw new Error(player.message);
     expect(player.value.position).toEqual([1, 2, 3]);
-    expect(agent.requests.map((request) => request.method)).toEqual(["engine.resolve", "player.state"]);
+    expect(agent.requests.map((request) => request.method)).toEqual(["engine.status", "player.state"]);
   });
 
   it("publishes player.state in engine_player's strict output schema, keeping the agent's extra readings and dropping unknown keys", async () => {

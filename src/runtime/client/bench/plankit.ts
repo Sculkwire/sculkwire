@@ -1,11 +1,22 @@
 /**
- * Shared pieces of the `goal` and `task` suites, which measure what `play` makes of a goal in plain words: the plan's
- * numbers for the table, the distance to a block, and item counts from the helper's inventory query.
+ * Shared pieces of the `goal` and `task` suites, which measure what `play` makes of a goal in plain words: the
+ * scenario shape, the plan's numbers for the table, the distance to a block, and item counts from the helper's
+ * inventory query.
  */
 import type { PlayerInventory } from "../../engine/inventory.ts";
 import type { PlayResult } from "../skills/play.ts";
 import { countsOf } from "../tasks/stock.ts";
-import type { BenchContext, Metric, Offset, RunOutcome } from "./types.ts";
+import { num, type BenchContext, type Metric, type Offset, type RunOutcome, type Scenario } from "./types.ts";
+
+/** A `play` scenario over phrasings: the action plays `goals[0]` (the runner swaps in run i's phrasing) for `timeoutMs`. */
+export function phrased(s: Omit<Scenario, "action" | "goals"> & { goals: string[] }): Scenario {
+  return { ...s, action: () => ({ action: "play", goal: s.goals[0] as string, durationMs: s.timeoutMs }) };
+}
+
+/** Success when the extra `key` is a number of at least `n` (items carried at the end of the run). */
+export function atLeast(key: string, n: number): NonNullable<Scenario["success"]> {
+  return (_o, extra) => num(extra, key) >= n;
+}
 
 /**
  * The plan's numbers: `planSteps`, `freeSteps` (parts the grammar did not understand, which end the run with
@@ -41,7 +52,7 @@ export function offerText(play: PlayResult | undefined): string {
 }
 
 /** At most this many lines of task-step detail per run in the bench JSON. */
-export const STEP_LINES_MAX = 60;
+const STEP_LINES_MAX = 60;
 
 /**
  * The plan's task steps for the bench JSON: per step a header line (`fetch "all diamonds": failed not_found: took 1 of

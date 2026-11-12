@@ -30,9 +30,13 @@
  * - A creeper lights within 3 blocks, goes out past 7 and blows after 1.5 s (a raised shield facing it blocks the
  *   blast); like the game's helper it reports the fuse only with `reportFuse`.
  */
-import type { PlayerInput } from "../runtime/client/launcher.ts";
+import { EYE_HEIGHT, PLAYER_REACH, WALK_SPEED } from "../runtime/client/bedrock.ts";
 import { seededRandom } from "./faketime.ts";
-import { angleDiff, STILL, yawTo, type EngineInput, type EntityInfo, type HurtLog, type MoveVector, type PlayerState, type PlayerWorld } from "../runtime/client/player.ts";
+import { encodeRegions } from "./grid.ts";
+import { angleDiff, yawTo } from "../runtime/client/geometry.ts";
+import { STILL, type MoveVector, type PlayerInput } from "../runtime/client/input.ts";
+import type { EngineInput } from "../runtime/client/inputprovider.ts";
+import type { EntityInfo, HurtLog, PlayerState, PlayerWorld } from "../runtime/client/types.ts";
 
 export interface SimMob {
   id: string;
@@ -72,26 +76,25 @@ export interface SimMob {
   spear?: { phase: "charge" | "back"; backTo: number; lastDist?: number; jabAt?: number };
 }
 
-/** Measured walking (any direction), sprinting, sneaking and in-air speeds, blocks per second. */
-export const WALK = 4.32;
-export const SPRINT = 5.61;
-export const SNEAK = 1.29;
-export const SPRINT_JUMP = 7.06;
-export const BACK_JUMP = 3.78;
+/** Measured sprinting, sneaking and in-air speeds, blocks per second (walking is `WALK_SPEED`, any direction). */
+const SPRINT = 5.61;
+const SNEAK = 1.29;
+const SPRINT_JUMP = 7.06;
+const BACK_JUMP = 3.78;
 /** Iron sword on a husk or zombie, and a husk's hit on full iron armor. */
-export const SWORD = 6.89;
-export const MOB_HIT = 1.62;
+const SWORD = 6.89;
+const MOB_HIT = 1.62;
 /** Ticks from an input being sent to the server acting on it. */
-export const ENGINE_INPUT_TICKS = 2;
+const ENGINE_INPUT_TICKS = 2;
 /** The engine agent's answer to a move, and to an attack (the pessimistic measured case). */
-export const ENGINE_CALL_MS = 50;
-export const ENGINE_ATTACK_MS = 10;
+const ENGINE_CALL_MS = 50;
+const ENGINE_ATTACK_MS = 10;
 /**
  * The engine agent applies one `input.look` per game frame, on its main-thread drain, in the order they came, and
  * answers it then: views sent faster than the frame rate queue up (live, 2026-11-11: the streamed aim error stood still
  * for 100 to 200 ms after a target change while the camera sent at 120 Hz, then the view jumped tens of degrees).
  */
-export const LOOK_FRAME_MS = 17; // one 60 fps frame, whole milliseconds
+const LOOK_FRAME_MS = 17; // one 60 fps frame, whole milliseconds
 /**
  * A swing at a zombie or husk walking in (closing faster than `WALKING_IN_CLOSING` blocks a second; a creeper is struck
  * where it is, live 2.92 to 2.99 still walking) lands as the distance its
@@ -101,7 +104,7 @@ export const LOOK_FRAME_MS = 17; // one 60 fps frame, whole milliseconds
  * to 2.55 57 of 67). Taken relative to the 76 % at 2.85, inside which the misses left are the aim's and the jump's
  * (the simulator draws those itself): none from 3.05, 43 % at 3.0, 60 % at 2.95, 63 % at 2.9, all from 2.85.
  */
-export const WALKING_IN_CLOSING = 1.5;
+const WALKING_IN_CLOSING = 1.5;
 const WALKING_IN_HIT: readonly [number, number][] = [
   [2.85, 1],
   [2.9, 0.63],
@@ -109,7 +112,7 @@ const WALKING_IN_HIT: readonly [number, number][] = [
   [3.0, 0.43],
   [3.05, 0],
 ];
-export function walkingInHit(readDist: number): number {
+function walkingInHit(readDist: number): number {
   if (readDist <= 2.85) return 1;
   if (readDist >= 3.05) return 0;
   for (let k = 1; k < WALKING_IN_HIT.length; k++) {
@@ -120,17 +123,17 @@ export function walkingInHit(readDist: number): number {
   return 0;
 }
 /** Ticks the server must have seen the sneak before a hit for the shield to block it. */
-export const SHIELD_TICKS = 6;
-export const SHIELD_ARC = 90;
+const SHIELD_TICKS = 6;
+const SHIELD_ARC = 90;
 /** A swing lowers the raised shield: an attack 12 ticks or less after it lands, 13 or more is blocked (measured). */
-export const SWING_OPEN_TICKS = 12;
+const SWING_OPEN_TICKS = 12;
 /**
  * Letting go of the sneak holds the feet still this many ticks. Read from the live `auto` traces of 2026-11-11 (bench
  * combat zombies3+husks3+cornered, engine route, median player speed over the first 100 / 200 / 300 / 400 ms of a
  * retreat): right after lowering the shield 0 / 0.05 / 0.81 / 1.5 blocks a second (about 300 retreats), without a
  * shield before 0.34 / 1.24 / 2.06 / 2.07 (about 320): the feet start some 4 ticks later after a sneak.
  */
-export const UNSNEAK_TICKS = 4;
+const UNSNEAK_TICKS = 4;
 /**
  * Share of the player's ground motion kept from one tick to the next (the rest comes from the held input): vanilla's
  * ground friction (0.6 x 0.91). A sprint let go coasts about 0.34 blocks, on top of the 2 ticks the release takes to
@@ -138,19 +141,19 @@ export const UNSNEAK_TICKS = 4;
  * standing averaged 1.24 blocks a second over its first 200 ms (the model: 1.25), and 170 ms after a strike at 2.99
  * with backward already sent, the sprint in had carried the player to 2.22 and 1.94 (the knockback 3 ticks late).
  */
-export const GROUND_KEEP = 0.546;
+const GROUND_KEEP = 0.546;
 /**
  * Mobs carry their walk too, with the same ground friction. Read from the live `mixed` trace of 2026-11-11: a creeper
  * that stopped to swell at 3.16 still read closing 1.45, 0.82, 0.45, 0.19 and 0 blocks a second over the next ticks.
  */
-export const MOB_GROUND_KEEP = 0.546;
+const MOB_GROUND_KEEP = 0.546;
 /**
  * Mob readings (`entity`, `entities`) show where a mob was this many ticks ago. Read from the live traces of
  * 2026-11-11 (two N=60 bench files, 41 hurts): the nearest mob 100 ms before a hurt read 1.6 to 2.5 blocks (median 2.0,
  * a quarter at 2.3 to 2.5), where its box reach is 1.4 to 1.98: a zombie closing at 2.3 blocks a second covers the
  * difference in about 2 ticks besides those 100 ms.
  */
-export const ENTITY_LAG_TICKS = 2;
+const ENTITY_LAG_TICKS = 2;
 /**
  * A creeper lights its fuse when the gap between its box and the player's (both 0.6 wide) is under this (its data
  * value), give or take `CREEPER_LIGHT_JITTER` per approach, and then coasts to a stop. Along an axis that is a centre
@@ -158,49 +161,46 @@ export const ENTITY_LAG_TICKS = 2;
  * to 2.99 still walking; from the side (`mixed`, spawned at -8, 6) it slowed at 3.2 to 3.3 and stood at 3.08 to 3.16.
  */
 export const CREEPER_LIGHT_GAP = 2.5;
-export const CREEPER_LIGHT_JITTER = 0.05;
+const CREEPER_LIGHT_JITTER = 0.05;
 /**
  * A skeleton walks up to `SKELETON_STAND`, shoots every `SKELETON_SHOT_MS` within `SKELETON_RANGE`, and an arrow hits
  * `ARROW_HIT_RATE` of the time for `ARROW_HIT` (vanilla-like, not measured; seeded so a run repeats).
  */
-export const SKELETON_STAND = 8;
-export const SKELETON_RANGE = 15;
-export const SKELETON_SHOT_MS = 2500;
-export const ARROW_HIT_RATE = 0.5;
-export const ARROW_HIT = 2;
+const SKELETON_STAND = 8;
+const SKELETON_RANGE = 15;
+const SKELETON_SHOT_MS = 2500;
+const ARROW_HIT_RATE = 0.5;
+const ARROW_HIT = 2;
 /**
  * While the view swings round, the feet push less: by the share the view turned in the tick out of this many degrees
  * (none at this or more). Fitted to the live turn-and-sprint escapes from a creeper of 2026-11-11 (player
  * displacement after the run starts: 0 at 200 ms, 0.25 at 400, 0.82 at 600, 1.54 at 800, 2.06 at 1000, 3.8 at 1400).
  */
-export const TURN_PUSH_DEG = 20;
+const TURN_PUSH_DEG = 20;
 /**
  * A hit's knockback shows this many ticks after the swing's answer. Read from the live traces of 2026-11-11 (median
  * change of the struck mob's distance with the player standing, 50 ms bins after the hit, about 500 hits each): -0.14,
  * -0.23, -0.23 at 50 to 150 ms (still walking in), then +0.3 at 200 ms and +0.94 at 550 ms.
  */
-export const KNOCKBACK_DELAY_TICKS = 3;
+const KNOCKBACK_DELAY_TICKS = 3;
 /**
  * Knockback of a hit struck while sneaking, as a share of a normal one. Read from the same traces: with the shield up
  * the struck mob was +0.57 at 400 ms and +0.79 at 550 ms, without +0.74 and +0.94.
  */
-export const SNEAK_KNOCKBACK = 0.75;
-/** A swing lands within this horizontal centre distance (measured: struck at 3.0, not at 3.1). */
-const REACH = 3.0;
+const SNEAK_KNOCKBACK = 0.75;
 /** Ground friction on knockback, per tick. */
 const KNOCK_DECAY = 0.546;
-const EYE = 1.62;
 const MOB_HEIGHT = 1.95;
 const SPACING = 0.6;
 
 /** One thing that happened in the sim, on its tick (ms on the fake clock). */
-export interface SimEvent {
+interface SimEvent {
   at: number;
   kind: "hurt" | "block" | "hit" | "miss";
   mob?: string;
 }
 
-export interface SimLog {
+interface SimLog {
   blast: number;
   meleeDamage: number;
   /** Swings the miss rate (`missRate`) took: not the gate's. */
@@ -311,18 +311,18 @@ export const spearMob = (id: string, typeId: string, x: number, z: number, appea
  * runs) every hurt came with the nearest husk read at 2.4 to 2.6 and swings at it from 2.5 landing first, so the
  * simulator takes 2.5: within that the player's strike and the spear meet as they did live.
  */
-export const SPEAR_HIT = 2.5;
+const SPEAR_HIT = 2.5;
 export const SPEAR_MIN_CLOSING = 0.92;
 /**
  * Its hit also lands from `SPEAR_JAB` when the player moves fast (live, round 2: all 8 hurts came with the husk read
  * at 3.0 to 3.35 and the player at 4.1 to 5.7 blocks a second: sprinting after it, or backing off at full speed; none
  * standing or walking slowly there), at most once per the item's `cooldown`, 0.95 s.
  */
-export const SPEAR_JAB = 3.35;
-export const SPEAR_JAB_PLAYER_SPEED = 3.5;
-export const SPEAR_JAB_COOLDOWN_MS = 950;
+const SPEAR_JAB = 3.35;
+const SPEAR_JAB_PLAYER_SPEED = 3.5;
+const SPEAR_JAB_COOLDOWN_MS = 950;
 /** A spear hit on iron armor (live, `combat/spears3`: 2.5 a hurt). */
-export const SPEAR_DAMAGE = 2.5;
+const SPEAR_DAMAGE = 2.5;
 
 function later(ms: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
@@ -353,31 +353,10 @@ function rayBox(o: [number, number, number], d: [number, number, number], lo: [n
 
 /** The grid text of one 16-block box: ground below y 0, walls outside the pen at y 0 and 1, air elsewhere. */
 function gridBox(bx: number, by: number, bz: number, pen?: SimOptions["pen"]): string {
-  const d = (n: number) => n.toString(36);
-  let out = "";
-  for (let y = 0; y < 16; y++) {
-    const wy = by + y;
-    for (let z = 0; z < 16; z++) {
-      const wz = bz + z;
-      let runStart = 0;
-      let runClass = "";
-      const flush = (end: number) => {
-        if (runClass) out += `${runClass}${d(runStart)}${d(y)}${d(z)}${d(end)}${d(y)}${d(z)}`;
-      };
-      for (let x = 0; x < 16; x++) {
-        const wx = bx + x;
-        const inside = !pen || (wx >= pen.x0 && wx <= pen.x1 && wz >= pen.z0 && wz <= pen.z1);
-        const c = wy < 0 ? "#" : (wy === 0 || wy === 1) && !inside ? "#" : ".";
-        if (c !== runClass) {
-          flush(x - 1);
-          runStart = x;
-          runClass = c;
-        }
-      }
-      flush(15);
-    }
-  }
-  return out;
+  return encodeRegions(bx, by, bz, (wx, wy, wz) => {
+    const inside = !pen || (wx >= pen.x0 && wx <= pen.x1 && wz >= pen.z0 && wz <= pen.z1);
+    return wy < 0 ? "#" : (wy === 0 || wy === 1) && !inside ? "#" : ".";
+  });
 }
 
 export function sim(mobs: SimMob[], o: SimOptions = {}): Sim {
@@ -447,7 +426,7 @@ export function sim(mobs: SimMob[], o: SimOptions = {}): Sim {
     const slow = p.move.sneak;
     const sprinting = p.move.sprint && p.move.forward > 0.5 && !slow;
     if (p.onGround) {
-      const speed = len < 0.01 || unsneaking ? 0 : (slow ? SNEAK : sprinting ? SPRINT : WALK) * len;
+      const speed = len < 0.01 || unsneaking ? 0 : (slow ? SNEAK : sprinting ? SPRINT : WALK_SPEED) * len;
       // The feet carry their motion: each tick keeps `GROUND_KEEP` of it and the held input adds the rest, less while
       // the view swings round (`TURN_PUSH_DEG`).
       const keep = o.groundKeep ?? GROUND_KEEP;
@@ -459,7 +438,7 @@ export function sim(mobs: SimMob[], o: SimOptions = {}): Sim {
         p.onGround = false;
         p.vy = 0.42;
         if (len > 0.01) {
-          const air = (slow ? SNEAK : sprinting ? SPRINT_JUMP : p.move.forward < -0.5 ? BACK_JUMP : WALK) * len;
+          const air = (slow ? SNEAK : sprinting ? SPRINT_JUMP : p.move.forward < -0.5 ? BACK_JUMP : WALK_SPEED) * len;
           p.vx = (-Math.sin(r) * air) / 20;
           p.vz = (Math.cos(r) * air) / 20;
         }
@@ -652,7 +631,7 @@ export function sim(mobs: SimMob[], o: SimOptions = {}): Sim {
   const aimed = (): { m: SimMob; dist: number } | undefined => {
     const cp = Math.cos((p.pitch * Math.PI) / 180);
     const dir: [number, number, number] = [-Math.sin((p.yaw * Math.PI) / 180) * cp, -Math.sin((p.pitch * Math.PI) / 180), Math.cos((p.yaw * Math.PI) / 180) * cp];
-    const eye: [number, number, number] = [p.x, p.y + EYE, p.z];
+    const eye: [number, number, number] = [p.x, p.y + EYE_HEIGHT, p.z];
     let best: { m: SimMob; dist: number } | undefined;
     for (const m of present()) {
       if (m.diedAt !== undefined) continue;
@@ -703,8 +682,8 @@ export function sim(mobs: SimMob[], o: SimOptions = {}): Sim {
     const readDist = m && read ? Math.hypot(p.x - read.x, p.z - read.z) : 0;
     const walkingIn = m !== undefined && m.typeId !== "minecraft:creeper" && readDist > 0.01 && read !== undefined && ((m.vx * (p.x - read.x) + m.vz * (p.z - read.z)) / readDist) * 20 > WALKING_IN_CLOSING;
     const outOfReading = walkingIn && reachRoll() >= walkingInHit(readDist);
-    const drawn = !(!a || !m || outOfReading || Math.hypot(p.x - m.x, p.z - m.z) > REACH || Date.now() < m.hurtUntil) && o.missRate !== undefined && missRoll() < o.missRate;
-    if (!a || !m || outOfReading || Math.hypot(p.x - m.x, p.z - m.z) > REACH || Date.now() < m.hurtUntil || drawn) {
+    const drawn = !(!a || !m || outOfReading || Math.hypot(p.x - m.x, p.z - m.z) > PLAYER_REACH || Date.now() < m.hurtUntil) && o.missRate !== undefined && missRoll() < o.missRate;
+    if (!a || !m || outOfReading || Math.hypot(p.x - m.x, p.z - m.z) > PLAYER_REACH || Date.now() < m.hurtUntil || drawn) {
       if (drawn) log.drawnMisses++;
       log.events.push({ at: Date.now(), kind: "miss" });
       return null;

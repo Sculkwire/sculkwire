@@ -8,21 +8,27 @@ import { readFile, rm, stat } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { atLeast, compareDiagnostics, type Diagnostic, type DiagnosticSummary, type Severity, summarize } from "../core/diagnostic.ts";
 import { discoverProject, type PackInfo } from "../core/project.ts";
+import { buildRegolith, regolithPlan } from "../core/regolith.ts";
 import type { Channel } from "../core/version.ts";
-import { classifyFile, type FileKind, JSON_EXT, versionTuple } from "./classify.ts";
-import { parseJson } from "./jsonc.ts";
-import { Context, loadPack, type Pack, toPosix } from "./context.ts";
+import { classifyFile, JSON_EXT, versionTuple } from "./classify.ts";
+import { Context, type Finding, loadPack, type Pack, toDiagnostic, toPosix } from "./context.ts";
+import { type JsonDocument, type JsonProblem, parseJson } from "./jsonc.ts";
 import { checkLang } from "./lang.ts";
 import { checkManifests, type ManifestOptions } from "./manifest.ts";
 import { checkMcfunctions } from "./mcfunction.ts";
 import { checkReferences, type ReferenceOptions } from "./references.ts";
-import { buildRegolith, regolithPlan } from "../core/regolith.ts";
-import { calibration, checkSchemaFile, type SchemaFileArgs, type SchemaOptions } from "./schema.ts";
+import { type Calibration, calibration, checkSchemaFile, type SchemaFileArgs, type SchemaOptions } from "./schema.ts";
 import { checkTypeScript, type ResolveTypings, type TypeScriptOptions } from "./typescript.ts";
-import { loadVanilla, type VanillaData } from "./vanilla.ts";
+import { loadVanilla, type VanillaData, vanillaFiles } from "./vanilla.ts";
 
+/** Every check, in the order results list them; `CHECK_RUNS` holds what each one does. */
 export const CHECKS = ["json", "manifest", "schema", "reference", "lang", "mcfunction", "typescript"] as const;
 export type CheckName = (typeof CHECKS)[number];
+
+/** The names in `names` that are no check. */
+export function unknownChecks(names: readonly string[]): string[] {
+  return names.filter((c) => !(CHECKS as readonly string[]).includes(c));
+}
 
 /** Newest game version known without game metadata (the newest release when this was written). */
 const OFFLINE_VERSION_ESTIMATE = [1, 26, 60];
@@ -61,6 +67,37 @@ export interface ValidateOptions {
   overlay?: Map<string, string>;
 }
 
+/** The options `validate_pack`/`validate_file` and `sculk validate` take, under their MCP names. */
+export interface ValidateArgs {
+  channel?: Channel | undefined;
+  fail_on?: "error" | "warning" | undefined;
+  samples_root?: string | undefined;
+  typings_dir?: string | undefined;
+  engine_schemas_dir?: string | undefined;
+  rockide_dir?: string | undefined;
+  checks?: string[] | undefined;
+  regolith?: "auto" | "build" | "source" | undefined;
+  profile?: string | undefined;
+  game_version?: string | undefined;
+  assets_optional?: boolean | undefined;
+}
+
+export function toOptions(a: ValidateArgs): ValidateOptions {
+  const o: ValidateOptions = {};
+  if (a.channel) o.channel = a.channel;
+  if (a.fail_on) o.failOn = a.fail_on;
+  if (a.samples_root) o.samplesRoot = a.samples_root;
+  if (a.typings_dir) o.typingsDir = a.typings_dir;
+  if (a.engine_schemas_dir) o.engineSchemasDir = a.engine_schemas_dir;
+  if (a.rockide_dir) o.rockideSchemasDir = a.rockide_dir;
+  if (a.game_version) o.gameVersion = a.game_version;
+  if (a.profile) o.regolithProfile = a.profile;
+  if (a.assets_optional) o.assetsOptional = true;
+  if (a.checks) o.checks = a.checks;
+  if (a.regolith) o.regolith = a.regolith;
+  return o;
+}
+
 /** The rockide/schemas copy a run used, or why it used none. */
 export interface RockideSource {
   root?: string;
@@ -88,46 +125,131 @@ export interface ValidationResult {
   regolith?: { profile: string; built: boolean; message?: string };
 }
 
-async function vanillaFiles(v: VanillaData) {
-  const out: { packKind: "behavior" | "resource"; rel: string; kind: FileKind; value: unknown }[] = [];
-  const packs: Pack[] = [];
-  for (const [sub, kind] of [
-    ["behavior_pack", "behavior"],
-    ["resource_pack", "resource"],
-  ] as const) {
-    if (existsSync(join(v.root, sub))) packs.push(await loadPack({ kind, dir: join(v.root, sub), relDir: sub }, v.root));
-  }
-  const ctx = new Context(v.root, packs);
-  for (const p of packs) {
-    for (const rel of p.files) {
-      if (!JSON_EXT.test(rel)) continue;
-      const value = await ctx.value(p, rel);
-      if (value !== undefined) out.push({ packKind: p.kind as "behavior" | "resource", rel, kind: classifyFile(p.kind, rel), value });
-    }
-  }
-  return out;
-}
-
 /**
  * Process-wide defaults merged under every call's options (MCP + CLI). The integrator wires runtime providers
  * here, e.g. `validateDefaults.resolveSamples = (ch) => ensureBedrockSamples({channel: ch}).then((s) => s.root)`.
  */
 export const validateDefaults: ValidateOptions = {};
 
+/** What every check of one run sees. */
+interface CheckEnv {
+  root: string;
+  ctx: Context;
+  packs: Pack[];
+  channel: Channel;
+  opts: ValidateOptions;
+  vanilla?: VanillaData;
+  /** Target game version tuple, when known. */
+  gameVersion?: number[];
+  schemaOpts: SchemaOptions;
+  calibration?: Calibration;
+  /** Filled by the schema check: project-relative path -> schema label. */
+  schemaSources: Record<string, string>;
+}
+
+/** A check runs per JSON file (inside the file loop, before every project check), once per project, or both. */
+interface Check {
+  file?(env: CheckEnv, pack: Pack, rel: string, doc: JsonDocument): Promise<void>;
+  project?(env: CheckEnv): Promise<void>;
+}
+
+function jsonFinding(p: JsonProblem): Omit<Finding, "file"> {
+  const d: Omit<Finding, "file"> = { severity: p.severity, code: p.code, message: p.message, range: p.range };
+  if (p.pointer !== undefined) d.pointer = p.pointer;
+  return d;
+}
+
+/** Sets `pack.manifest` for every pack whose manifest.json is a JSON object. */
+async function readManifests(ctx: Context): Promise<void> {
+  for (const pack of ctx.packs) {
+    const m = await ctx.value(pack, "manifest.json");
+    if (m && typeof m === "object" && !Array.isArray(m)) pack.manifest = m as Record<string, unknown>;
+  }
+}
+
+const CHECK_RUNS: Record<CheckName, Check> = {
+  json: {
+    async file({ ctx }, pack, rel, doc) {
+      for (const p of doc.problems) await ctx.add(pack, rel, jsonFinding(p));
+    },
+  },
+  manifest: {
+    async project({ ctx, packs, channel, gameVersion, vanilla }) {
+      const mo: ManifestOptions = { channel };
+      if (gameVersion?.length) mo.gameVersion = gameVersion;
+      else mo.gameVersionEstimate = OFFLINE_VERSION_ESTIMATE;
+      if (vanilla?.scriptModules.size) mo.scriptModules = vanilla.scriptModules;
+      await checkManifests(ctx, packs, mo);
+    },
+  },
+  schema: {
+    async file(env, pack, rel, doc) {
+      if (pack.kind !== "behavior" && pack.kind !== "resource" && pack.kind !== "skin") return;
+      const args: SchemaFileArgs = { packKind: pack.kind, rel, kind: classifyFile(pack.kind, rel), doc, opts: env.schemaOpts, channel: env.channel };
+      if (env.calibration) args.calibration = env.calibration;
+      if (env.gameVersion?.length) args.gameVersion = env.gameVersion;
+      const r = await checkSchemaFile(args);
+      if (r.choice) env.schemaSources[env.ctx.label(pack, rel)] = r.choice.label;
+      for (const d of r.diagnostics) await env.ctx.add(pack, rel, d);
+    },
+  },
+  reference: {
+    async project({ ctx, packs, vanilla, opts }) {
+      const ro: ReferenceOptions = {};
+      if (vanilla) ro.vanilla = vanilla.names;
+      if (opts.assetsOptional) ro.assetsOptional = true;
+      await checkReferences(ctx, packs, ro);
+    },
+  },
+  lang: {
+    project: ({ ctx, packs }) => checkLang(ctx, packs),
+  },
+  mcfunction: {
+    async project({ ctx, packs, vanilla, opts }) {
+      const commands = opts.commands ? new Set(opts.commands.map((c) => c.toLowerCase())) : vanilla?.commands;
+      await checkMcfunctions(ctx, packs, commands ? { commands } : {});
+    },
+  },
+  typescript: {
+    async project({ root, ctx, packs, channel, opts }) {
+      const to: TypeScriptOptions = { channel };
+      if (opts.typingsDir) to.typingsDir = opts.typingsDir;
+      if (opts.resolveTypings) to.resolveTypings = opts.resolveTypings;
+      if (opts.tscPath) to.tscPath = opts.tscPath;
+      if (!packs.some((p) => p.sourceDir)) {
+        await checkTypeScript(ctx, packs, to);
+        return;
+      }
+      // Type-check sources, not Regolith build output (bundled JS); built packs map back to their source dirs.
+      const sourcePacks: Pack[] = [];
+      for (const p of packs) sourcePacks.push(p.sourceDir ? await loadPack(p.info, root) : p);
+      const tctx = new Context(root, sourcePacks, opts.overlay);
+      await readManifests(tctx);
+      await checkTypeScript(tctx, sourcePacks, to);
+      for (const d of tctx.diagnostics) ctx.push(d);
+    },
+  },
+};
+
+function verdict(diagnostics: readonly Diagnostic[], failOn: Severity = "error"): { ok: boolean; summary: DiagnosticSummary } {
+  return { ok: !diagnostics.some((d) => atLeast(d.severity, failOn)), summary: summarize(diagnostics) };
+}
+
 export async function validateProject(rootArg: string, callOpts: ValidateOptions = {}): Promise<ValidationResult> {
   const opts: ValidateOptions = { ...validateDefaults, ...callOpts };
   const root = resolve(rootArg);
   const channel: Channel = opts.channel ?? "stable";
   const checks = (opts.checks?.length ? CHECKS.filter((c) => opts.checks?.includes(c)) : [...CHECKS]) as CheckName[];
-  const unknownChecks = (opts.checks ?? []).filter((c) => !(CHECKS as readonly string[]).includes(c));
-  if (unknownChecks.length) throw new Error(`unknown check(s): ${unknownChecks.join(", ")} (known: ${CHECKS.join(", ")})`);
+  const unknown = unknownChecks(opts.checks ?? []);
+  if (unknown.length) throw new Error(`unknown check(s): ${unknown.join(", ")} (known: ${CHECKS.join(", ")})`);
   const samplesRoot = opts.samplesRoot ?? process.env.SCULKWIRE_SAMPLES ?? (await opts.resolveSamples?.(channel));
   const vanilla = samplesRoot ? await loadVanilla(samplesRoot) : undefined;
   const version = opts.gameVersion ?? vanilla?.version;
   const gameVersion = version ? versionTuple(version.replace(/[^\d.].*$/, "")) : undefined;
 
   const layout = await discoverProject(root);
-  const result: Partial<ValidationResult> = {};
+  let regolith: ValidationResult["regolith"];
+  let rglFailed = false;
   let workDir: string | undefined;
   const packs: Pack[] = [];
   const builtSources = new Map<string, string>();
@@ -139,117 +261,66 @@ export async function validateProject(rootArg: string, callOpts: ValidateOptions
       if ("outputs" in build) {
         workDir = build.workDir;
         for (const o of build.outputs) builtSources.set(resolve(o.source), o.built);
-        result.regolith = { profile: plan.profile, built: true };
+        regolith = { profile: plan.profile, built: true };
       } else {
+        rglFailed = build.kind === "failed";
         // Without a build the source packs are validated; say so unless rgl itself failed.
-        const fallback = build.message.startsWith("rgl run") ? "" : "; validated the source packs instead";
-        result.regolith = { profile: plan.profile, built: false, message: `${build.message}${fallback}` };
+        const fallback = rglFailed ? "" : "; validated the source packs instead";
+        regolith = { profile: plan.profile, built: false, message: `${build.message}${fallback}` };
       }
     } else if (plan) {
-      result.regolith = { profile: plan.profile, built: false, message: plan.hasFilters ? "build skipped (regolith: source)" : "profile has no filters; validated the source packs" };
+      regolith = { profile: plan.profile, built: false, message: plan.hasFilters ? "build skipped (regolith: source)" : "profile has no filters; validated the source packs" };
     }
   }
   try {
     for (const info of layout.packs) {
       const built = builtSources.get(resolve(info.dir));
-      if (built) {
-        const builtInfo = { ...info };
-        packs.push(await loadPack(builtInfo, root, { dir: built, displayDir: info.relDir, sourceDir: info.dir }));
-      } else packs.push(await loadPack(info, root));
+      packs.push(built ? await loadPack(info, root, { dir: built, displayDir: info.relDir, sourceDir: info.dir }) : await loadPack(info, root));
     }
     const ctx = new Context(root, packs, opts.overlay);
-    if (result.regolith && !result.regolith.built && result.regolith.message && layout.regolith) {
+    if (regolith && !regolith.built && regolith.message && layout.regolith) {
       ctx.push({
-        severity: result.regolith.message.startsWith("rgl run") ? "error" : "info",
-        code: result.regolith.message.startsWith("rgl run") ? "regolith.build-failed" : "regolith.not-built",
-        source: "manifest",
-        message: result.regolith.message,
+        severity: rglFailed ? "error" : "info",
+        code: rglFailed ? "regolith.build-failed" : "regolith.not-built",
+        message: regolith.message,
         file: toPosix(relative(root, layout.regolith.configPath)),
       });
     }
-    for (const pack of packs) {
-      const m = await ctx.value(pack, "manifest.json");
-      if (m && typeof m === "object" && !Array.isArray(m)) pack.manifest = m as Record<string, unknown>;
-    }
+    await readManifests(ctx);
 
-    let filesChecked = 0;
-    const schemaSources: Record<string, string> = {};
-    const schemaOpts: SchemaOptions = {};
+    const env: CheckEnv = { root, ctx, packs, channel, opts, schemaOpts: {}, schemaSources: {} };
+    if (vanilla) env.vanilla = vanilla;
+    if (gameVersion) env.gameVersion = gameVersion;
     const engineDir = opts.engineSchemasDir ?? samplesRoot;
-    if (engineDir) schemaOpts.engineSchemasDir = engineDir;
+    if (engineDir) env.schemaOpts.engineSchemasDir = engineDir;
     let rockide: RockideSource | undefined;
     if (checks.includes("schema")) {
       rockide = opts.rockideSchemasDir ? { root: resolve(opts.rockideSchemasDir) } : await opts.resolveRockide?.();
-      if (rockide?.root) schemaOpts.rockideSchemasDir = rockide.root;
+      if (rockide?.root) env.schemaOpts.rockideSchemasDir = rockide.root;
+      if (vanilla) env.calibration = await calibration(vanilla.identity, env.schemaOpts, () => vanillaFiles(vanilla.root));
     }
-    const calib = vanilla && checks.includes("schema") ? await calibration(vanilla.identity, schemaOpts, () => vanillaFiles(vanilla)) : undefined;
 
+    const run = checks.map((c) => CHECK_RUNS[c]);
+    let filesChecked = 0;
     for (const pack of packs) {
       for (const rel of pack.files) {
         filesChecked++;
         if (!JSON_EXT.test(rel)) continue;
         const doc = await ctx.json(pack, rel);
         if (!doc) continue;
-        if (checks.includes("json")) {
-          for (const p of doc.problems) {
-            const d: Omit<Diagnostic, "file"> = { severity: p.severity, code: p.code, source: "json", message: p.message, range: p.range };
-            if (p.pointer !== undefined) d.pointer = p.pointer;
-            await ctx.add(pack, rel, d);
-          }
-        }
-        if (checks.includes("schema") && (pack.kind === "behavior" || pack.kind === "resource" || pack.kind === "skin")) {
-          const args: SchemaFileArgs = { packKind: pack.kind, rel, kind: classifyFile(pack.kind, rel), doc, opts: schemaOpts, channel };
-          if (calib) args.calibration = calib;
-          if (gameVersion?.length) args.gameVersion = gameVersion;
-          const r = await checkSchemaFile(args);
-          if (r.choice) schemaSources[ctx.label(pack, rel)] = r.choice.label;
-          for (const d of r.diagnostics) await ctx.add(pack, rel, d);
-        }
+        for (const check of run) await check.file?.(env, pack, rel, doc);
       }
     }
-    if (checks.includes("manifest")) {
-      const mo: ManifestOptions = { channel };
-      if (gameVersion?.length) mo.gameVersion = gameVersion;
-      else mo.gameVersionEstimate = OFFLINE_VERSION_ESTIMATE;
-      if (vanilla?.scriptModules.size) mo.scriptModules = vanilla.scriptModules;
-      await checkManifests(ctx, packs, mo);
-    }
-    if (checks.includes("reference")) {
-      const ro: ReferenceOptions = {};
-      if (vanilla) ro.vanilla = vanilla.names;
-      if (opts.assetsOptional) ro.assetsOptional = true;
-      await checkReferences(ctx, packs, ro);
-    }
-    if (checks.includes("lang")) await checkLang(ctx, packs);
-    if (checks.includes("mcfunction")) {
-      const commands = opts.commands ? new Set(opts.commands.map((c) => c.toLowerCase())) : vanilla?.commands;
-      await checkMcfunctions(ctx, packs, commands ? { commands } : {});
-    }
-    if (checks.includes("typescript")) {
-      // Type-check sources, not Regolith build output (bundled JS); built packs map back to their source dirs.
-      const sourcePacks: Pack[] = [];
-      for (const p of packs) sourcePacks.push(p.sourceDir ? await loadPack(p.info, root) : p);
-      const tctx = new Context(root, sourcePacks, opts.overlay);
-      for (const p of sourcePacks) {
-        const m = await tctx.value(p, "manifest.json");
-        if (m && typeof m === "object" && !Array.isArray(m)) p.manifest = m as Record<string, unknown>;
-      }
-      const to: TypeScriptOptions = { channel };
-      if (opts.typingsDir) to.typingsDir = opts.typingsDir;
-      if (opts.resolveTypings) to.resolveTypings = opts.resolveTypings;
-      if (opts.tscPath) to.tscPath = opts.tscPath;
-      await checkTypeScript(tctx, sourcePacks, to);
-      for (const d of tctx.diagnostics) ctx.push(d);
-    }
+    for (const check of run) await check.project?.(env);
 
     const diagnostics = ctx.diagnostics.sort(compareDiagnostics);
-    const failOn = opts.failOn ?? "error";
+    const { ok, summary } = verdict(diagnostics, opts.failOn);
     const target: ValidationResult["target"] = { channel };
     if (version) target.version = version;
     const out: ValidationResult = {
       root,
       target,
-      ok: !diagnostics.some((d) => atLeast(d.severity, failOn)),
+      ok,
       packs: packs.map((p) => {
         const { dir: _dir, ...rest } = p.info;
         return { ...rest, files: p.files.length };
@@ -257,12 +328,12 @@ export async function validateProject(rootArg: string, callOpts: ValidateOptions
       filesChecked,
       checks,
       diagnostics,
-      summary: summarize(diagnostics),
-      schemaSources,
+      summary,
+      schemaSources: env.schemaSources,
     };
     if (vanilla) out.vanilla = vanilla.version ? { root: vanilla.root, version: vanilla.version } : { root: vanilla.root };
     if (rockide) out.rockide = rockide;
-    if (result.regolith) out.regolith = result.regolith;
+    if (regolith) out.regolith = regolith;
     return out;
   } finally {
     if (workDir) await rm(workDir, { recursive: true, force: true });
@@ -293,32 +364,14 @@ export async function validateText(path: string, text: string | undefined, opts:
     // Not inside a pack: syntax only.
     const content = text ?? (await readFile(abs, "utf8"));
     const file = toPosix(relative(root, abs));
-    const diagnostics: Diagnostic[] = JSON_EXT.test(abs)
-      ? parseJson(content).problems.map((p) => ({ severity: p.severity, code: p.code, source: "json" as const, message: p.message, range: p.range, file }))
-      : [];
-    return {
-      root,
-      target: { channel: opts.channel ?? "stable" },
-      ok: !diagnostics.some((d) => atLeast(d.severity, opts.failOn ?? "error")),
-      packs: [],
-      filesChecked: 1,
-      checks: ["json"],
-      diagnostics,
-      summary: summarize(diagnostics),
-      schemaSources: {},
-    };
+    const diagnostics: Diagnostic[] = JSON_EXT.test(abs) ? parseJson(content).problems.map((p) => toDiagnostic({ ...jsonFinding(p), file })) : [];
+    const { ok, summary } = verdict(diagnostics, opts.failOn);
+    return { root, target: { channel: opts.channel ?? "stable" }, ok, packs: [], filesChecked: 1, checks: ["json"], diagnostics, summary, schemaSources: {} };
   }
   const r = await validateProject(root, { ...opts, overlay, regolith: "source" });
   const file = toPosix(relative(root, abs));
   const diagnostics = r.diagnostics.filter((d) => d.file === file);
   const schemaSources: Record<string, string> = {};
   if (r.schemaSources[file]) schemaSources[file] = r.schemaSources[file] as string;
-  return {
-    ...r,
-    filesChecked: 1,
-    diagnostics,
-    summary: summarize(diagnostics),
-    ok: !diagnostics.some((d) => atLeast(d.severity, opts.failOn ?? "error")),
-    schemaSources,
-  };
+  return { ...r, filesChecked: 1, diagnostics, ...verdict(diagnostics, opts.failOn), schemaSources };
 }

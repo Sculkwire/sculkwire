@@ -1,18 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { drive, fakeClock } from "../../../testing/faketime.ts";
-import { FakeWorld, stack } from "../../../testing/fakeworld.ts";
-import { parseRecipe, RecipeIndex, type Recipe } from "./recipes.ts";
+import { fakeTaskWorld, FakeWorld, furnaceRecipe as furnace, runFakeStep as run, shapedRecipe as shaped, stack } from "../../../testing/fakeworld.ts";
 import { runTaskStep, taskStepDone } from "./steps.ts";
-import type { TaskStep } from "./types.ts";
-
-/** Recipe fixtures written for these tests in the behavior pack's recipe format. */
-function shaped(id: string, pattern: string[], key: Record<string, object>, result: object, tags = ["crafting_table"]): string {
-  return JSON.stringify({ format_version: "1.20.10", "minecraft:recipe_shaped": { description: { identifier: id }, tags, pattern, key, result } });
-}
-
-function furnace(id: string, input: string, output: string, tags = ["furnace"]): string {
-  return JSON.stringify({ format_version: "1.20.10", "minecraft:recipe_furnace": { description: { identifier: id }, tags, input, output } });
-}
 
 const FIXTURES = [
   shaped("test:sword", ["X", "X", "#"], { X: { item: "minecraft:iron_ingot" }, "#": { item: "minecraft:stick" } }, { item: "minecraft:iron_sword" }),
@@ -27,17 +16,7 @@ const FIXTURES = [
   furnace("test:smelt_copper", "minecraft:raw_copper", "minecraft:copper_ingot", ["furnace", "blast_furnace"]),
 ];
 
-function index(): RecipeIndex {
-  return new RecipeIndex(FIXTURES.map((text) => parseRecipe(text, "vanilla")).filter((recipe): recipe is Recipe => !!recipe), "the test recipes");
-}
-
-function world(): FakeWorld {
-  return new FakeWorld(fakeClock, index());
-}
-
-function run(w: FakeWorld, step: TaskStep, options: { signal?: AbortSignal } = {}) {
-  return drive(runTaskStep(step, w.env(), options.signal), 100, 300_000);
-}
+const world = () => fakeTaskWorld(FIXTURES);
 
 beforeEach(() => {
   vi.useFakeTimers();

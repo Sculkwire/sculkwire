@@ -2,10 +2,12 @@
  * `flee`: get away from threats. Faces the escape direction and sprints (sprint-jumping on open ground, jumping over
  * steps), steering away from the weighted sum of the threats' positions and turning aside when blocked.
  */
-import { angleDiff, horizontalDistance, yawTo, type EntityInfo, type PlayerController, type Vec3 } from "../player.ts";
+import { angleDiff, horizontalDistance } from "../geometry.ts";
+import type { PlayerController } from "../player.ts";
+import type { EntityInfo } from "../types.ts";
 import { navigate } from "../nav/navigate.ts";
-import { isEntityId, typeIdOf } from "./fight.ts";
 import { isHostile, mobInfo } from "./mobs.ts";
+import { escapeYaw, isEntityId, typeIdOf } from "./target.ts";
 import type { SkillResult } from "./types.ts";
 
 export interface FleeArgs {
@@ -17,20 +19,7 @@ export interface FleeArgs {
 }
 
 /** A threat at hand this long while running means the player is cornered: give up so `play` can fight back. */
-export const CORNERED_MS = 1500;
-
-/** The yaw that points away from the threats, the nearest and most dangerous weighing most. */
-export function escapeYaw(me: Vec3, threats: readonly { location: Vec3; weight: number }[]): number | undefined {
-  let x = 0;
-  let z = 0;
-  for (const t of threats) {
-    const d = Math.max(0.5, horizontalDistance(me, t.location));
-    x += ((me.x - t.location.x) / d) * (t.weight / (d * d));
-    z += ((me.z - t.location.z) / d) * (t.weight / (d * d));
-  }
-  if (Math.hypot(x, z) < 1e-9) return undefined;
-  return yawTo(me, { x: me.x + x, y: me.y, z: me.z + z });
-}
+const CORNERED_MS = 1500;
 
 export async function flee(pc: PlayerController, args: FleeArgs, signal?: AbortSignal): Promise<SkillResult> {
   const h = pc.hands;

@@ -1,6 +1,7 @@
 import { createConnection, createServer, type Socket } from "node:net";
 import { describe, expect, it } from "vitest";
 import { encodeFrame, FrameDecoder } from "./framing.ts";
+import type { PrintEvent } from "./print.ts";
 import { connectTo, listen } from "./session.ts";
 
 /** A fake game listening like BDS auto-attach=listen: announces its protocol, records what the debugger sends. */
@@ -39,20 +40,19 @@ async function fakeGame(version: number, requirePasscode = false) {
 }
 
 describe("DebuggerSession handshake", () => {
-  it("answers with the game's version, target module and passcode, then resumes", async () => {
+  it("answers with the game's version and target module, then resumes", async () => {
     const game = await fakeGame(11, true);
-    const session = await connectTo("127.0.0.1", game.port, { passcode: "pw", timeoutMs: 2000 });
+    const session = await connectTo("127.0.0.1", game.port, { timeoutMs: 2000 });
     expect(session.info).toMatchObject({ gameVersion: 11, version: 11, targetModuleUuid: "AAAA-1", requirePasscode: true });
     session.command("/say hi");
-    const { promise, resolve } = Promise.withResolvers<void>();
-    session.once("print", () => resolve());
+    const { promise, resolve } = Promise.withResolvers<PrintEvent>();
+    session.once("print", resolve);
     game.send({ type: "event", event: { type: "PrintEvent", message: "Error: x    at <anonymous> (main.js:4)\n\r", logLevel: 3 } });
-    await promise;
+    expect(await promise).toMatchObject({ seq: 1, level: "error", message: "Error: x    at <anonymous> (main.js:4)", location: { file: "main.js", line: 4 } });
     await game.receivedCount(4);
-    expect(game.received[0]).toEqual({ type: "protocol", version: 11, target_module_uuid: "AAAA-1", passcode: "pw" });
+    expect(game.received[0]).toEqual({ type: "protocol", version: 11, target_module_uuid: "AAAA-1" });
     expect(game.received.map((m) => m.type)).toEqual(["protocol", "stopOnException", "resume", "minecraftCommand"]);
     expect(game.received[3]).toEqual({ type: "minecraftCommand", command: "say hi", dimension_type: "overworld" });
-    expect(session.prints()).toMatchObject([{ seq: 1, level: "error", message: "Error: x    at <anonymous> (main.js:4)", location: { file: "main.js", line: 4 } }]);
     session.close();
     game.server.close();
   });
@@ -69,9 +69,23 @@ describe("DebuggerSession handshake", () => {
     s2.command("list");
     await old.receivedCount(4);
     expect(old.received.at(-1)).toEqual({ type: "minecraftCommand", command: { command: "list", dimension_type: "overworld" } });
-    expect(() => s2.setDiagnosticsActive(["x"], true)).toThrow(/protocol >= 11/);
     s2.close();
     old.server.close();
+  });
+
+  it("collects a command's output after its echo, without ignored traffic", async () => {
+    const game = await fakeGame(11);
+    const session = await connectTo("127.0.0.1", game.port, { timeoutMs: 2000 });
+    const print = (message: string) => game.send({ type: "event", event: { type: "PrintEvent", message, logLevel: 1 } });
+    const output = session.runCommand("/list", { ignore: (m) => m.startsWith("helper") });
+    await game.receivedCount(4);
+    print("before the echo");
+    print("[Scripting] Executing command [list]");
+    print("helper traffic");
+    print("There are 1/10 players online:");
+    expect((await output).map((p) => p.message)).toEqual(["There are 1/10 players online:"]);
+    session.close();
+    game.server.close();
   });
 
   it("accepts a game that dials in", async () => {

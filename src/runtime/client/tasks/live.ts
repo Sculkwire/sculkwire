@@ -3,13 +3,16 @@
  * `interact`, `screen`, `container`, `craft` and `player_inventory`, the helper pack's queries and registry, and the
  * recipe index from the cached bedrock-samples behavior pack plus the project's packs.
  */
+import { errorMessage } from "../../../core/errors.ts";
 import type { Channel } from "../../../core/version.ts";
 import { engine } from "../../engine/engine.ts";
 import { containerOpen, craftMatch, readContainer, readPlayerInventory } from "../../engine/inventory.ts";
 import { interactBlock, interactEntity, screenAct, screenClose, screenMove, screenState } from "../../engine/workstation.ts";
 import { bridge } from "../bridge.ts";
 import { navigate } from "../nav/navigate.ts";
-import { realClock, type PlayerController, type Vec3 } from "../player.ts";
+import { realClock } from "../clock.ts";
+import type { PlayerController } from "../player.ts";
+import type { Vec3 } from "../types.ts";
 import { loadRecipeIndex, type RecipeIndex } from "./recipes.ts";
 import type { BlockInfo, EntitySeen, TaskEnv } from "./types.ts";
 
@@ -69,7 +72,7 @@ export async function liveTaskEnv(options: LiveTaskEnvOptions): Promise<TaskEnv>
     loading = loadRecipeIndex({ channel, ...(bridge.project ? { project: bridge.project } : {}) });
     indexes.set(key, loading);
   }
-  const recipes = await loading.catch((err: unknown) => ({ note: err instanceof Error ? err.message : String(err) }) as { index?: RecipeIndex; note?: string });
+  const recipes = await loading.catch((err: unknown) => ({ note: errorMessage(err) }) as { index?: RecipeIndex; note?: string });
   if (!recipes.index) indexes.delete(key);
   const registries = new Map<string, Promise<string[]>>();
   return {
@@ -96,8 +99,8 @@ export async function liveTaskEnv(options: LiveTaskEnvOptions): Promise<TaskEnv>
       screenMove: (request) => screenMove(request),
       screenAct: (request) => screenAct(request),
       screenClose: () => screenClose(),
-      readContainer: (at) => readContainer(at),
-      readInventory: () => readPlayerInventory(),
+      readContainer: (at) => readContainer(at, (kind, params) => bridge.query(kind, params)),
+      readInventory: () => readPlayerInventory((kind, params) => bridge.query(kind, params)),
       craftMatch: (request) => craftMatch(request),
       containerOpen: () => containerOpen(),
     },

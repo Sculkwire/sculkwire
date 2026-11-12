@@ -5,17 +5,17 @@
 import type { TraceFrame, TraceMob } from "../skills/stats.ts";
 
 /** A mob with a reach at most this far counts as a melee mob (a ranged mob's `reach` is its shooting range). */
-export const MELEE_REACH_MAX = 4;
+const MELEE_REACH_MAX = 4;
 /** Slack added to a mob's reach for "within its reach". */
-export const REACH_SLACK = 0.3;
+const REACH_SLACK = 0.3;
 /** One gap between frames counts for at most this long (a stalled frame does not count as seconds of anything). */
-export const MAX_FRAME_GAP_MS = 100;
+const MAX_FRAME_GAP_MS = 100;
 /** Slower than this (blocks/s, horizontal) counts as standing still. */
-export const IDLE_SPEED = 0.5;
+const IDLE_SPEED = 0.5;
 /** A swing this close to ready (ms) is about to go: standing in reach then is waiting for it, not idling. */
-export const READY_SOON_MS = 120;
+const READY_SOON_MS = 120;
 /** The struck target's distance must grow this much (blocks) before the next swing to count as a step back. */
-export const STEP_BACK = 0.5;
+const STEP_BACK = 0.5;
 
 export interface TraceMetrics {
   /** Frames with a `hit` or `crit` event. */

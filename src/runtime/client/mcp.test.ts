@@ -2,7 +2,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { engine, type EngineResult } from "../engine/engine.ts";
+import { engine } from "../engine/engine.ts";
+import type { EngineResult } from "../engine/failure.ts";
 import { bridge } from "./bridge.ts";
 import { register } from "./mcp.ts";
 

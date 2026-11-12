@@ -14,7 +14,7 @@
  * 5. a tie is broken by what is at hand (the inventory, then the containers near; the one there is most of), else by
  *    the plainest id (fewest words). A tie that remains is reported (`tied`), never guessed.
  */
-import { bareId, namespaced } from "./recipes.ts";
+import { bareId, namespaced } from "./ids.ts";
 import type { InventoryCounts } from "./types.ts";
 
 /** Words that name nothing. */

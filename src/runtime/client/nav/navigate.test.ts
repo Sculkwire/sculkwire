@@ -6,8 +6,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { drive, fakeClock, seededRandom } from "../../../testing/faketime.ts";
 import { sim, type Sim } from "../../../testing/fightsim.ts";
-import { PlayerController, type PlayerWorld } from "../player.ts";
-import { GridCache, SECTION, type BlockClass } from "./grid.ts";
+import { encodeRegions } from "../../../testing/grid.ts";
+import { PlayerController } from "../player.ts";
+import type { PlayerWorld } from "../types.ts";
+import { GridCache, type BlockClass } from "./grid.ts";
 import { navigate } from "./navigate.ts";
 import { plan } from "./planner.ts";
 
@@ -15,26 +17,6 @@ type World = (x: number, y: number, z: number) => BlockClass;
 
 /** Flat ground: solid below y 0, air above. */
 const ground: World = (_x, y) => (y < 0 ? "#" : ".");
-
-/** One 16-block section as the helper's `grid` reply encodes it: runs along x of one class each. */
-function encode(bx: number, by: number, bz: number, cls: World): string {
-  const d = (n: number) => n.toString(36);
-  let out = "";
-  for (let y = 0; y < SECTION; y++) {
-    for (let z = 0; z < SECTION; z++) {
-      let start = 0;
-      let run = cls(bx, by + y, bz + z);
-      for (let x = 1; x <= SECTION; x++) {
-        const c = x < SECTION ? cls(bx + x, by + y, bz + z) : undefined;
-        if (c === run) continue;
-        if (run !== "u") out += `${run}${d(start)}${d(y)}${d(z)}${d(x - 1)}${d(y)}${d(z)}`;
-        start = x;
-        run = c as BlockClass;
-      }
-    }
-  }
-  return out;
-}
 
 let game: Sim | undefined;
 afterEach(() => game?.stop());
@@ -57,7 +39,7 @@ async function start(cls: (player: { x: number; z: number }) => World) {
       const me = g.player();
       queries.push({ x: me.x, z: me.z });
       const boxes = (params?.boxes ?? []) as number[][];
-      return { boxes: boxes.map(([x, y, z]) => encode(x as number, y as number, z as number, cls(me))) };
+      return { boxes: boxes.map(([x, y, z]) => encodeRegions(x as number, y as number, z as number, cls(me))) };
     },
   };
   const pc = new PlayerController(world, { clock: fakeClock, random: seededRandom(3) });
@@ -120,7 +102,7 @@ describe("planning in the widest window", () => {
   it("exhausts a 128 x 128 window of open ground in under 2 seconds", async () => {
     vi.useRealTimers();
     const sealed: World = (x, y, z) => (y >= 0 && y <= 2 && Math.max(Math.abs(x - 50), Math.abs(z - 50)) === 1 ? "#" : y === 3 && x === 50 && z === 50 ? "#" : ground(x, y, z));
-    const world = { query: async (_kind: string, params: Record<string, unknown>) => ({ boxes: (params.boxes as number[][]).map(([x, y, z]) => encode(x as number, y as number, z as number, sealed)) }) } as unknown as PlayerWorld;
+    const world = { query: async (_kind: string, params: Record<string, unknown>) => ({ boxes: (params.boxes as number[][]).map(([x, y, z]) => encodeRegions(x as number, y as number, z as number, sealed)) }) } as unknown as PlayerWorld;
     const grid = new GridCache(world);
     const bounds = { min: { x: -64, y: -6, z: -64 }, max: { x: 63, y: 6, z: 63 } };
     await grid.ensure(bounds.min, bounds.max);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { BRARCHIVE_MAGIC, BrarchiveError, buildBrarchive, isBrarchive, parseBrarchive } from "./brarchive.ts";
+import { buildBrarchive } from "../testing/brarchive.ts";
+import { BRARCHIVE_MAGIC, BrarchiveError, isBrarchive, parseBrarchive } from "./brarchive.ts";
 
 const enc = (s: string): Buffer => Buffer.from(s, "utf8");
 

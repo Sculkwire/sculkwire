@@ -1,4 +1,4 @@
-import { blocks, course } from "./nav-kit.ts";
+import { blocks, course } from "../navkit.ts";
 
 /**
  * A mixed course across the whole arena: two one-block steps up onto a ledge 3 high, a 3-block drop, a water

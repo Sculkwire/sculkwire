@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ClientInstall } from "../../gamefiles/install.ts";
-import { EngineSession, type EngineResult, type SettingEdit, type SettingValue } from "./engine.ts";
+import { EngineSession, type SettingEdit, type SettingValue } from "./engine.ts";
+import type { EngineResult } from "./failure.ts";
 import { changeText, getSetting, listSettings, restoreGameSettings, setSetting, settingsText } from "./settings.ts";
 
 const dirs: string[] = [];
@@ -37,7 +38,6 @@ async function fixture(text = "gfx_viewdistance:384\ngame_thirdperson:0\n"): Pro
     sharedComMojang: shared,
     userComMojang: user,
     logsDir: root,
-    passesArgs: false,
     wine: true,
     preview: false,
   };

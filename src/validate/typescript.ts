@@ -9,15 +9,15 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { Diagnostic, Severity } from "../core/diagnostic.ts";
+import type { Severity } from "../core/diagnostic.ts";
+import { errorMessage } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { findOnPath } from "../core/which.ts";
 import type { Channel } from "../core/version.ts";
-import type { Context, Pack } from "./context.ts";
-import { toPosix } from "./context.ts";
+import { SCRIPT_EXT } from "./classify.ts";
+import { type Context, type Finding, type Pack, toPosix } from "./context.ts";
 import { NPM_ONLY } from "./manifest.ts";
 
-const SCRIPT_EXT = /\.(m?js|m?ts)$/i;
 const DIAG = /^(.+?)\((\d+),(\d+)\): (error|warning|message) (TS\d+): (.*)$/;
 const RUNTIME_GLOBALS = `declare const console: {
   log(...data: any[]): void;
@@ -133,20 +133,16 @@ function localTypings(start: string, stop: string, pkg: string): string | undefi
 }
 
 async function report(ctx: Context, packs: readonly Pack[], cwd: string, diags: TscDiagnostic[]): Promise<void> {
+  const files = new Map<string, string[] | undefined>();
   for (const t of diags) {
     const abs = isAbsolute(t.file) ? t.file : resolve(cwd, t.file);
     const pack = packs.find((p) => abs.startsWith(p.dir + sep));
-    let lineText: string | undefined;
-    try {
-      lineText = (await readFile(abs, "utf8")).split(/\r?\n/)[t.line - 1];
-    } catch {
-      lineText = undefined;
-    }
+    if (!files.has(abs)) files.set(abs, await readFile(abs, "utf8").then((text) => text.split(/\r?\n/), () => undefined));
+    const lineText = files.get(abs)?.[t.line - 1];
     const word = lineText ? /^[\w$]+|^./.exec(lineText.slice(t.column - 1))?.[0] : undefined;
-    const d: Omit<Diagnostic, "file"> = {
+    const d: Omit<Finding, "file"> = {
       severity: t.severity,
       code: `ts.${t.code.slice(2)}`,
-      source: "typescript",
       message: t.message,
       range: { start: { line: t.line, column: t.column }, end: { line: t.line, column: t.column + (word?.length ?? 1) } },
     };
@@ -174,8 +170,7 @@ async function checkPack(ctx: Context, pack: Pack, opts: TypeScriptOptions, tsc:
       await ctx.at(pack, "manifest.json", "/dependencies", {
         severity: "warning",
         code: "typescript.typings-unavailable",
-        source: "typescript",
-        message: `no typings for ${Object.entries(declared).map(([n, v]) => `${n}@${v}`).join(", ")}: ${err instanceof Error ? err.message : String(err)}`,
+        message: `no typings for ${Object.entries(declared).map(([n, v]) => `${n}@${v}`).join(", ")}: ${errorMessage(err)}`,
       });
     }
   }
@@ -191,7 +186,6 @@ async function checkPack(ctx: Context, pack: Pack, opts: TypeScriptOptions, tsc:
     await ctx.at(pack, "manifest.json", "/dependencies", {
       severity: "info",
       code: "typescript.typings-missing",
-      source: "typescript",
       message: `no typings for ${shims.join(", ")}; their APIs are typed as 'any'`,
       hint: "pass typingsDir (sculk validate --typings <dir>) for full API checks",
     });
@@ -227,7 +221,6 @@ async function checkPack(ctx: Context, pack: Pack, opts: TypeScriptOptions, tsc:
       await ctx.add(pack, "manifest.json", {
         severity: "error",
         code: "typescript.failed",
-        source: "typescript",
         message: `tsc failed: ${output.trim().slice(-1500)}`,
       });
     }
@@ -243,7 +236,6 @@ async function checkProject(ctx: Context, tsconfig: string, tsc: { command: stri
     ctx.push({
       severity: "info",
       code: "typescript.skipped",
-      source: "typescript",
       message: "tsconfig.json found but node_modules is missing; run your package manager's install to type-check project sources",
       file: toPosix(relative(ctx.root, tsconfig)),
     });
@@ -257,7 +249,6 @@ async function checkProject(ctx: Context, tsconfig: string, tsc: { command: stri
     ctx.push({
       severity: "error",
       code: "typescript.failed",
-      source: "typescript",
       message: `tsc -p ${toPosix(relative(ctx.root, tsconfig))} failed: ${output.trim().slice(-1500)}`,
       file: toPosix(relative(ctx.root, tsconfig)),
     });
@@ -274,7 +265,6 @@ export async function checkTypeScript(ctx: Context, packs: readonly Pack[], opts
     ctx.push({
       severity: "warning",
       code: "typescript.unavailable",
-      source: "typescript",
       message: "no TypeScript compiler found (project node_modules, sculkwire's own, or PATH); scripts were not type-checked",
       hint: "npm install --save-dev typescript",
     });

@@ -24,11 +24,10 @@ export async function checkMcfunctions(ctx: Context, packs: readonly Pack[], opt
 }
 
 async function checkFile(ctx: Context, pack: Pack, rel: string, commands: ReadonlySet<string> | undefined): Promise<void> {
-  const text = await ctx.text(pack, rel);
-  if (text === undefined) return;
-  const lines = text.split("\n");
+  const lines = await ctx.lines(pack, rel);
+  if (lines === undefined) return;
   for (let i = 0; i < lines.length; i++) {
-    const line = (lines[i] as string).replace(/\r$/, "").replace(/^\uFEFF/, "");
+    const line = lines[i] as string;
     const lead = line.length - line.trimStart().length;
     const body = line.slice(lead);
     if (!body || body.startsWith("#")) continue;
@@ -43,7 +42,6 @@ async function checkFile(ctx: Context, pack: Pack, rel: string, commands: Readon
       await ctx.add(pack, rel, {
         severity: "error",
         code: "mcfunction.unknown-command",
-        source: "mcfunction",
         message: `unknown command '${name}'; the whole function fails to load`,
         range: { start: { line: i + 1, column: col }, end: { line: i + 1, column: col + name.length } },
       });
@@ -60,7 +58,6 @@ async function checkTickJson(ctx: Context, pack: Pack): Promise<void> {
     await ctx.at(pack, rel, values === undefined ? "" : "/values", {
       severity: "error",
       code: "mcfunction.tick-json",
-      source: "mcfunction",
       message: 'tick.json needs "values": an array of function names (paths under functions/ without .mcfunction)',
     });
     return;
@@ -68,12 +65,11 @@ async function checkTickJson(ctx: Context, pack: Pack): Promise<void> {
   for (let i = 0; i < values.length; i++) {
     const v = values[i];
     if (typeof v !== "string") {
-      await ctx.at(pack, rel, `/values/${i}`, { severity: "error", code: "mcfunction.tick-json", source: "mcfunction", message: "function names must be strings" });
+      await ctx.at(pack, rel, `/values/${i}`, { severity: "error", code: "mcfunction.tick-json", message: "function names must be strings" });
     } else if (v.endsWith(".mcfunction") || v.startsWith("functions/")) {
       await ctx.at(pack, rel, `/values/${i}`, {
         severity: "error",
         code: "mcfunction.tick-json",
-        source: "mcfunction",
         message: `'${v}' must be the function name relative to functions/, without the extension`,
         hint: `use "${v.replace(/^functions\//, "").replace(/\.mcfunction$/, "")}"`,
       });

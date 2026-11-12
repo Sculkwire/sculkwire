@@ -1,9 +1,9 @@
 import { stat } from "node:fs/promises";
-import type { CliCommand } from "../core/cli.ts";
-import { ExitCode, exitCodeFor, type Severity } from "../core/diagnostic.ts";
+import { type CliCommand, err, out } from "../core/cli.ts";
+import { ExitCode } from "../core/diagnostic.ts";
 import { isChannel } from "../core/version.ts";
-import { render, type OutputFormat } from "./format.ts";
-import { CHECKS, type ValidateOptions, validateProject, validateText } from "./index.ts";
+import { type OutputFormat, render } from "./format.ts";
+import { CHECKS, toOptions, unknownChecks, type ValidateArgs, validateProject, validateText } from "./index.ts";
 
 const USAGE = `Usage: sculk validate <path> [options]
 
@@ -39,7 +39,7 @@ const VALUE_FLAGS: Record<string, true> = {
 };
 
 function usage(message: string): number {
-  process.stderr.write(`${message}\n\n${USAGE}\n`);
+  err(`${message}\n\n${USAGE}`);
   return ExitCode.usage;
 }
 
@@ -49,7 +49,7 @@ async function run(args: string[]): Promise<number> {
   for (let i = 0; i < args.length; i++) {
     const a = args[i] as string;
     if (a === "-h" || a === "--help") {
-      process.stdout.write(`${USAGE}\n`);
+      out(USAGE);
       return ExitCode.ok;
     }
     if (a === "--assets-optional") flags[a] = "true";
@@ -62,45 +62,47 @@ async function run(args: string[]): Promise<number> {
   }
   if (positional.length !== 1) return usage("expected exactly one <path>");
   const path = positional[0] as string;
-  const opts: ValidateOptions = {};
+  const input: ValidateArgs = {
+    samples_root: flags["--samples"],
+    typings_dir: flags["--typings"],
+    engine_schemas_dir: flags["--engine-schemas"],
+    rockide_dir: flags["--rockide"],
+    game_version: flags["--game-version"],
+    profile: flags["--profile"],
+    assets_optional: flags["--assets-optional"] === "true",
+  };
   const channel = flags["--channel"];
   if (channel !== undefined) {
     if (!isChannel(channel)) return usage(`--channel must be stable or preview, got ${channel}`);
-    opts.channel = channel;
+    input.channel = channel;
   }
   const format = (flags["--format"] ?? "text") as OutputFormat;
   if (format !== "text" && format !== "json" && format !== "sarif") return usage(`--format must be text, json or sarif`);
-  const failOn = (flags["--fail-on"] ?? "error") as Severity;
+  const failOn = flags["--fail-on"] ?? "error";
   if (failOn !== "error" && failOn !== "warning") return usage("--fail-on must be error or warning");
-  opts.failOn = failOn;
-  if (flags["--samples"]) opts.samplesRoot = flags["--samples"];
-  if (flags["--typings"]) opts.typingsDir = flags["--typings"];
-  if (flags["--engine-schemas"]) opts.engineSchemasDir = flags["--engine-schemas"];
-  if (flags["--rockide"]) opts.rockideSchemasDir = flags["--rockide"];
-  if (flags["--game-version"]) opts.gameVersion = flags["--game-version"];
-  if (flags["--profile"]) opts.regolithProfile = flags["--profile"];
-  if (flags["--assets-optional"]) opts.assetsOptional = true;
+  input.fail_on = failOn;
   if (flags["--checks"]) {
     const checks = flags["--checks"].split(",").map((c) => c.trim()).filter(Boolean);
-    const bad = checks.filter((c) => !(CHECKS as readonly string[]).includes(c));
+    const bad = unknownChecks(checks);
     if (bad.length) return usage(`unknown check(s): ${bad.join(", ")}`);
-    opts.checks = checks;
+    input.checks = checks;
   }
   const regolith = flags["--regolith"];
   if (regolith !== undefined) {
     if (regolith !== "auto" && regolith !== "build" && regolith !== "source") return usage("--regolith must be auto, build or source");
-    opts.regolith = regolith;
+    input.regolith = regolith;
   }
+  const opts = toOptions(input);
   let isFile: boolean;
   try {
     isFile = (await stat(path)).isFile();
   } catch {
     return usage(`path not found: ${path}`);
   }
-  process.stderr.write(`validating ${path}...\n`);
+  err(`validating ${path}...`);
   const result = isFile ? await validateText(path, undefined, opts) : await validateProject(path, opts);
   process.stdout.write(render(result, format));
-  return exitCodeFor(result.diagnostics, failOn);
+  return result.ok ? ExitCode.ok : ExitCode.findings;
 }
 
 export const commands: CliCommand[] = [

@@ -12,11 +12,12 @@ import { parse as parseJsonc } from "jsonc-parser";
 import { discoverProject } from "../../../core/project.ts";
 import type { Channel } from "../../../core/version.ts";
 import { newestCachedSamples } from "../../../knowledge/samples.ts";
+import { bareId, namespaced } from "./ids.ts";
 
 export type Ingredient = { item: string } | { tag: string };
 
 /** The stations the steps drive. A recipe tagged only with others (campfire, brewing stand) is left out. */
-export const STATIONS = ["crafting_table", "furnace", "blast_furnace", "smoker", "stonecutter", "smithing_table"] as const;
+const STATIONS = ["crafting_table", "furnace", "blast_furnace", "smoker", "stonecutter", "smithing_table"] as const;
 export type Station = (typeof STATIONS)[number];
 
 export const FURNACE_STATIONS: readonly Station[] = ["furnace", "blast_furnace", "smoker"];
@@ -43,18 +44,6 @@ export interface Recipe {
   source: "vanilla" | "project";
 }
 
-/** `minecraft:` for an id without a namespace. */
-export function namespaced(id: string): string {
-  const trimmed = id.trim();
-  return trimmed.includes(":") ? trimmed : `minecraft:${trimmed}`;
-}
-
-/** The id without its namespace. */
-export function bareId(id: string): string {
-  const colon = id.indexOf(":");
-  return colon < 0 ? id : id.slice(colon + 1);
-}
-
 export function ingredientKey(ingredient: Ingredient): string {
   return "item" in ingredient ? ingredient.item : `#${ingredient.tag}`;
 }
@@ -62,10 +51,6 @@ export function ingredientKey(ingredient: Ingredient): string {
 export function ingredientText(ingredient: Ingredient): string {
   return "item" in ingredient ? bareId(ingredient.item) : `any ${bareId(ingredient.tag)}`;
 }
-
-/* -------------------------------------------------------------------------------------------------------------- */
-/* Item tags and fuels                                                                                             */
-/* -------------------------------------------------------------------------------------------------------------- */
 
 const LOG = /_(log|wood|stem|hyphae)$/;
 const NETHER_WOOD = /^(stripped_)?(crimson|warped)_/;
@@ -132,10 +117,6 @@ export function fuelRank(item: string): number {
   const rank = FUELS.findIndex((fuel) => fuel.match(bare));
   return rank < 0 ? Number.POSITIVE_INFINITY : rank;
 }
-
-/* -------------------------------------------------------------------------------------------------------------- */
-/* Parsing                                                                                                         */
-/* -------------------------------------------------------------------------------------------------------------- */
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
@@ -280,10 +261,6 @@ export function fitsInventoryGrid(recipe: Recipe): boolean {
   if (recipe.kind === "shapeless") return recipe.inputs.reduce((sum, input) => sum + input.count, 0) <= 4;
   return false;
 }
-
-/* -------------------------------------------------------------------------------------------------------------- */
-/* The index                                                                                                       */
-/* -------------------------------------------------------------------------------------------------------------- */
 
 export class RecipeIndex {
   readonly #byResult = new Map<string, Recipe[]>();

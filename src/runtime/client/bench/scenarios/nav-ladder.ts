@@ -1,5 +1,5 @@
-import { blocks, course } from "./nav-kit.ts";
-import type { Vec3 } from "../../player.ts";
+import { blocks, course } from "../navkit.ts";
+import type { Vec3 } from "../../types.ts";
 
 /** A stone tower 6 high and 5 wide with a ladder up its front: the only way up or down without a fall. */
 function tower(origin: Vec3): string[] {

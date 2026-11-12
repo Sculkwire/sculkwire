@@ -4,18 +4,15 @@
  * version pins name each channel's newest article; when the cache lacks it, the MCP server fetches the articles
  * again in the background and later calls use them.
  */
-import { readFile } from "node:fs/promises";
 import { NodeHtmlMarkdown } from "node-html-markdown";
 import { backgroundDownloadsAllowed } from "../core/background.ts";
 import { cacheDir } from "../core/paths.ts";
-import { type Channel, compareGameVersions, type GameVersion, parseGameVersion } from "../core/version.ts";
-import { writeJsonAtomic } from "../core/fs.ts";
+import { readJsonOr, writeJsonAtomic } from "../core/fs.ts";
+import { type Channel, compareGameVersions, compareTuples, type GameVersion, parseGameVersion } from "../core/version.ts";
 import { httpJson, OfflineMissingError, progress, single } from "./net.ts";
-import { chunkMarkdown, excerpt, type IndexedDoc, SearchIndex } from "./search.ts";
-import { RETRY_AFTER_FAILURE_MS } from "./tracked.ts";
+import { chunkMarkdown, excerpt, type IndexedDoc, INDEX_FORMAT, SearchIndex } from "./search.ts";
+import { upstreamBackoff } from "./tracked.ts";
 import { changelogTitleVersion, getPins, zendeskArticlesUrl } from "./versions.ts";
-
-const INDEX_FORMAT = 1;
 
 export interface ChangelogArticle {
   id: number;
@@ -36,13 +33,7 @@ interface ZendeskPage {
 
 const articlesPath = (channel: Channel): string => cacheDir("knowledge", "changelogs", `${channel}.json`);
 
-async function readArticles(channel: Channel): Promise<ChangelogArticle[] | undefined> {
-  try {
-    return JSON.parse(await readFile(articlesPath(channel), "utf8")) as ChangelogArticle[];
-  } catch {
-    return undefined;
-  }
-}
+const readArticles = (channel: Channel): Promise<ChangelogArticle[] | undefined> => readJsonOr<ChangelogArticle[]>(articlesPath(channel));
 
 export async function fetchChangelogs(channel: Channel): Promise<ChangelogArticle[]> {
   return single(`changelogs:${channel}`, async () => {
@@ -73,33 +64,27 @@ export async function fetchChangelogs(channel: Channel): Promise<ChangelogArticl
   });
 }
 
-/** Per channel: when the background fetch last failed (per process), and fetches in flight. */
-const refreshFailures = new Map<Channel, number>();
-const refreshing = new Set<Channel>();
-
 /** Fetch the articles again in the background when the pins name a newer article than the cache has. */
-async function refreshWhenBehind(channel: Channel, cached: ChangelogArticle[]): Promise<void> {
-  if (refreshing.has(channel) || Date.now() - (refreshFailures.get(channel) ?? 0) < RETRY_AFTER_FAILURE_MS) return;
-  refreshing.add(channel);
-  try {
-    const newest = (await getPins()).channels[channel].changelog;
-    if (newest && !cached.some((a) => a.url === newest.url)) {
-      const fresh = await fetchChangelogs(channel);
-      // Still missing (renamed or unlisted article): wait before fetching everything again.
-      if (!fresh.some((a) => a.url === newest.url)) refreshFailures.set(channel, Date.now());
-    }
-  } catch (err) {
-    refreshFailures.set(channel, Date.now());
-    progress(`${channel} changelogs update failed (${err instanceof Error ? err.message : String(err)}); keeping the cached articles`);
-  } finally {
-    refreshing.delete(channel);
-  }
+function refreshWhenBehind(channel: Channel, cached: ChangelogArticle[]): void {
+  const key = `changelogs:${channel}`;
+  upstreamBackoff.background(
+    key,
+    async () => {
+      const newest = (await getPins()).channels[channel].changelog;
+      if (newest && !cached.some((a) => a.url === newest.url)) {
+        const fresh = await fetchChangelogs(channel);
+        // Still missing (renamed or unlisted article): wait before fetching everything again.
+        if (!fresh.some((a) => a.url === newest.url)) upstreamBackoff.failed(key);
+      }
+    },
+    (reason) => `${channel} changelogs update failed (${reason}); keeping the cached articles`,
+  );
 }
 
 export async function getChangelogs(channel: Channel, offline?: boolean): Promise<ChangelogArticle[]> {
   const cached = await readArticles(channel);
   if (cached) {
-    if (!offline && backgroundDownloadsAllowed()) void refreshWhenBehind(channel, cached);
+    if (!offline && backgroundDownloadsAllowed()) refreshWhenBehind(channel, cached);
     return cached;
   }
   if (offline) throw new OfflineMissingError(`${channel} changelogs`);
@@ -165,7 +150,7 @@ export async function changelogIndex(
  */
 export function compareToBound(version: GameVersion, bound: GameVersion): number {
   if (bound.build === undefined) {
-    return version.major - bound.major || version.minor - bound.minor || version.patch - bound.patch;
+    return compareTuples([version.major, version.minor, version.patch], [bound.major, bound.minor, bound.patch]);
   }
   return compareGameVersions(version, bound);
 }

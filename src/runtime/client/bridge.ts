@@ -8,17 +8,16 @@
  * `[sculkwire:ready]` → `/connect` is typed into chat where input reaches the game (gamescope's own display on Linux,
  * SendInput into the foreground game window on Windows).
  * When the deeplink join beats Microsoft sign-in the client rejects its LoginPacket and shows its connection-error
- * screen; `#finishStart` sees that in the engine log and `returnToWorld` walks the menus back into the test world
+ * screen; `#finishStart` sees that in the engine log and `#returnToWorld` walks the menus back into the test world
  * (screens.ts), never relaunching the game.
  */
+import { errorMessage } from "../../core/errors.ts";
 import { rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Diagnostic } from "../../core/diagnostic.ts";
 import { compareDiagnostics } from "../../core/diagnostic.ts";
 import { dataDir } from "../../core/paths.ts";
-import { discoverProject } from "../../core/project.ts";
-import { buildRegolith, regolithExportFolders, regolithPlan } from "../../core/regolith.ts";
 import type { IndexedPack } from "../gamelog/logparse.ts";
 import { printToDiagnostic, type PrintEvent } from "../debugger/print.ts";
 import { listen, type DebuggerListener, type DebuggerSession } from "../debugger/session.ts";
@@ -39,60 +38,62 @@ import {
   type JoinState,
   type LogPosition,
 } from "./contentlog.ts";
-import { applyPackDeploy, listDevPacks, packDisplayName, planPackDeploy, readManifestHeader, type PackToDeploy } from "./deploy.ts";
+import { deployProject, type DeployedPack } from "./deploy.ts";
 import { findInstall, optionsFiles, type ClientInstall } from "../../gamefiles/install.ts";
 import { debuggerCommandOk, helperTraffic, loadFailureMatcher, type FailureMatcher } from "./commandfail.ts";
 import {
+  DEFAULT_FRAME,
   defaultMode,
   hasInput,
   isAlive,
   launch,
   muteWindowsGame,
   playerInput,
-  type PlayerInput,
   readLaunchState,
   screenshot,
   sendInput,
   stop as stopGame,
   typeChatCommand,
-  unavailableInput,
   waitForGame,
   type InputAction,
-  type InputRoute,
   type LaunchMode,
   type LaunchState,
 } from "./launcher.ts";
 import { bridgeOptions, restoreOptions, setOptions } from "../../gamefiles/options.ts";
 import { engine, type SettingValue } from "../engine/engine.ts";
+import type { EngineResult } from "../engine/failure.ts";
 import { restoreGameSettings } from "../engine/settings.ts";
 import { Staleness, streamEntities, streamEntity, TickClock, type StreamedEntities } from "./entitystream.ts";
-import { horizontalDistance, PlayerController, type EntityInfo, type Impact, type Loadout, type PlayerState, type PlayerWorld } from "./player.ts";
+import { horizontalDistance } from "./geometry.ts";
+import { PlayerController } from "./player.ts";
+import type { EntityInfo, Impact, Loadout, PlayerState, PlayerWorld } from "./types.ts";
 import { inputProvider } from "./inputprovider.ts";
+import { HELPER_MARK, isReplyTo, parseReply, queryCommand } from "./helperprotocol.ts";
+import { pngSize, readShot } from "./png.ts";
+import { unavailableInput, type InputRoute, type PlayerInput } from "./input.ts";
 import { createWorld, writeWorldIcon, type CreatedWorld, type PackRef } from "./world.ts";
 import type { Difficulty } from "../../gamefiles/worlds.ts";
 import {
   currentScreen,
   NO_SCREENS,
-  pngSize,
-  readShot,
   recoverJoin,
   screensFromUi,
   screensInLog,
   type RecoveryIO,
   type RecoveryResult,
   type ScreenState,
+  type UiRecovery,
 } from "./screens.ts";
 
-export const DEFAULT_DEBUGGER_PORT = 19151;
-const READY_MARK = "[sculkwire:ready]";
+/**
+ * The port the bridge's debugger listener takes, apart from the debugger protocol's default (19144, which
+ * `debugger/protocol.ts` exports and BDS sessions use).
+ */
+export const BRIDGE_DEBUGGER_PORT = 19151;
 /** A provider motion sample older than this no longer overrides the helper's state (a missed tick is 50 ms). */
 const MOTION_FRESH_MS = 250;
 /** The helper's fields (crosshair target, held item, game tick) ride along with provider motion while this fresh. */
 const HELPER_FOR_MOTION_MS = 1000;
-/** Helper print on the player's first spawn: the loading screen is gone and keys reach the game. */
-const SPAWN_MARK = "[sculkwire:spawned]";
-const REPLY_MARK = "[sculkwire:reply] ";
-const STATE_MARK = "[sculkwire:state] ";
 /** How long `start` waits for the game process and then for the world (each), unless told otherwise. */
 export const WORLD_WAIT_MS = 180_000;
 /** The longest wait `game_launch` takes (seconds). */
@@ -183,7 +184,7 @@ export async function readRegistry(kind: DataKind, sources: RegistrySources): Pr
       if (Array.isArray(body) && body.length > 0) return { kind, source: "connect", entries: body };
       note = `/connect answered data:${kind} with ${Array.isArray(body) ? "an empty list" : "no list"}`;
     } catch (err) {
-      note = `/connect data:${kind} failed: ${err instanceof Error ? err.message : String(err)}`;
+      note = `/connect data:${kind} failed: ${errorMessage(err)}`;
     }
   }
   if (!sources.script) throw new Error(`${note}, and the helper pack's registry query needs the script debugger`);
@@ -195,7 +196,7 @@ export async function readRegistry(kind: DataKind, sources: RegistrySources): Pr
       if (page.ids.length === 0 || ids.length >= page.total) break;
     }
   } catch (err) {
-    throw new Error(`${note}, and the helper pack's registry query failed: ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(`${note}, and the helper pack's registry query failed: ${errorMessage(err)}`);
   }
   return { kind, source: "script", entries: ids, note };
 }
@@ -238,18 +239,6 @@ export interface BridgeStartOptions {
    * keep waiting in the background (as when the user starts the game) instead of stopping the game.
    */
   keepOnTimeout?: boolean;
-}
-
-export interface DeployedPack {
-  name?: string;
-  uuid: string;
-  kind: string;
-  /** Folder under `development_<kind>_packs`; absent when the pack is not deployed. */
-  folder?: string;
-  /** Absolute deployed pack dir; absent when the pack is not deployed. */
-  path?: string;
-  /** True when the deployed copy is the Regolith build output. */
-  built: boolean;
 }
 
 /** How the game reached the test world for this launch, for `entry()`. */
@@ -316,8 +305,37 @@ export interface LogResult {
   cursor: { log?: LogPosition; printSeq: number };
 }
 
-function errorMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
+/** `count` clicks one after another, 120 ms apart: `count: 2` is a double click. */
+async function clicks(count: number, click: () => Promise<void>): Promise<void> {
+  for (let i = 0; i < count; i++) {
+    await click();
+    if (i + 1 < count) await sleep(120);
+  }
+}
+
+/** Whether this process's launch state file still exists: `stop`, from here or another process, removes it. */
+async function launchStateExists(): Promise<boolean> {
+  return (await readLaunchState()) !== undefined;
+}
+
+/**
+ * The in-game agent's UI calls (`engine.ui*`) as the recovery's `UiRecovery`, or undefined while no agent is attached
+ * (then the recovery reads the log and uses the keys).
+ */
+function agentUi(): UiRecovery | undefined {
+  if (!engine.attached) return undefined;
+  const value = <T>(result: EngineResult<T>): T => {
+    if (!result.ok) throw new Error(`${result.reason}: ${result.message}`);
+    return result.value;
+  };
+  return {
+    screen: async () => value(await engine.uiScreen()),
+    controls: async () => value(await engine.uiControls()),
+    press: async (name) => void value(await engine.uiPress(name)),
+    key: async (key) => void value(await engine.uiKey(key)),
+    click: (x, y, count = 1) => clicks(count, async () => void value(await engine.uiClick(x, y))),
+    scroll: async (x, y, delta) => void value(await engine.uiScroll(x, y, delta)),
+  };
 }
 
 /**
@@ -399,6 +417,8 @@ export class ClientBridge {
   #frame?: { width: number; height: number };
   /** The game's own failure messages for the debugger route's `ok`, read once per install. */
   #failures?: { install: ClientInstall | undefined; matcher: Promise<FailureMatcher> };
+  /** Owned by the newest `start`, aborted by `stop`: ends that start's waits for the game and the world, background ones included. */
+  #startAbort?: AbortController;
 
   /** A game was launched and has not exited. Before its process is found (a user still starting it) it counts as running. */
   get running(): boolean {
@@ -448,6 +468,13 @@ export class ClientBridge {
       // The game exited (crash) without game_stop: clean that launch up (listeners, options, deployed packs) first.
       await this.stop();
     }
+    const abort = new AbortController();
+    this.#startAbort = abort;
+    const { signal } = abort;
+    // A background wait that ends because `stop` aborted it leaves no step behind.
+    const waitFailed = (e: unknown) => {
+      if (!signal.aborted) this.#manual.push(`client did not reach the world: ${errorMessage(e)}`);
+    };
     // A new game starts with no provider state: drop what the provider remembered of an earlier one.
     await inputProvider()?.stopped();
     const install = await findInstall();
@@ -475,7 +502,7 @@ export class ClientBridge {
       const project = resolve(opts.project);
       this.project = project;
       this.#deployOption = opts.deploy !== false;
-      const deployment = await this.#deployProject(install, project, this.#deployOption, false);
+      const deployment = await deployProject(install, project, this.#deployOption, false);
       this.#packs = deployment.packs;
       this.#deployed.push(...deployment.owned);
       this.#deployDiagnostics = deployment.diagnostics;
@@ -483,7 +510,7 @@ export class ClientBridge {
       this.#indexed = await indexProjectPacks(project, install.sharedComMojang);
     }
 
-    const debuggerPort = await this.listenDebugger(opts.debuggerPort ?? DEFAULT_DEBUGGER_PORT);
+    const debuggerPort = await this.listenDebugger(opts.debuggerPort ?? BRIDGE_DEBUGGER_PORT);
     this.#connect = new ConnectServer({ port: opts.connectPort ?? DEFAULT_CONNECT_PORT });
     await this.#connect.start();
     await setOptions(optionsFiles(install), bridgeOptions(debuggerPort));
@@ -526,11 +553,11 @@ export class ClientBridge {
     const since = this.#printSeq;
     if (!install.launch) {
       // The user starts the game: return now so the agent can relay the steps; game_status shows when it is ready.
-      this.#finishStart(BACKGROUND_WAIT_MS, since).catch((e: unknown) => this.#manual.push(`client did not reach the world: ${errorMessage(e)}`));
+      this.#finishStart(BACKGROUND_WAIT_MS, since, signal).catch(waitFailed);
       return this.status();
     }
     try {
-      await this.#finishStart(timeoutMs, since);
+      await this.#finishStart(timeoutMs, since, signal);
     } catch (e) {
       if (opts.keepOnTimeout && e instanceof WaitTimeout && this.running) {
         // Enter the world by hand (a launch command that cannot open it, a slow sign-in): keep the game and keep waiting.
@@ -538,7 +565,7 @@ export class ClientBridge {
           `${WORLD_NOT_LOADED} (${errorMessage(e)}): the game keeps running. In the game choose Play, then "${this.world.name}" on the Worlds tab ` +
             `(start Minecraft first if it is not up). game_status turns ready once the world is in; sculkwire keeps waiting up to ${BACKGROUND_WAIT_MS / 60_000} min`,
         );
-        this.#finishStart(BACKGROUND_WAIT_MS, since).catch((err: unknown) => this.#manual.push(`client did not reach the world: ${errorMessage(err)}`));
+        this.#finishStart(BACKGROUND_WAIT_MS, since, signal).catch(waitFailed);
         return this.status();
       }
       await this.stop();
@@ -547,16 +574,20 @@ export class ClientBridge {
     return this.status();
   }
 
-  /** Wait for the game process, then for the world (each up to `timeoutMs`), counting helper prints after `since`. */
-  async #finishStart(timeoutMs: number, since: number): Promise<void> {
+  /**
+   * Wait for the game process, then for the world (each up to `timeoutMs`), counting helper prints after `since`.
+   * Rejects once `signal` aborts.
+   */
+  async #finishStart(timeoutMs: number, since: number, signal: AbortSignal): Promise<void> {
     let gamePid: number;
     try {
-      gamePid = await waitForGame(this.install as ClientInstall, timeoutMs);
+      gamePid = await waitForGame(this.install as ClientInstall, timeoutMs, signal);
     } catch (e) {
+      if (signal.aborted) throw e;
       throw new WaitTimeout(errorMessage(e));
     }
     if (this.launchState) this.launchState.gamePid = gamePid;
-    const atFirstLook = await this.#waitForWorld(timeoutMs, since);
+    const atFirstLook = await this.#waitForWorld(timeoutMs, since, signal);
     // Windows mutes the game's audio sessions, which exist once it plays sound: by now it surely opened its device.
     if (this.launchState?.muteRequested) {
       const note = await muteWindowsGame(this.launchState, gamePid);
@@ -573,20 +604,21 @@ export class ClientBridge {
    * Wait until the helper printed ready and the player spawned, recovering the deeplink/sign-in race on the way. When
    * the world join beats Microsoft sign-in, either the client rejects its LoginPacket, disconnects and waits on its
    * connection-error screen ("An error has occurred. You need to authenticate to Microsoft services."), or sign-in
-   * finishes while the world loads and the game closes the world and shows the start screen. `returnToWorld` then
+   * finishes while the world loads and the game closes the world and shows the start screen. `#returnToWorld` then
    * walks the menus back into the test world. The game is never relaunched for this.
    *
    * The bridge also walks in when the game just sits on the start or Play screen (`#autoEnter`): an install the user
    * starts opens no world by itself, so there the in-game agent is attached once the start screen is up.
    *
-   * True when the world was already ready at the first look.
+   * True when the world was already ready at the first look. Rejects once `signal` aborts (`stop`).
    */
-  async #waitForWorld(timeoutMs: number, since = this.#printSeq): Promise<boolean> {
+  async #waitForWorld(timeoutMs: number, since: number, signal: AbortSignal): Promise<boolean> {
     const printed = (mark: string) => this.#prints.some((p) => p.seq > since && p.message.includes(mark));
     let deadline = Date.now() + timeoutMs;
     const auto: AutoEnter = { since: Date.now(), attachTried: false, attempts: 0, lastAt: 0 };
     for (let first = true; ; first = false) {
-      if (printed(READY_MARK) && printed(SPAWN_MARK)) return first;
+      signal.throwIfAborted();
+      if (printed(HELPER_MARK.ready) && printed(HELPER_MARK.spawned)) return first;
       await this.#readJoinLog();
       if (this.#joinState.failed) {
         if (!this.#canWalkMenus()) await this.#attachForEntry(auto);
@@ -603,7 +635,7 @@ export class ClientBridge {
                 ...(this.#joinState.lines.length ? { log: this.#joinState.lines.join("\n") } : {}),
               };
             }
-            await sleep(2000);
+            await sleep(2000, undefined, { signal });
             continue;
           }
           throw new Error(this.#joinNoInputMessage());
@@ -620,11 +652,11 @@ export class ClientBridge {
       }
       if (Date.now() > deadline) {
         // Scripts loaded but the spawn print never came: commands that do not target the player still work.
-        if (printed(READY_MARK)) return false;
+        if (printed(HELPER_MARK.ready)) return false;
         throw new WaitTimeout(`timed out after ${timeoutMs} ms waiting for the game`);
       }
-      if (this.launchState && !(await readLaunchState())) throw new Error("the game stopped");
-      await sleep(500);
+      if (this.launchState && !(await launchStateExists())) throw new Error("the game stopped");
+      await sleep(500, undefined, { signal });
     }
   }
 
@@ -666,8 +698,8 @@ export class ClientBridge {
       await this.#attachForEntry(auto);
       if (!engine.attached) return false;
     }
-    const screen = await engine.uiScreen();
-    if (screen.ok) this.#screens = screensFromUi(screen.value, this.#screens);
+    const screen = await agentUi()?.screen().catch(() => undefined);
+    if (screen) this.#screens = screensFromUi(screen, this.#screens);
     const kind = currentScreen(this.#screens);
     const now = Date.now();
     if (!menu(kind)) {
@@ -733,7 +765,7 @@ export class ClientBridge {
    * screenshots where they reach the game, the in-game agent's UI calls and screenshots otherwise. The world's icon is
    * written again first: the game replaces it with a picture of the world when it saves and quits it.
    */
-  async returnToWorld(timeoutMs = 180_000): Promise<RecoveryResult> {
+  async #returnToWorld(timeoutMs = 180_000): Promise<RecoveryResult> {
     const state = this.launchState;
     const world = this.world;
     if (!state || !world) throw new Error("the game is not running");
@@ -752,12 +784,9 @@ export class ClientBridge {
       },
       ...(host
         ? {
-            click: async (x: number, y: number, count = 1) => {
-              const frame = this.#frame ?? { width: state.width ?? 1280, height: state.height ?? 720 };
-              for (let i = 0; i < count; i++) {
-                await sendInput(state, { action: "click", x: Math.round(frame.width * x), y: Math.round(frame.height * y) });
-                if (i + 1 < count) await sleep(120);
-              }
+            click: (x: number, y: number, count = 1) => {
+              const frame = this.#frame ?? { width: state.width ?? DEFAULT_FRAME.width, height: state.height ?? DEFAULT_FRAME.height };
+              return clicks(count, async () => void (await sendInput(state, { action: "click", x: Math.round(frame.width * x), y: Math.round(frame.height * y) })));
             },
           }
         : {}),
@@ -774,7 +803,8 @@ export class ClientBridge {
         this.#frame = pngSize(shot.png) ?? this.#frame;
         return shot;
       },
-      alive: async () => (await readLaunchState()) !== undefined,
+      alive: launchStateExists,
+      ui: agentUi,
       sleep: (ms) => sleep(ms),
       now: () => Date.now(),
     };
@@ -797,9 +827,9 @@ export class ClientBridge {
     return result;
   }
 
-  /** `returnToWorld` while the bridge waits for the world, counted for `entry()`. */
+  /** `#returnToWorld` while the bridge waits for the world, counted for `entry()`. */
   async #walkIn(timeoutMs?: number): Promise<RecoveryResult> {
-    const result = await this.returnToWorld(timeoutMs);
+    const result = await this.#returnToWorld(timeoutMs);
     this.#walks.clicks += result.presses;
     if (result.recovered) this.#walks.walked = true;
     return result;
@@ -845,7 +875,7 @@ export class ClientBridge {
       this.#connectStep = `type "/${line}" in the game chat to enable /connect (commands still work through the script debugger)`;
       return;
     }
-    await this.waitForPrint((p) => p.message.includes(SPAWN_MARK), 60_000).catch(() => undefined);
+    await this.waitForPrint((p) => p.message.includes(HELPER_MARK.spawned), 60_000).catch(() => undefined);
     const errors: string[] = [];
     for (let attempt = 0; attempt < 2 && connect.clients().length === 0; attempt++) {
       await sleep(attempt === 0 ? 3000 : 5000);
@@ -863,7 +893,7 @@ export class ClientBridge {
   }
 
   /** Open the debugger listener the game dials (game_launch does this) and take each session it accepts. Returns the port. */
-  async listenDebugger(port = DEFAULT_DEBUGGER_PORT): Promise<number> {
+  async listenDebugger(port = BRIDGE_DEBUGGER_PORT): Promise<number> {
     const listener = await listen(port);
     this.#listener = listener;
     this.#acceptLoop(listener);
@@ -891,9 +921,9 @@ export class ClientBridge {
         });
         session.on("print", (p: PrintEvent) => {
           // Streamed player state arrives up to 20 times a second: keep only the latest, out of the print log.
-          if (p.message.startsWith(STATE_MARK)) {
+          if (p.message.startsWith(HELPER_MARK.state)) {
             try {
-              const state = JSON.parse(p.message.slice(STATE_MARK.length)) as PlayerState & { entities?: Omit<StreamedEntities, "at" | "tick"> };
+              const state = JSON.parse(p.message.slice(HELPER_MARK.state.length)) as PlayerState & { entities?: Omit<StreamedEntities, "at" | "tick"> };
               const at = Date.now();
               if (state.entities) this.#latestEntities = { ...state.entities, at, tick: state.tick };
               delete state.entities;
@@ -906,7 +936,7 @@ export class ClientBridge {
           }
           // The helper printing ready again means its scripts restarted (`/reload`, a rejoin): the state stream it
           // ran is gone, so the next playerState() starts a new one.
-          if (p.message.includes(READY_MARK)) {
+          if (p.message.includes(HELPER_MARK.ready)) {
             this.#streamEvery = undefined;
             this.#latestState = undefined;
             this.#latestEntities = undefined;
@@ -936,7 +966,7 @@ export class ClientBridge {
       if (Date.now() > deadline) throw new Error(`timed out after ${timeoutMs} ms waiting for the game`);
       if (this.launchState && Date.now() - checked >= 200) {
         checked = Date.now();
-        if (!(await readLaunchState())) throw new Error("the game stopped");
+        if (!(await launchStateExists())) throw new Error("the game stopped");
       }
       // Woken by the next print, so a helper reply is read as it arrives (the 200 ms is only a fallback).
       this.#printSignal ??= Promise.withResolvers<void>();
@@ -964,23 +994,9 @@ export class ClientBridge {
     }
     const session = this.#session;
     if (!session || session.closed) throw new Error("script debugger not attached");
-    const since = this.#printSeq;
-    session.command(command);
-    const echo = await this.waitForPrint((p) => p.message.includes(`Executing command [${command}]`), 10_000, since);
-    // Output follows the echo; stop after a quiet gap. Only the command's own lines extend it: the helper's traffic
-    // (a `play` run sends queries four times a second, each with an echo, a confirmation and a reply) never lets it go quiet.
-    let last = echo.seq;
-    let quietUntil = Date.now() + 600;
-    const deadline = Date.now() + 5_000;
-    while (Date.now() < quietUntil && Date.now() < deadline) {
-      await sleep(100);
-      if (this.#printSeq > last) {
-        const seen = last;
-        last = this.#printSeq;
-        if (this.#prints.some((p) => p.seq > seen && !helperTraffic(p.message))) quietUntil = Date.now() + 400;
-      }
-    }
-    const output = this.#prints.filter((p) => p.seq > echo.seq && p.seq <= last && !helperTraffic(p.message)).map((p) => p.message.trim());
+    // The helper's traffic (a `play` run sends queries four times a second, its state stream) is not the command's output.
+    const prints = await session.runCommand(command, { ignore: helperTraffic });
+    const output = prints.map((p) => p.message.trim());
     return { command, via: "debugger", ok: debuggerCommandOk(output, await this.#failureMatcher()), output };
   }
 
@@ -1064,7 +1080,7 @@ export class ClientBridge {
     } catch (err) {
       // A Linux desktop window has no keyboard route, but an input provider's engine route still drives the player.
       if (!provider) throw err;
-      input = unavailableInput(err instanceof Error ? err.message : String(err));
+      input = unavailableInput(errorMessage(err));
     }
     return {
       state: (maxAgeMs) => this.playerState(maxAgeMs),
@@ -1117,15 +1133,14 @@ export class ClientBridge {
     if (!session || session.closed) throw new Error("queries need the script debugger (helper replies are prints)");
     const id = (this.#queryId = (this.#queryId + 1) % 1_000_000_000);
     const since = this.#printSeq;
-    session.command(`scriptevent sculkwire:query ${JSON.stringify({ ...params, kind, id })}`);
-    const print = await this.waitForPrint((p) => p.message.startsWith(REPLY_MARK) && p.message.includes(`"id":${id},`), timeoutMs, since);
-    const reply: unknown = JSON.parse(print.message.slice(REPLY_MARK.length));
-    if (!reply || typeof reply !== "object" || !("ok" in reply)) throw new Error(`malformed helper reply: ${print.message}`);
+    session.command(queryCommand(kind, params, id));
+    const print = await this.waitForPrint((p) => isReplyTo(p.message, id), timeoutMs, since);
+    const reply = parseReply(print.message);
     if (reply.ok !== true) {
       const text = `helper: ${"error" in reply ? String(reply.error) : "failed"}`;
-      throw new HelperQueryError(text, "reason" in reply && typeof reply.reason === "string" ? reply.reason : undefined);
+      throw new HelperQueryError(text, typeof reply.reason === "string" ? reply.reason : undefined);
     }
-    return "result" in reply ? reply.result : undefined;
+    return reply.result;
   }
 
   /** Content-log diagnostics and script errors since the last call (or since `cursor`). */
@@ -1181,7 +1196,7 @@ export class ClientBridge {
     const redeployed: string[] = [];
     let deployDiagnostics: Diagnostic[] = [];
     if (this.project && this.install) {
-      const deployment = await this.#deployProject(this.install, this.project, this.#deployOption, true);
+      const deployment = await deployProject(this.install, this.project, this.#deployOption, true);
       this.#packs = deployment.packs;
       for (const dir of deployment.owned) if (!this.#deployed.includes(dir)) this.#deployed.push(dir);
       redeployed.push(...deployment.copied);
@@ -1201,7 +1216,7 @@ export class ClientBridge {
       const lost = await this.#recoverHelper(before.printSeq, name, t);
       throw new Error(lost ? `${errorMessage(e)}; ${lost}` : errorMessage(e));
     }
-    const back = await this.waitForPrint((p) => p.message.includes(READY_MARK), t.readyMs, before.printSeq).then(
+    const back = await this.waitForPrint((p) => p.message.includes(HELPER_MARK.ready), t.readyMs, before.printSeq).then(
       () => true,
       () => false,
     );
@@ -1230,7 +1245,7 @@ export class ClientBridge {
    */
   async #recoverHelper(since: number, name: string, t: ReloadTiming): Promise<string | undefined> {
     const answers = async (ms: number): Promise<boolean> => {
-      if (await this.waitForPrint((p) => p.message.includes(READY_MARK), ms, since).then(() => true, () => false)) return true;
+      if (await this.waitForPrint((p) => p.message.includes(HELPER_MARK.ready), ms, since).then(() => true, () => false)) return true;
       const session = this.#session;
       if (!session || session.closed) return false;
       // A reply needs a round trip through the game: give it at least a second even when `ms` is 0.
@@ -1278,89 +1293,6 @@ export class ClientBridge {
     }
   }
 
-  /**
-   * Put the project's packs into `development_*_packs`: build with rgl when the Regolith profile runs filters (the
-   * built packs are what the game loads), then copy per `planPackDeploy` and `applyPackDeploy`, which leave one
-   * folder of this project per uuid and warn about foreign folders sharing it. `refresh` (game_reload) copies the
-   * project again into every folder derived from it. Throws with the rgl message when the build fails.
-   */
-  async #deployProject(
-    install: ClientInstall,
-    project: string,
-    deploy: boolean,
-    refresh: boolean,
-  ): Promise<{ packs: DeployedPack[]; refs: PackRef[]; copied: string[]; owned: string[]; diagnostics: Diagnostic[] }> {
-    const layout = await discoverProject(project);
-    const comMojang = install.sharedComMojang;
-    const deployed = await listDevPacks(comMojang);
-    const rglExports = layout.regolith ? await regolithExportFolders(project) : undefined;
-    const builtHeaders = new Map<string, { dir: string; uuid: string; version: string; name?: string }>();
-    const result: { packs: DeployedPack[]; refs: PackRef[]; copied: string[]; owned: string[]; diagnostics: Diagnostic[] } = {
-      packs: [],
-      refs: [],
-      copied: [],
-      owned: [],
-      diagnostics: [],
-    };
-    let regolithProfile: string | undefined;
-    let workDir: string | undefined;
-    try {
-      if (layout.regolith) {
-        const regolith = await regolithPlan(project);
-        if (regolith?.hasFilters) {
-          regolithProfile = regolith.profile;
-          const build = await buildRegolith(project, regolith.profile);
-          if (!("outputs" in build)) throw new Error(`the Regolith build failed, so nothing was deployed. ${build.message}`);
-          workDir = build.workDir;
-          if (!build.outputs.length) throw new Error(`rgl run ${regolith.profile} built no pack with a manifest, so nothing was deployed`);
-          for (const o of build.outputs) {
-            const header = await readManifestHeader(o.built);
-            if (!header) throw new Error(`rgl built ${o.built} without a header uuid/version, so nothing was deployed`);
-            builtHeaders.set(resolve(o.source), { dir: o.built, ...header });
-          }
-        }
-      }
-      const relDirs = new Map(layout.packs.map((p) => [resolve(p.dir), p.relDir || "."]));
-      const packs: PackToDeploy[] = [];
-      for (const pack of layout.packs) {
-        if (pack.kind !== "behavior" && pack.kind !== "resource") continue;
-        const fresh = builtHeaders.get(resolve(pack.dir));
-        const uuid = fresh?.uuid ?? pack.uuid;
-        const version = fresh?.version ?? pack.version;
-        if (!uuid || !version) throw new Error(`${pack.relDir || "."}/manifest.json has no header uuid/version`);
-        const manifestName = fresh?.name ?? pack.name;
-        // The built dir goes away after this deploy, so the lang lookup happens now (built text first, then source).
-        const name = manifestName ? await packDisplayName(manifestName, [fresh?.dir, pack.dir]) : undefined;
-        packs.push({ kind: pack.kind, dir: resolve(pack.dir), uuid, version, ...(fresh ? { built: fresh.dir } : {}), ...(name ? { name } : {}) });
-      }
-      if (regolithProfile) {
-        const unbuilt = packs.filter((p) => !p.built).map((p) => relDirs.get(p.dir) ?? p.dir);
-        if (unbuilt.length) {
-          throw new Error(`rgl run ${regolithProfile} did not build ${unbuilt.join(", ")}, so nothing was deployed (deploying the source packs would leave out the filter output)`);
-        }
-      }
-      const plan = planPackDeploy({ project, packs, comMojang, deploy, deployed, refresh, ...(rglExports ? { rglExports } : {}) });
-      const applied = await applyPackDeploy(plan);
-      result.copied = applied.copied;
-      result.owned = applied.owned;
-      result.diagnostics = applied.diagnostics;
-      for (const entry of plan) {
-        result.packs.push({
-          ...(entry.name ? { name: entry.name } : {}),
-          uuid: entry.uuid,
-          kind: entry.kind,
-          ...(entry.folder ? { folder: entry.folder } : {}),
-          ...(entry.path ? { path: entry.path } : {}),
-          built: entry.built,
-        });
-        result.refs.push({ uuid: entry.uuid, version: entry.version.split(".").map(Number), kind: entry.kind });
-      }
-    } finally {
-      if (workDir) await rm(workDir, { recursive: true, force: true });
-    }
-    return result;
-  }
-
   async screenshot(path: string): Promise<{ path: string; bytes: number }> {
     this.#requireRunning();
     return screenshot(this.launchState as LaunchState, path);
@@ -1392,6 +1324,8 @@ export class ClientBridge {
     restoredOptions: Record<string, string[]>;
     restoredSettings: Record<string, SettingValue | null>;
   }> {
+    this.#startAbort?.abort();
+    this.#startAbort = undefined;
     const install = this.install ?? (await findInstall());
     const restoredSettings = await restoreGameSettings({ install }).catch(() => ({}));
     const result = await stopGame(install);

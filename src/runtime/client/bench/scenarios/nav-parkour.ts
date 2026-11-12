@@ -1,4 +1,4 @@
-import { blocks, course } from "./nav-kit.ts";
+import { blocks, course } from "../navkit.ts";
 
 /**
  * A 1-block-wide line of stone pillars 4 high with 2-block gaps between them, from a start platform to an end

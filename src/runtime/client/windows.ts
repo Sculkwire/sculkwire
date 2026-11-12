@@ -11,6 +11,7 @@
  * - mute and unmute the game's audio sessions (WASAPI).
  * Every helper is per-monitor DPI aware, so the client rectangle a screenshot captures is the one clicks land in.
  */
+import { errorMessage } from "../../core/errors.ts";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
@@ -549,7 +550,7 @@ async function powershell(script: string, env: Record<string, string>, timeoutMs
     return stdout;
   } catch (e) {
     const stderr = e && typeof e === "object" && "stderr" in e && typeof e.stderr === "string" ? e.stderr.trim().split(/\r?\n/).pop() : undefined;
-    throw new Error(stderr || (e instanceof Error ? e.message : String(e)));
+    throw new Error(stderr || (errorMessage(e)));
   }
 }
 

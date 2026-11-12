@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { project, Staleness, STREAM_FRESH_MS, streamEntities, streamEntity, TickClock, type StreamedEntities } from "./entitystream.ts";
-import type { EntityInfo } from "./player.ts";
+import type { EntityInfo } from "./types.ts";
 
 const zombie = (id: string, x: number, vx = 0): EntityInfo => ({ id, typeId: "minecraft:zombie", location: { x, y: 0, z: 0 }, velocity: { x: vx, y: -0.08, z: 0 }, health: { current: 20, max: 20 } });
 

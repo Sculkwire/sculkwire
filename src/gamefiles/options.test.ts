@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { applyOptions, removeOptions, restoreOptions, setOptions } from "./options.ts";
+import { applyOptions, parseOptions, removeOptions, restoreOptions, setOptions } from "./options.ts";
 
 let dir: string;
 let savedData: string | undefined;
@@ -15,6 +15,17 @@ afterEach(async () => {
   if (savedData === undefined) delete process.env.SCULKWIRE_DATA;
   else process.env.SCULKWIRE_DATA = savedData;
   await rm(dir, { recursive: true, force: true });
+});
+
+describe("options.txt", () => {
+  it("replaces values in place, appends missing keys, and undoes appended keys", () => {
+    const text = "gfx_vsync:1\nwebsockets_enabled:0\nmp_username:a:b\n";
+    const changed = applyOptions(text, { websockets_enabled: "1", script_debugger_port: "19151" });
+    expect(changed).toBe("gfx_vsync:1\nwebsockets_enabled:1\nmp_username:a:b\nscript_debugger_port:19151\n");
+    expect(parseOptions(changed).get("mp_username")).toBe("a:b");
+    const restored = removeOptions(applyOptions(changed, { websockets_enabled: "0" }), ["script_debugger_port"]);
+    expect(restored).toBe(text);
+  });
 });
 
 describe("options.txt line endings", () => {

@@ -3,7 +3,7 @@
  * vitals (health, hunger, armor, best weapon, food). A tracker keeps a short history per entity, so it knows how fast
  * each mob closes in and how long a creeper has been swelling.
  */
-import type { EntityInfo, Loadout, PlayerState, Vec3 } from "../player.ts";
+import type { EntityInfo, Loadout, PlayerState, Vec3 } from "../types.ts";
 import { armorPoints, bestFoodSlot, bestWeaponSlot, weaponDamage } from "./items.ts";
 import { CREEPER_MARGIN } from "./defense.ts";
 import { mobInfo, shortType, type MobInfo } from "./mobs.ts";
@@ -29,7 +29,7 @@ export interface Threat {
   danger: number;
 }
 
-export interface Vitals {
+interface Vitals {
   health: number;
   hunger?: number;
   /** Armor points, 0 to 20. */
@@ -70,7 +70,7 @@ function dist3(a: Vec3, b: Vec3): number {
 }
 
 /** How dangerous one mob is now, 0 to 1. */
-export function dangerOf(info: MobInfo, distance: number, approach: number, fuse?: { lit: boolean; ms: number }): number {
+function dangerOf(info: MobInfo, distance: number, approach: number, fuse?: { lit: boolean; ms: number }): number {
   if (!info.hostile) return 0;
   const harm = Math.min(1, info.damage / 6);
   if (info.kind === "exploder") {
@@ -91,7 +91,7 @@ export function dangerOf(info: MobInfo, distance: number, approach: number, fuse
   return Math.min(1, harm * soon);
 }
 
-export function vitalsOf(me: PlayerState, loadout?: Loadout): Vitals {
+function vitalsOf(me: PlayerState, loadout?: Loadout): Vitals {
   const weapon = loadout ? bestWeaponSlot(loadout.hotbar) : undefined;
   // A full player still carries food: name what would be eaten once hungry (hunger 0 ranks by nutrition alone).
   // The eat tactic gates on hunger itself, so this does not make it eat at 20.

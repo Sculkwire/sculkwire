@@ -1,12 +1,12 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { exitCodeFor, summarize } from "../../core/diagnostic.ts";
+import { summarize } from "../../core/diagnostic.ts";
 import { diagnosticSchema, diagText, fail, ok, summarySchema } from "../../core/mcp.ts";
-import { summarizeProfile } from "../debugger/profile.ts";
-import { bdsCheck } from "./check.ts";
-import { runGameTests } from "./gametest.ts";
 import { onShutdown } from "../../core/shutdown.ts";
-import { getSession, reloadSession, sessionCommand, sessionLogs, startSession, stopAllSessions, stopSession } from "./session.ts";
+import { bdsCheck, CHECK_SETTLE_MS, describeCheck } from "./check.ts";
+import { describeGameTest, runGameTests } from "./gametest.ts";
+import { COMMAND_MAX_MS } from "./server.ts";
+import { sessionCommand, sessionLogs, sessionProfile, startSession, stopAllSessions, stopSession } from "./session.ts";
 
 const channel = z.enum(["stable", "preview"]).optional().describe("BDS release channel (default stable)");
 const acceptEula = z
@@ -48,7 +48,7 @@ export function register(server: McpServer): void {
       inputSchema: {
         path: z.string().describe("Project or pack directory"),
         channel,
-        settleMs: z.number().int().min(0).max(120_000).optional().describe("Run time after `Server started` (default 8000)"),
+        settleMs: z.number().int().min(0).max(120_000).optional().describe(`Run time after \`Server started\` (default ${CHECK_SETTLE_MS})`),
         keep: z.boolean().optional().describe("Keep the server instance directory"),
         acceptEula,
       },
@@ -66,12 +66,8 @@ export function register(server: McpServer): void {
     async ({ path, channel: ch, settleMs, keep, acceptEula: eula }) => {
       try {
         const r = await bdsCheck(path, { channel: ch, settleMs, keep, acceptEula: eula });
-        const summary = summarize(r.diagnostics);
-        const head =
-          r.status === "build-failed"
-            ? `Regolith build failed, BDS not started: ${summary.errors} error(s)`
-            : `BDS ${r.serverVersion} ${r.status}: ${summary.errors} error(s), ${summary.warnings} warning(s) in ${r.durationMs} ms`;
-        return ok(r.diagnostics.length ? `${head}\n${diagText(r.diagnostics)}` : head, { ...r, summary, exitCode: exitCodeFor(r.diagnostics) });
+        const head = describeCheck(r);
+        return ok(r.diagnostics.length ? `${head}\n${diagText(r.diagnostics)}` : head, { ...r, summary: summarize(r.diagnostics) });
       } catch (err) {
         return fail(err);
       }
@@ -114,9 +110,7 @@ export function register(server: McpServer): void {
       try {
         const r = await runGameTests(path, { tags, mode, timeoutMs, channel: ch, acceptEula: eula });
         const failures = r.results.filter((t) => t.result !== "passed").map((t) => `  ${t.name}: ${t.result} ${t.error}`);
-        const head = r.serverVersion
-          ? `GameTest ${r.passed}/${r.total} passed, ${r.failed} failed (BDS ${r.serverVersion}, ${r.mode})`
-          : `GameTest not run, Regolith build failed:\n${diagText(r.diagnostics)}`;
+        const head = describeGameTest(r) ?? `GameTest not run, Regolith build failed:\n${diagText(r.diagnostics)}`;
         const text = [head, ...failures].join("\n");
         return ok(text, r);
       } catch (err) {
@@ -163,15 +157,13 @@ export function register(server: McpServer): void {
         id: z.string(),
         command: z.string(),
         via: z.enum(["console", "debugger"]).optional(),
-        maxMs: z.number().int().min(100).max(60_000).optional().describe("Max wait for output (default 5000)"),
+        maxMs: z.number().int().min(100).max(60_000).optional().describe(`Max wait for output (default ${COMMAND_MAX_MS})`),
       },
       outputSchema: { lines: z.array(lineSchema), via: z.string() },
     },
     async ({ id, command, via, maxMs }) => {
       try {
-        const r = /^\/?reload(\s+all)?\s*$/.test(command) && via !== "debugger"
-          ? await reloadSession(id, /all/.test(command))
-          : await sessionCommand(id, command, { via, maxMs });
+        const r = await sessionCommand(id, command, { via, maxMs });
         return ok(r.lines.map((l) => l.text).join("\n") || "(no output)", { lines: plain(r.lines), via: r.via });
       } catch (err) {
         return fail(err);
@@ -249,24 +241,12 @@ export function register(server: McpServer): void {
     },
     async ({ id, action = "capture", durationMs = 5000, command, limit }) => {
       try {
-        const s = getSession(id);
-        const dbg = s.debugger;
-        if (!dbg || dbg.closed) throw new Error(`session ${id} has no attached script debugger${s.debuggerError ? `: ${s.debuggerError}` : ""}`);
-        if (action === "start") {
-          dbg.startProfiler();
-          return ok("profiler started", { action });
-        }
-        if (action === "capture") {
-          dbg.startProfiler();
-          if (command) dbg.command(command);
-          await new Promise((r) => setTimeout(r, durationMs));
-        }
-        const capture = await dbg.stopProfiler();
-        const summary = summarizeProfile(capture.profile, limit ?? 20);
+        const summary = await sessionProfile(id, { action, durationMs, command, limit: limit ?? 20 });
+        if (summary.action === "start") return ok("profiler started", summary);
         const top = summary.functions.slice(0, 10).map((f) => `  ${f.selfMs.toFixed(1)} ms self  ${f.functionName} ${f.url}:${f.line}`);
         return ok(
           [`profile ${summary.durationMs.toFixed(0)} ms, ${summary.sampleCount} samples, ${summary.idleMs.toFixed(0)} ms idle`, ...top].join("\n"),
-          { action, ...summary },
+          summary,
         );
       } catch (err) {
         return fail(err);

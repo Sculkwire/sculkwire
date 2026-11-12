@@ -10,8 +10,9 @@
  */
 import { setTimeout as sleep } from "node:timers/promises";
 import { setBuiltinInputProvider, type InputProvider, type ProviderGame, type ProviderMotion } from "./inputprovider.ts";
-import type { EngineInput } from "./player.ts";
-import { engine, type EngineResult, type EngineSession, type EngineTick } from "../engine/engine.ts";
+import type { EngineInput } from "./inputprovider.ts";
+import { engine, type EngineSession, type EngineTick } from "../engine/engine.ts";
+import type { EngineResult } from "../engine/failure.ts";
 import { HostFocus, type FocusWatchState } from "../engine/focus.ts";
 import { KEYBOARD_LOCK_NOTE } from "../engine/lock.ts";
 

@@ -4,7 +4,7 @@
  * and the helper queries (no MCP round trip inside a step). Every call a step makes goes through `TaskEnv`, so tests
  * run the steps against a fake world; `liveTaskEnv` (`live.ts`) builds the real one.
  */
-import type { EngineResult } from "../../engine/engine.ts";
+import type { EngineResult } from "../../engine/failure.ts";
 import type { BlockRef, ContainerView, CraftMatch, CraftRequest, OpenContainer, PlayerInventoryState } from "../../engine/inventory.ts";
 import type {
   BlockUse,
@@ -16,7 +16,8 @@ import type {
   ScreenMoveRequest,
   ScreenState,
 } from "../../engine/workstation.ts";
-import type { Clock, Vec3 } from "../player.ts";
+import type { Clock } from "../clock.ts";
+import type { Vec3 } from "../types.ts";
 import type { RecipeIndex } from "./recipes.ts";
 
 export type TaskStep =

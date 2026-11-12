@@ -18,8 +18,9 @@
  *   that keeps its contents, falls into the hopper (glass around it keeps it there) and goes into the chest within a
  *   second, before the run starts.
  */
-import { carried, distanceTo, offerText, planExtras } from "../plankit.ts";
-import type { Offset, Scenario } from "../types.ts";
+import { xyz } from "../../geometry.ts";
+import { atLeast, carried, distanceTo, offerText, phrased, planExtras } from "../plankit.ts";
+import type { Offset } from "../types.ts";
 
 export const SMELT_CRAFT_PHRASINGS = [
   "smelt the ore and craft an iron sword",
@@ -62,11 +63,7 @@ export const SHULKER_PHRASINGS = [
 
 const AREA = { radius: 10, height: 6 };
 
-function xyz(v: { x: number; y: number; z: number }): string {
-  return `${Math.floor(v.x)} ${Math.floor(v.y)} ${Math.floor(v.z)}`;
-}
-
-const smeltCraft: Scenario = {
+const smeltCraft = phrased({
   name: "smelt-craft",
   suite: "task",
   summary: "an empty furnace and a crafting table, the player holds 3 raw_iron, 4 coal, 2 sticks; success: an iron_sword in the inventory",
@@ -84,14 +81,13 @@ const smeltCraft: Scenario = {
     ],
   },
   goals: SMELT_CRAFT_PHRASINGS,
-  action: () => ({ action: "play", goal: SMELT_CRAFT_PHRASINGS[0] as string, durationMs: 120_000 }),
   measure: async (ctx, o) => ({ ...planExtras(o.play), swords: await carried(ctx, "minecraft:iron_sword") }),
-  success: (_o, extra) => typeof extra.swords === "number" && extra.swords >= 1,
-};
+  success: atLeast("swords", 1),
+});
 
 const VILLAGER: Offset = { dx: 0, dy: 0, dz: 4 };
 
-const trade: Scenario = {
+const trade = phrased({
   name: "trade",
   suite: "task",
   summary: "a farmer villager (summoned with minecraft:become_farmer) penned in fences 4 blocks away, the player holds 64 wheat, potatoes, carrots, beetroot and sticks; success: an emerald in the inventory",
@@ -123,19 +119,18 @@ const trade: Scenario = {
     ],
   },
   goals: TRADE_PHRASINGS,
-  action: () => ({ action: "play", goal: TRADE_PHRASINGS[0] as string, durationMs: 60_000 }),
   measure: async (ctx, o) => ({
     ...planExtras(o.play),
     emeralds: await carried(ctx, "minecraft:emerald"),
     villagerDistance: distanceTo(ctx, o, VILLAGER),
     offer: offerText(o.play),
   }),
-  success: (_o, extra) => typeof extra.emeralds === "number" && extra.emeralds >= 1,
-};
+  success: atLeast("emeralds", 1),
+});
 
 const CHEST: Offset = { dx: 0, dy: 0, dz: 4 };
 
-const nestedShulker: Scenario = {
+const nestedShulker = phrased({
   name: "nested-shulker",
   suite: "task",
   summary: "a chest 4 blocks away holding a shulker box with 3 diamonds; success: 3 diamonds in the inventory",
@@ -161,9 +156,8 @@ const nestedShulker: Scenario = {
   },
   player: { gameMode: "survival", time: "day" },
   goals: SHULKER_PHRASINGS,
-  action: () => ({ action: "play", goal: SHULKER_PHRASINGS[0] as string, durationMs: 60_000 }),
   measure: async (ctx, o) => ({ ...planExtras(o.play), diamonds: await carried(ctx, "minecraft:diamond") }),
-  success: (_o, extra) => typeof extra.diamonds === "number" && extra.diamonds >= 3,
-};
+  success: atLeast("diamonds", 3),
+});
 
 export const scenarios = [smeltCraft, trade, nestedShulker];

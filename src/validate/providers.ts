@@ -1,3 +1,4 @@
+import { errorMessage } from "../core/errors.ts";
 import { ensureRockideSchemas } from "../knowledge/rockide.ts";
 import { ensureBedrockSamples } from "../knowledge/samples.ts";
 import { ensureTypings } from "../knowledge/typings.ts";
@@ -13,17 +14,17 @@ export function useKnowledgeProviders(): void {
     try {
       return (await ensureBedrockSamples({ channel })).root;
     } catch (err) {
-      process.stderr.write(`sculkwire: vanilla samples unavailable (${(err as Error).message}); using rockide schemas only\n`);
+      process.stderr.write(`sculkwire: vanilla samples unavailable (${errorMessage(err)}); using rockide schemas only\n`);
       return undefined;
     }
   };
   validateDefaults.resolveRockide = async () => {
     try {
       const r = await ensureRockideSchemas();
-      const used = { root: r.root, release: r.release, commit: r.commit, latest: r.latest };
-      return r.stale ? { ...used, note: `cached release ${r.release}; update failed: ${r.stale}` } : used;
+      const used = { root: r.root, release: r.release.version, commit: r.release.commit, latest: r.latest };
+      return r.stale ? { ...used, note: `cached release ${r.release.version}; update failed: ${r.stale}` } : used;
     } catch (err) {
-      const note = `unavailable (${(err as Error).message}); using engine schemas only`;
+      const note = `unavailable (${errorMessage(err)}); using engine schemas only`;
       process.stderr.write(`sculkwire: rockide/schemas ${note}\n`);
       return { note };
     }
@@ -32,7 +33,7 @@ export function useKnowledgeProviders(): void {
     try {
       return (await ensureTypings({ channel, modules })).nodeModulesDir;
     } catch (err) {
-      process.stderr.write(`sculkwire: Script API typings unavailable (${(err as Error).message})\n`);
+      process.stderr.write(`sculkwire: Script API typings unavailable (${errorMessage(err)})\n`);
       return undefined;
     }
   };

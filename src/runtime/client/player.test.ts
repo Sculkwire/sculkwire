@@ -1,31 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { drive, fakeClock, seededRandom } from "../../testing/faketime.ts";
-import { unavailableInput, type PlayerInput } from "./launcher.ts";
-import {
-  angleDiff,
-  estimateVelocity,
-  flightTo,
-  minimumJerk,
-  moveKeys,
-  pitchTo,
-  planOffset,
-  planTurn,
-  PlayerController,
-  PROJECTILES,
-  projectileFor,
-  solveIntercept,
-  TURN_MAX_MS,
-  TURN_MIN_MS,
-  turnDurationMs,
-  yawTo,
-  type Ballistics,
-  type EngineInput,
-  type EntityInfo,
-  type MoveVector,
-  type PlayerState,
-  type PlayerWorld,
-  type Vec3,
-} from "./player.ts";
+import { unavailableInput, type PlayerInput } from "./input.ts";
+import { estimateVelocity, flightTo, projectileFor, PROJECTILES, solveIntercept, type Ballistics } from "./ballistics.ts";
+import { minimumJerk, planOffset, planTurn, TURN_MAX_MS, TURN_MIN_MS, turnDurationMs } from "./camera.ts";
+import { angleDiff, pitchTo, yawTo } from "./geometry.ts";
+import { moveKeys, type MoveVector } from "./input.ts";
+import type { EngineInput } from "./inputprovider.ts";
+import { PlayerController } from "./player.ts";
+import type { EntityInfo, PlayerState, PlayerWorld, Vec3 } from "./types.ts";
 
 describe("motion profile", () => {
   it("follows a minimum-jerk curve: 0 to 1, monotonic, symmetric", () => {
@@ -375,7 +357,7 @@ describe("PlayerController", () => {
     expect(Math.abs(s.rotation.x - 30)).toBeLessThanOrEqual(2);
     // The sensitivity is learned from the first state that shows the whole turn.
     await pc.camera.idle();
-    expect(pc.yawCalibration.degPerPx).toBeCloseTo(0.15, 1);
+    expect(pc.camera.yawCalibration.degPerPx).toBeCloseTo(0.15, 1);
   });
 
   it("carries the streamed position forward by the mouse route's latency, and leaves engine states alone", () => {
@@ -442,15 +424,6 @@ describe("PlayerController", () => {
     const turn = new AbortController();
     setTimeout(() => turn.abort(), 50);
     expect(await pc.run({ action: "look_at", yaw: 170, pitch: 40 }, turn.signal)).toMatchObject({ ok: false, message: "cancelled" });
-  });
-
-  it("walks to a target and releases the forward key", async () => {
-    const { world, held, s } = fakeWorld(0.26);
-    const pc = new PlayerController(world);
-    const r = await pc.moveTo({ x: -3, z: 3 }, 0.7, false, 10_000);
-    expect(r.ok).toBe(true);
-    expect(Math.hypot(s.location.x + 3, s.location.z - 3)).toBeLessThanOrEqual(0.7);
-    expect(held.size).toBe(0);
   });
 
   it("gives up when the player cannot make progress, with no key left held", async () => {

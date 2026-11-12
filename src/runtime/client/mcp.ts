@@ -5,13 +5,14 @@ import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/proto
 import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { formatDiagnostic, summarize } from "../../core/diagnostic.ts";
-import { diagText, fail, ok, summarySchema } from "../../core/mcp.ts";
+import { diagnosticSchema, diagText, fail, ok, summarySchema } from "../../core/mcp.ts";
 import { dataDir } from "../../core/paths.ts";
 import { onShutdown } from "../../core/shutdown.ts";
-import { bridge, WORLD_WAIT_MAX_S, WORLD_WAIT_MS, type BridgeStatus } from "./bridge.ts";
+import { bridge, WORLD_WAIT_MAX_S, WORLD_WAIT_MS, type BridgeStatus, type CommandOutput } from "./bridge.ts";
 import { inputProvider } from "./inputprovider.ts";
-import { engine, type EngineResult } from "../engine/engine.ts";
-import { type EntityInfo, type Loadout, type PlayerAction } from "./player.ts";
+import { engine } from "../engine/engine.ts";
+import type { EngineResult } from "../engine/failure.ts";
+import type { EntityInfo, Loadout, PlayerAction } from "./types.ts";
 import { play, PLAY_DEFAULT_DURATION_MS, PLAY_DEFAULT_STEP_MS, PLAY_MAX_DURATION_MS, type Death, type PlayAction, type PlayResult } from "./skills/play.ts";
 import { TACTICS } from "./skills/tactics.ts";
 import { STANCES } from "./skills/pack.ts";
@@ -20,18 +21,8 @@ import { liveTaskEnv } from "./tasks/live.ts";
 import { pauseOnTakeover, playJobs, runActions, stepText, type PlayJobInfo } from "./jobs.ts";
 import { DIFFICULTIES, type Difficulty } from "../../gamefiles/worlds.ts";
 import { FOREGROUND_MESSAGE } from "./windows.ts";
-import type { InputRoute } from "./launcher.ts";
+import type { InputRoute } from "./input.ts";
 
-const position = z.object({ line: z.number(), column: z.number() });
-const diagnosticSchema = z.object({
-  severity: z.enum(["error", "warning", "info"]),
-  code: z.string(),
-  message: z.string(),
-  source: z.string(),
-  file: z.string().optional(),
-  range: z.object({ start: position, end: position }).optional(),
-  hint: z.string().optional(),
-});
 const statusSchema = {
   running: z.boolean(),
   mode: z.enum(["window", "headless", "desktop"]).optional(),
@@ -73,6 +64,13 @@ const commandSchema = {
   statusCode: z.number().optional(),
   body: z.record(z.string(), z.unknown()).optional(),
 };
+
+/** True when `A` and `B` accept the same values. */
+type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+// The output schemas restate the bridge's result types field for field: these fail to compile when the two drift.
+// `deployDiagnostics` is left out: the shared `diagnosticSchema` has no `related` field, which `Diagnostic` has.
+true satisfies Same<Omit<z.infer<z.ZodObject<typeof statusSchema>>, "deployDiagnostics">, Omit<BridgeStatus, "deployDiagnostics">>;
+true satisfies Same<z.infer<z.ZodObject<typeof commandSchema>>, CommandOutput>;
 
 /**
  * Take a `game_input` action through the agent's own UI when it is attached: one `ui.key` per chord, `ui.text` into

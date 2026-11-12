@@ -1,20 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { drawIcon, fill, frame, png } from "../../testing/screenshots.ts";
 import type { UiControl } from "../engine/ui.ts";
+import { decodePng, type Pixels } from "./png.ts";
 import {
   currentScreen,
-  decodePng,
   kindOfRoute,
   kindOfScreenName,
   LAYOUT,
   localWorldTiles,
   NO_SCREENS,
   playTab,
-  pngSize,
   recoverJoin,
   screensFromUi,
   screensInLog,
-  type Pixels,
   type RecoveryIO,
   type ScreenState,
   type UiRecovery,
@@ -140,15 +138,6 @@ describe("screen tracking from Debug_Log", () => {
     expect(currentScreen(s)).toBe("pause");
     s = screensInLog(at("18:04:02:000", "GUI", "Destroyed 'pause_screen' screen in 0.4ms"), s);
     expect(currentScreen(s)).toBe("world");
-  });
-
-  it("reads PNG sizes", () => {
-    const png = Buffer.alloc(24);
-    png.write("IHDR", 12, "ascii");
-    png.writeUInt32BE(1280, 16);
-    png.writeUInt32BE(668, 20);
-    expect(pngSize(png)).toEqual({ width: 1280, height: 668 });
-    expect(pngSize(Buffer.alloc(8))).toBeUndefined();
   });
 
   it("finds the local world tiles on the Play screen and skips featured servers", () => {
@@ -450,7 +439,7 @@ class FakeGame {
       },
       key: async (keys) => this.key(keys),
       ...(this.opts.noMouse ? {} : { click: async (x: number, y: number, count = 1) => this.click(x, y, count) }),
-      ...(this.opts.ui ? { ui: this.uiRoute() } : {}),
+      ...(this.opts.ui ? { ui: () => this.uiRoute() } : {}),
       screenshot: async (label) => ({ path: `/tmp/${label}.png`, png: this.screen === "play" ? playScreen(this.visible(), this.shift) : playScreen([]) }),
       alive: async () => true,
       sleep: async (ms) => {
@@ -740,7 +729,7 @@ describe("join recovery through the agent's UI", () => {
   it("falls back to the log and the keys when the agent's UI stops answering", async () => {
     const game = new FakeGame({ start: "disconnect", afterBackToMenu: "rejoin", ui: true });
     const io = game.io();
-    io.ui = {
+    io.ui = () => ({
       screen: async () => {
         throw new Error("ui.screen timed out");
       },
@@ -748,7 +737,7 @@ describe("join recovery through the agent's UI", () => {
       press: async () => undefined,
       key: async () => undefined,
       click: async () => undefined,
-    };
+    });
     const result = await recoverJoin(io, { ...start, screens: screensInLog(game.history()) });
     expect(result.recovered).toBe(true);
     expect(result.steps.some((step) => step.startsWith("the agent's UI stopped answering"))).toBe(true);

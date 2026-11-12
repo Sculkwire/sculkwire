@@ -9,15 +9,15 @@
  *   folder), so the injector joins the wineserver the game already talks to instead of starting a second one. The DLL
  *   path is Wine's `Z:` mapping (`gamePath`).
  *
- * The game has to be running: the injector fails when it finds no `Minecraft.Windows.exe`.
+ * The game has to be running: the injector fails when it finds no game process (`GAME_EXE`).
  */
 import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { run } from "../../core/process.ts";
-import { findInstall, installerRoot, type ClientInstall } from "../../gamefiles/install.ts";
+import { GAME_EXE, installerRoot } from "../../gamefiles/gdk.ts";
+import type { ClientInstall } from "../../gamefiles/install.ts";
 import { winePrefix } from "../../gamefiles/wine.ts";
 import { gamePath } from "./gamepath.ts";
-import { buildAgent, type AgentBuild } from "./build.ts";
 
 export class AgentInjectError extends Error {
   readonly stage: "prerequisite" | "prefix" | "wine" | "inject";
@@ -153,7 +153,7 @@ export function injectorCommand(
 export interface InjectOptions {
   dll: string;
   injector: string;
-  /** Executable name of the game process, default `Minecraft.Windows.exe`. */
+  /** Executable name of the game process, default `GAME_EXE`. */
   exe?: string;
   timeoutMs?: number;
   platform?: NodeJS.Platform;
@@ -164,7 +164,7 @@ export interface InjectOptions {
 export async function injectAgent(install: ClientInstall, options: InjectOptions): Promise<InjectionResult> {
   if (!existsSync(options.dll)) throw new AgentInjectError("prerequisite", `agent DLL does not exist: ${options.dll}`);
   if (!existsSync(options.injector)) throw new AgentInjectError("prerequisite", `injector does not exist: ${options.injector}`);
-  const exe = options.exe ?? "Minecraft.Windows.exe";
+  const exe = options.exe ?? GAME_EXE;
   const command = injectorCommand(install, options.injector, options.dll, exe, options.platform ?? process.platform, options.check);
   const result = await run(command.cmd, command.args, { env: command.env, timeoutMs: options.timeoutMs ?? 90_000, maxOutput: 16_000 });
   const ok = /^OK\s+(\d+)/m.exec(result.stdout);
@@ -177,19 +177,4 @@ export async function injectAgent(install: ClientInstall, options: InjectOptions
   if (command.prefix) injected.prefix = command.prefix;
   if (command.wine) injected.wine = command.wine;
   return injected;
-}
-
-export interface InjectClientOptions {
-  install?: ClientInstall;
-  build?: AgentBuild;
-  exe?: string;
-  timeoutMs?: number;
-}
-
-/** `findInstall()` + `buildAgent()` + injection: the one call a CLI/MCP tool needs. */
-export async function injectClient(options: InjectClientOptions = {}): Promise<InjectionResult & { build: AgentBuild }> {
-  const install = options.install ?? (await findInstall());
-  const build = options.build ?? (await buildAgent());
-  const injected = await injectAgent(install, { dll: build.dll, injector: build.injector, exe: options.exe, timeoutMs: options.timeoutMs });
-  return { ...injected, build };
 }

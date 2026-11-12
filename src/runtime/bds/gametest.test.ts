@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { parseConsoleResults, parseTestResults, testDiagnostics } from "./gametest.ts";
-import { parseLinks } from "./install.ts";
-import { setProperties } from "./instance.ts";
 import type { IndexedPack } from "../gamelog/logparse.ts";
 
 // logs/test-results-gametest.json as BDS 1.26.63.1 wrote it for the bundled fixture.
@@ -75,26 +73,3 @@ describe("GameTest results", () => {
     expect(d!.message).toContain("expected failure");
   });
 });
-
-describe("install + instance helpers", () => {
-  it("parses the download-links API", () => {
-    const links = parseLinks({
-      result: {
-        links: [
-          { downloadType: "serverBedrockLinux", downloadUrl: "https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-1.26.63.1.zip" },
-          { downloadType: "serverBedrockPreviewWindows", downloadUrl: "https://www.minecraft.net/bedrockdedicatedserver/bin-win-preview/bedrock-server-1.26.70.23.zip" },
-          { downloadType: "serverJar", downloadUrl: "https://piston-data.mojang.com/server.jar" },
-        ],
-      },
-    });
-    expect(links).toEqual([
-      { channel: "stable", platform: "linux", version: "1.26.63.1", url: expect.stringContaining("bin-linux/") },
-      { channel: "preview", platform: "windows", version: "1.26.70.23", url: expect.stringContaining("bin-win-preview/") },
-    ]);
-  });
-
-  it("rewrites and appends server.properties keys", () => {
-    expect(setProperties("a=1\n# c\nb=2", { b: "3", d: "4" })).toBe("a=1\n# c\nb=3\nd=4");
-  });
-});
-

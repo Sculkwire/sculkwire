@@ -3,8 +3,9 @@
  * side so the others line up in front instead of walking around you, and only jump for critical hits when the
  * target is alone. Pure functions, so the fight loop and the tests share them.
  */
-import { angleDiff, horizontalDistance, yawTo, type Vec3 } from "../player.ts";
-import { escapeYaw } from "./flee.ts";
+import { angleDiff, horizontalDistance, yawTo } from "../geometry.ts";
+import type { Vec3 } from "../types.ts";
+import { escapeYaw } from "./target.ts";
 
 export interface Mob {
   id: string;
@@ -16,15 +17,15 @@ export interface Mob {
 /** Others this close count as part of the fight. */
 export const CROWD_RADIUS = 5;
 /** An other more than this many degrees off the line to the target is flanking (getting beside or behind). */
-export const FLANK_DEG = 70;
+const FLANK_DEG = 70;
 /** Switch to a mob that is this much closer than the target. */
 const SWITCH_CLOSER = 0.8;
 /** A mob this close while the player is getting hurt is the one hitting: switch to it. */
 const HITTING_RANGE = 2.5;
 /** No crits with another mob this close: the jump lets it hit freely. */
-export const ISOLATED_RADIUS = 4.5;
+const ISOLATED_RADIUS = 4.5;
 /** A creeper this close comes first: only the creeper footwork keeps its fuse from finishing. */
-export const CREEPER_FIRST = 5;
+const CREEPER_FIRST = 5;
 /** A creeper target is kept this much farther out than `CREEPER_FIRST` takes one. */
 const CREEPER_HOLD_MARGIN = 0.5;
 /** An unlit creeper this much farther than the nearest other mob is behind it: that one is fought first. */
@@ -64,7 +65,7 @@ export function isolated(me: Vec3, targetId: string, mobs: readonly Mob[]): bool
   return !mobs.some((m) => m.id !== targetId && horizontalDistance(me, m.location) < ISOLATED_RADIUS);
 }
 
-export interface CrowdMove {
+interface CrowdMove {
   /** World yaw to walk toward (the view stays on the target). */
   heading: number;
   /** `flanked`: a mob is beside or behind, get them all in front. `kite`: back off to the side away from the group. */

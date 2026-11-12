@@ -1,25 +1,19 @@
 import { createInterface } from "node:readline";
 import { parseArgs, type ParseArgsConfig } from "node:util";
-import type { CliCommand } from "../../core/cli.ts";
+import { err as log, out, type CliCommand } from "../../core/cli.ts";
 import { ExitCode, exitCodeFor, formatDiagnostic, summarize } from "../../core/diagnostic.ts";
+import { errorMessage, PrerequisiteError, UsageError } from "../../core/errors.ts";
 import { isChannel, type Channel } from "../../core/version.ts";
-import { bdsCheck } from "./check.ts";
-import { runGameTests } from "./gametest.ts";
-import { PrerequisiteError } from "../../core/errors.ts";
+import { bdsCheck, describeCheck } from "./check.ts";
+import { describeGameTest, runGameTests } from "./gametest.ts";
 import { installBds, listInstalled } from "./install.ts";
-import { getSession, startSession, stopSession } from "./session.ts";
-
-const log = (line: string): void => {
-  process.stderr.write(`${line}\n`);
-};
-
-class UsageError extends Error {}
+import { followSession, sessionCommand, startSession, stopSession } from "./session.ts";
 
 function parse<T extends NonNullable<ParseArgsConfig["options"]>>(args: string[], options: T, usage: string) {
   try {
     return parseArgs({ args, options: { ...options, help: { type: "boolean", short: "h" } }, allowPositionals: true, strict: true });
   } catch (err) {
-    throw new UsageError(`${err instanceof Error ? err.message : String(err)}\nusage: ${usage}`);
+    throw new UsageError(`${errorMessage(err)}\nusage: ${usage}`);
   }
 }
 
@@ -42,14 +36,14 @@ async function guarded(usage: string, run: () => Promise<number>): Promise<numbe
     return await run();
   } catch (err) {
     if (err instanceof UsageError) {
-      process.stderr.write(`${err.message}\n`);
+      log(err.message);
       return ExitCode.usage;
     }
     if (err instanceof PrerequisiteError) {
-      process.stderr.write(`prerequisite: ${err.message}\n`);
+      log(`prerequisite: ${err.message}`);
       return ExitCode.usage;
     }
-    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\nusage: ${usage}\n`);
+    log(`${errorMessage(err)}\nusage: ${usage}`);
     return ExitCode.usage;
   }
 }
@@ -75,13 +69,13 @@ export const commands: CliCommand[] = [
       guarded(INSTALL_USAGE, async () => {
         const { values } = parse(args, { ...COMMON, force: { type: "boolean" } }, INSTALL_USAGE);
         if (values.help) {
-          process.stdout.write(`${INSTALL_USAGE}\n`);
+          out(INSTALL_USAGE);
           return ExitCode.ok;
         }
         const r = await installBds({ channel: channelOf(values.channel), acceptEula: values["accept-eula"], force: values.force, log });
         const installed = await listInstalled();
-        if (values.json) process.stdout.write(`${JSON.stringify({ ...r, installed }, null, 2)}\n`);
-        else process.stdout.write(`${r.channel} ${r.version} ${r.dir}${r.downloaded ? "" : " (already installed)"}\n`);
+        if (values.json) out(JSON.stringify({ ...r, installed }, null, 2));
+        else out(`${r.channel} ${r.version} ${r.dir}${r.downloaded ? "" : " (already installed)"}`);
         return ExitCode.ok;
       }),
   },
@@ -92,7 +86,7 @@ export const commands: CliCommand[] = [
       guarded(CHECK_USAGE, async () => {
         const { values, positionals } = parse(args, { ...COMMON, settle: { type: "string" } }, CHECK_USAGE);
         if (values.help) {
-          process.stdout.write(`${CHECK_USAGE}\n`);
+          out(CHECK_USAGE);
           return ExitCode.ok;
         }
         if (positionals.length !== 1) throw new UsageError(`expected one path\nusage: ${CHECK_USAGE}`);
@@ -103,12 +97,10 @@ export const commands: CliCommand[] = [
           acceptEula: values["accept-eula"],
           log,
         });
-        const summary = summarize(r.diagnostics);
-        if (values.json) process.stdout.write(`${JSON.stringify({ ...r, summary }, null, 2)}\n`);
-        else for (const d of r.diagnostics) process.stdout.write(`${formatDiagnostic(d)}\n`);
-        if (r.status === "build-failed") log(`Regolith build failed, BDS not started: ${summary.errors} error(s)`);
-        else log(`BDS ${r.serverVersion} ${r.status}: ${summary.errors} error(s), ${summary.warnings} warning(s) in ${r.durationMs} ms; log ${r.rawLogPath}`);
-        return exitCodeFor(r.diagnostics);
+        if (values.json) out(JSON.stringify({ ...r, summary: summarize(r.diagnostics) }, null, 2));
+        else for (const d of r.diagnostics) out(formatDiagnostic(d));
+        log(r.status === "build-failed" ? describeCheck(r) : `${describeCheck(r)}; log ${r.rawLogPath}`);
+        return r.exitCode;
       }),
   },
   {
@@ -122,7 +114,7 @@ export const commands: CliCommand[] = [
           GAMETEST_USAGE,
         );
         if (values.help) {
-          process.stdout.write(`${GAMETEST_USAGE}\n`);
+          out(GAMETEST_USAGE);
           return ExitCode.ok;
         }
         if (positionals.length !== 1) throw new UsageError(`expected one path\nusage: ${GAMETEST_USAGE}`);
@@ -138,13 +130,13 @@ export const commands: CliCommand[] = [
           acceptEula: values["accept-eula"],
           log,
         });
-        if (values.json) process.stdout.write(`${JSON.stringify(r, null, 2)}\n`);
+        if (values.json) out(JSON.stringify(r, null, 2));
         else {
-          for (const t of r.results) process.stdout.write(`${t.result.toUpperCase().padEnd(9)} ${t.name}${t.error ? `: ${t.error}` : ""}\n`);
-          for (const d of r.diagnostics) process.stdout.write(`${formatDiagnostic(d)}\n`);
+          for (const t of r.results) out(`${t.result.toUpperCase().padEnd(9)} ${t.name}${t.error ? `: ${t.error}` : ""}`);
+          for (const d of r.diagnostics) out(formatDiagnostic(d));
         }
-        if (r.serverVersion) log(`GameTest ${r.passed}/${r.total} passed, ${r.failed} failed (BDS ${r.serverVersion}, ${r.mode}, ${r.durationMs} ms); log ${r.rawLogPath}`);
-        else log("GameTest not run: the Regolith build failed");
+        const head = describeGameTest(r, [`${r.durationMs} ms`]);
+        log(head ? `${head}; log ${r.rawLogPath}` : "GameTest not run: the Regolith build failed");
         return r.exitCode;
       }),
   },
@@ -159,7 +151,7 @@ export const commands: CliCommand[] = [
           RUN_USAGE,
         );
         if (values.help) {
-          process.stdout.write(`${RUN_USAGE}\n`);
+          out(RUN_USAGE);
           return ExitCode.ok;
         }
         if (positionals.length !== 1) throw new UsageError(`expected one path\nusage: ${RUN_USAGE}`);
@@ -171,19 +163,17 @@ export const commands: CliCommand[] = [
           acceptEula: values["accept-eula"],
           log,
         });
-        const session = getSession(info.id);
-        for (const l of session.server.lines) process.stdout.write(`${l.text}\n`);
-        session.server.on("line", (l: { text: string }) => process.stdout.write(`${l.text}\n`));
+        const exited = followSession(info.id, (l) => out(l.text));
         log(`session ${info.id}: join localhost:${info.port}; type commands, \`stop\` or Ctrl+C to quit`);
         const rl = createInterface({ input: process.stdin });
         const { promise, resolve } = Promise.withResolvers<void>();
         rl.on("line", (line) => {
           if (/^\/?stop\s*$/.test(line.trim())) resolve();
-          else if (line.trim()) session.server.write(line.trim());
+          else if (line.trim()) sessionCommand(info.id, line.trim()).catch((e: unknown) => log(errorMessage(e)));
         });
         rl.on("close", () => resolve());
         process.once("SIGINT", () => resolve());
-        session.server.once("exit", () => resolve());
+        void exited.then(() => resolve());
         await promise;
         rl.close();
         const r = await stopSession(info.id);

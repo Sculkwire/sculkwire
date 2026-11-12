@@ -9,14 +9,16 @@
  * centre straight along x or z and 1.98 on a diagonal. Between two attacks a mob waits `cooldown_time` (1 s default).
  */
 
+import type { Vec3 } from "../types.ts";
+
 /** Half the player's collision box width. */
-export const PLAYER_HALF_WIDTH = 0.3;
+const PLAYER_HALF_WIDTH = 0.3;
 /** `melee_box_attack`'s default `horizontal_reach`. */
-export const BOX_REACH = 0.8;
+const BOX_REACH = 0.8;
 /** `melee_box_attack`'s default `cooldown_time`. */
 export const MELEE_COOLDOWN_MS = 1000;
 
-export type MobKind = "melee" | "ranged" | "exploder" | "neutral" | "passive";
+type MobKind = "melee" | "ranged" | "exploder" | "neutral" | "passive";
 
 export interface MobInfo {
   kind: MobKind;
@@ -78,9 +80,7 @@ export function meleeReach(info: MobInfo, dx: number, dz: number): number {
  */
 export const SPEAR_HIT_DIST = 3.35;
 export const SPEAR_MIN_CLOSING = 0.92;
-/** The distance a spear mob charges from, and the one it backs off to after a hit (`reposition`, `cooldown_distance`). */
-export const SPEAR_CHARGE_FROM = 7;
-export const SPEAR_BACK_OFF = [9, 11] as const;
+// A spear mob charges from 7 blocks and backs off to 9 to 11 after a hit (`reposition`, `cooldown_distance`).
 /** Mob types the vanilla files can give a spear (behavior pack 1.26.60.5, entity equipment tables). */
 export const SPEAR_CARRIERS: ReadonlySet<string> = new Set([
   "minecraft:zombie",
@@ -164,4 +164,17 @@ export function mobInfo(typeId: string): MobInfo {
 
 export function isHostile(typeId: string): boolean {
   return mobInfo(typeId).hostile;
+}
+
+/** Where the hand aims on a mob, above its feet: the middle of the body, low for spiders and other small mobs, chest height for zombies and skeletons. */
+export function aimHeightOf(info: MobInfo): number {
+  return info.climbs ? 0.45 : 1.0;
+}
+
+/**
+ * How fast a mob at `at`, moving at `v` (blocks per tick), comes toward `me`, in blocks per second; `d` is their
+ * horizontal distance. 0 without a velocity or under 0.01 blocks apart.
+ */
+export function closingSpeed(me: Vec3, at: Vec3, v: Vec3 | undefined, d: number): number {
+  return v && d > 0.01 ? ((v.x * (me.x - at.x) + v.z * (me.z - at.z)) / d) * 20 : 0;
 }

@@ -23,16 +23,15 @@ async function checkLangFile(ctx: Context, pack: Pack, rel: string): Promise<voi
     await ctx.add(pack, rel, {
       severity: "warning",
       code: "lang.bom",
-      source: "lang",
       message: "UTF-8 byte order mark at the start of the file; the game reads it as part of the first key",
       range: lines.range(0, 1),
       hint: "save the file as UTF-8 without BOM",
     });
   }
   const seen = new Map<string, number>();
-  const raw = text.split("\n");
-  for (let i = 0; i < raw.length; i++) {
-    const line = (raw[i] as string).replace(/\r$/, "").replace(/^\uFEFF/, "");
+  const rows = (await ctx.lines(pack, rel)) ?? [];
+  for (let i = 0; i < rows.length; i++) {
+    const line = rows[i] as string;
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("##") || trimmed.startsWith("#")) continue;
     const eq = line.indexOf("=");
@@ -41,7 +40,6 @@ async function checkLangFile(ctx: Context, pack: Pack, rel: string): Promise<voi
       await ctx.add(pack, rel, {
         severity: "warning",
         code: "lang.syntax",
-        source: "lang",
         message: "line is not 'key=value'; the game ignores it",
         range: lines.lineRange(n),
       });
@@ -52,7 +50,6 @@ async function checkLangFile(ctx: Context, pack: Pack, rel: string): Promise<voi
       await ctx.add(pack, rel, {
         severity: "warning",
         code: "lang.key-whitespace",
-        source: "lang",
         message: `key '${key}' has surrounding whitespace, which becomes part of the key`,
         range: { start: { line: n, column: 1 }, end: { line: n, column: eq + 1 } },
       });
@@ -62,7 +59,6 @@ async function checkLangFile(ctx: Context, pack: Pack, rel: string): Promise<voi
       await ctx.add(pack, rel, {
         severity: "warning",
         code: "lang.duplicate-key",
-        source: "lang",
         message: `duplicate key '${key}' (first defined on line ${prev}); the game keeps the last value`,
         range: { start: { line: n, column: 1 }, end: { line: n, column: eq + 1 } },
       });
@@ -75,18 +71,17 @@ async function checkLanguagesJson(ctx: Context, pack: Pack): Promise<void> {
   const value = await ctx.value(pack, rel);
   if (!Array.isArray(value)) {
     if (value !== undefined)
-      await ctx.at(pack, rel, "", { severity: "error", code: "lang.languages-invalid", source: "lang", message: "languages.json must be an array of language codes" });
+      await ctx.at(pack, rel, "", { severity: "error", code: "lang.languages-invalid", message: "languages.json must be an array of language codes" });
     return;
   }
   for (let i = 0; i < value.length; i++) {
     const code = value[i];
     if (typeof code !== "string") {
-      await ctx.at(pack, rel, `/${i}`, { severity: "error", code: "lang.languages-invalid", source: "lang", message: "language codes must be strings" });
+      await ctx.at(pack, rel, `/${i}`, { severity: "error", code: "lang.languages-invalid", message: "language codes must be strings" });
     } else if (!pack.fileSet.has(`texts/${code}.lang`)) {
       await ctx.at(pack, rel, `/${i}`, {
         severity: "warning",
         code: "lang.file-missing",
-        source: "lang",
         message: `languages.json lists '${code}' but texts/${code}.lang does not exist`,
       });
     }

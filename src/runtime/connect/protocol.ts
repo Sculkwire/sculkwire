@@ -4,25 +4,12 @@
  */
 import { randomUUID } from "node:crypto";
 
-export type MessagePurpose =
-  | "commandRequest"
-  | "commandResponse"
-  | "subscribe"
-  | "unsubscribe"
-  | "event"
-  | "error"
-  | "data:block"
-  | "data:item"
-  | "data:mob"
-  | "ws:encrypt";
-
 export interface Header {
   version: number;
   requestId: string;
-  messagePurpose: MessagePurpose | string;
+  /** `commandRequest`, `commandResponse`, `data:<kind>`, `error`, `event`, … */
+  messagePurpose: string;
   messageType?: string;
-  /** Present on `event` messages. */
-  eventName?: string;
 }
 
 export interface Message<B = unknown> {
@@ -30,18 +17,12 @@ export interface Message<B = unknown> {
   body: B;
 }
 
-export interface CommandResponseBody {
-  statusCode: number;
-  statusMessage?: string;
-  [key: string]: unknown;
-}
-
 export type DataKind = "block" | "item" | "mob";
 
 /** The game rejects requests beyond this many unanswered commands ("Too many commands have been requested"). */
 export const MAX_IN_FLIGHT = 100;
 
-export function newRequestId(): string {
+function newRequestId(): string {
   return randomUUID();
 }
 
@@ -56,11 +37,6 @@ export function commandRequest(commandLine: string, requestId = newRequestId()):
     header: { version: 1, requestId, messagePurpose: "commandRequest", messageType: "commandRequest" },
     body: { version: COMMAND_VERSION, commandLine: commandLine.replace(/^\//, ""), origin: { type: "player" } },
   };
-}
-
-export function subscribeRequest(eventName: string, unsubscribe = false, requestId = newRequestId()): Message<{ eventName: string }> {
-  const purpose = unsubscribe ? "unsubscribe" : "subscribe";
-  return { header: { version: 1, requestId, messagePurpose: purpose, messageType: "commandRequest" }, body: { eventName } };
 }
 
 export function dataRequest(kind: DataKind, requestId = newRequestId()): Message<Record<string, never>> {
@@ -84,29 +60,5 @@ export function parseMessage(data: string): Message | undefined {
     messagePurpose: h.messagePurpose,
   };
   if ("messageType" in h && typeof h.messageType === "string") header.messageType = h.messageType;
-  if ("eventName" in h && typeof h.eventName === "string") header.eventName = h.eventName;
   return { header, body: "body" in value && value.body !== undefined ? value.body : {} };
 }
-
-/** Legacy telemetry events the game accepts subscriptions for (many fire only on some platforms). */
-export const KNOWN_EVENTS = [
-  "PlayerMessage",
-  "PlayerTransform",
-  "PlayerTravelled",
-  "PlayerTeleported",
-  "PlayerDied",
-  "BlockPlaced",
-  "BlockBroken",
-  "ItemUsed",
-  "ItemAcquired",
-  "ItemCrafted",
-  "ItemEquipped",
-  "ItemInteracted",
-  "MobKilled",
-  "MobInteracted",
-  "EndOfDay",
-  "ScriptLoaded",
-  "ScriptRan",
-  "SlashCommandExecuted",
-  "WorldLoaded",
-] as const;

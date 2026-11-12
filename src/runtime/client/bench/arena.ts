@@ -2,15 +2,17 @@
  * The commands that build an arena and set the player up. Pure functions, so the tests check the command text.
  * Coordinates are absolute (the bench never relies on `~`, since commands run from the server, not the player).
  */
-import type { Vec3 } from "../player.ts";
+import { xyz } from "../geometry.ts";
+import { namespaced } from "../tasks/ids.ts";
+import type { Vec3 } from "../types.ts";
 import type { MobSpawn, Offset, PlayerSetup, Scenario } from "./types.ts";
 
 /** Bedrock's `fill` refuses more than this many blocks. */
 export const FILL_LIMIT = 32_768;
 /** Feet height on the bench's flat world (grass top at -61). */
-export const GROUND_Y = -60;
+const GROUND_Y = -60;
 /** Arenas sit this far apart on x, far from spawn and from each other. */
-export const ARENA_SPACING = 160;
+const ARENA_SPACING = 160;
 const ARENA_BASE = { x: 1000, z: 1000 };
 
 export function arenaOrigin(index: number): Vec3 {
@@ -19,10 +21,6 @@ export function arenaOrigin(index: number): Vec3 {
 
 export function offsetAt(origin: Vec3, o: Offset): Vec3 {
   return { x: origin.x + o.dx, y: origin.y + o.dy, z: origin.z + o.dz };
-}
-
-function xyz(v: Vec3): string {
-  return `${Math.floor(v.x)} ${Math.floor(v.y)} ${Math.floor(v.z)}`;
 }
 
 /** `fill` commands for a box, split into slabs of whole y layers so each stays under the block limit. */
@@ -44,6 +42,15 @@ export function fillBox(from: Vec3, to: Vec3, block: string): string[] {
   return out;
 }
 
+/** A glass ring `height` blocks high at `radius` from the origin, so mobs and player stay in the arena. */
+export function wall(origin: Vec3, radius: number, height = 3): string[] {
+  const r = radius;
+  const y0 = origin.y;
+  const y1 = origin.y + height - 1;
+  const side = (x0: number, z0: number, x1: number, z1: number) => fillBox({ x: origin.x + x0, y: y0, z: origin.z + z0 }, { x: origin.x + x1, y: y1, z: origin.z + z1 }, "minecraft:glass");
+  return [...side(-r, -r, r, -r), ...side(-r, r, r, r), ...side(-r, -r, -r, r), ...side(r, -r, r, r)];
+}
+
 /** Clear the scenario's box to air and lay its floor. */
 export function arenaCommands(s: Pick<Scenario, "area" | "floor">, origin: Vec3): string[] {
   const r = s.area.radius;
@@ -51,12 +58,8 @@ export function arenaCommands(s: Pick<Scenario, "area" | "floor">, origin: Vec3)
   const hi = { x: origin.x + r, y: origin.y + s.area.height, z: origin.z + r };
   return [
     ...fillBox(lo, hi, "air"),
-    ...fillBox({ ...lo, y: origin.y - 1 }, { ...hi, y: origin.y - 1 }, typeId(s.floor ?? "grass_block")),
+    ...fillBox({ ...lo, y: origin.y - 1 }, { ...hi, y: origin.y - 1 }, namespaced(s.floor ?? "grass_block")),
   ];
-}
-
-export function typeId(type: string): string {
-  return type.includes(":") ? type : `minecraft:${type}`;
 }
 
 const ARMOR_SLOTS = [
@@ -66,7 +69,7 @@ const ARMOR_SLOTS = [
   ["slot.armor.feet", "boots"],
 ] as const;
 
-export function timeOfDay(t: PlayerSetup["time"]): number {
+function timeOfDay(t: PlayerSetup["time"]): number {
   if (t === undefined || t === "day") return 1000;
   if (t === "noon") return 6000;
   if (t === "night") return 18000;
@@ -91,9 +94,9 @@ export function playerCommands(p: PlayerSetup, origin: Vec3): string[] {
     "effect @a saturation 2 20 true",
     `time set ${timeOfDay(p.time)}`,
   ];
-  (p.hotbar ?? []).forEach((it, i) => out.push(`replaceitem entity @a slot.hotbar ${i} ${typeId(it.item)} ${it.amount ?? 1}`));
+  (p.hotbar ?? []).forEach((it, i) => out.push(`replaceitem entity @a slot.hotbar ${i} ${namespaced(it.item)} ${it.amount ?? 1}`));
   if (p.armor) for (const [slot, piece] of ARMOR_SLOTS) out.push(`replaceitem entity @a ${slot} 0 minecraft:${p.armor}_${piece} 1`);
-  if (p.offhand) out.push(`replaceitem entity @a slot.weapon.offhand 0 ${typeId(p.offhand)} 1`);
+  if (p.offhand) out.push(`replaceitem entity @a slot.weapon.offhand 0 ${namespaced(p.offhand)} 1`);
   for (const e of p.effects ?? []) out.push(`effect @a ${e.id} ${e.seconds} ${e.amplifier ?? 0} true`);
   out.push(tp);
   return out;
@@ -107,7 +110,7 @@ const SPAWN_EVENTS: Record<string, string> = {
 
 export function summonCommand(m: MobSpawn, origin: Vec3): string {
   const at = offsetAt(origin, m.at);
-  const t = typeId(m.type);
+  const t = namespaced(m.type);
   const event = SPAWN_EVENTS[t];
   return `summon ${t} ${at.x + 0.5} ${at.y} ${at.z + 0.5}${event ? ` 0 0 ${event}` : ""}`;
 }
@@ -116,7 +119,7 @@ export function summonCommand(m: MobSpawn, origin: Vec3): string {
 export function heldCommand(m: MobSpawn, origin: Vec3): string | undefined {
   if (!m.held) return undefined;
   const at = offsetAt(origin, m.at);
-  return `replaceitem entity @e[type=${typeId(m.type).replace(/^minecraft:/, "")},x=${at.x + 0.5},y=${at.y},z=${at.z + 0.5},r=2,c=1] slot.weapon.mainhand 0 ${m.held}`;
+  return `replaceitem entity @e[type=${namespaced(m.type).replace(/^minecraft:/, "")},x=${at.x + 0.5},y=${at.y},z=${at.z + 0.5},r=2,c=1] slot.weapon.mainhand 0 ${m.held}`;
 }
 
 /** Every entity but players in and around the arena, for the reset between runs. */

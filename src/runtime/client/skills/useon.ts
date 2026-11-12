@@ -3,8 +3,11 @@
  * is launched at it with the ballistic aim of `shoot`; anything else is a melee hit. Entities already hit in this
  * play run are skipped, so "hit every cow once" visits each cow one time.
  */
-import { horizontalDistance, projectileFor, type EntityInfo, type PlayerController } from "../player.ts";
-import { isEntityId, typeIdOf } from "./fight.ts";
+import { projectileFor } from "../ballistics.ts";
+import { horizontalDistance } from "../geometry.ts";
+import type { PlayerController } from "../player.ts";
+import type { EntityInfo } from "../types.ts";
+import { isEntityId, typeIdOf } from "./target.ts";
 import { shortType } from "./mobs.ts";
 import { combatStats } from "./stats.ts";
 import type { SkillResult } from "./types.ts";

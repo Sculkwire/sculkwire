@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pauseOnTakeover } from "../client/jobs.ts";
-import { PlayerController, TAKEOVER_MESSAGE, type EngineInput, type PlayerState, type PlayerWorld } from "../client/player.ts";
-import type { EngineResult } from "./engine.ts";
+import type { EngineResult } from "./failure.ts";
 import { InputLock, lockText, parseLockState, type LockState } from "./lock.ts";
 
 const base: LockState = {
@@ -112,75 +110,5 @@ describe("InputLock", () => {
     const waiting = lock.untilControl(stop.signal);
     stop.abort();
     await expect(waiting).resolves.toBeUndefined();
-  });
-});
-
-function world(lock: InputLock): { world: PlayerWorld; released: () => number } {
-  let releases = 0;
-  const s: PlayerState = {
-    tick: 0,
-    name: "p",
-    location: { x: 0, y: 0, z: 0 },
-    velocity: { x: 0, y: 0, z: 0 },
-    rotation: { x: 0, y: 0 },
-    dimension: "minecraft:overworld",
-    onGround: true,
-    sneaking: false,
-    sprinting: false,
-    gameMode: "survival",
-    selectedSlot: 1,
-  };
-  const engine: EngineInput = {
-    prepare: async () => undefined,
-    reachable: async () => true,
-    look: async () => undefined,
-    move: async () => undefined,
-    release: async () => {
-      releases++;
-    },
-    attack: async () => null,
-    use: async () => undefined,
-    takeover: lock,
-  };
-  return {
-    world: {
-      input: { keyDown: async () => undefined, keyUp: async () => undefined, look: async () => undefined, button: async () => undefined },
-      state: async () => structuredClone(s),
-      engine,
-      entity: async () => null,
-      nearest: async () => null,
-      impacts: async () => ({ tick: 0, impacts: [] }),
-    },
-    released: () => releases,
-  };
-}
-
-describe("PlayerController under the input lock", () => {
-  it("stops a running action when the user takes control and refuses new ones until it comes back", async () => {
-    const { lock } = fakeLock();
-    const { world: w, released } = world(lock);
-    const pc = new PlayerController(w);
-    expect(await pc.selectInput("engine")).toBe("engine");
-    const running = pc.run({ action: "wait", ms: 5000 });
-    // run() registers its takeover listener before its first await, so the F9 can arrive right away.
-    lock.update({ ...base, locked: false, user: true, by: "user" });
-    const r = await running;
-    expect(r).toMatchObject({ ok: false, message: TAKEOVER_MESSAGE, input: "engine" });
-    expect(r.durationMs).toBeLessThan(2000);
-    expect(released()).toBeGreaterThan(0);
-    expect(await pc.run({ action: "wait", ms: 1 })).toMatchObject({ ok: false, message: TAKEOVER_MESSAGE });
-    lock.update({ ...base, by: "user" });
-    expect(await pc.run({ action: "wait", ms: 1 })).toMatchObject({ ok: true });
-  });
-
-  it("pauses a play job's view of the world while the user holds control", async () => {
-    const { lock } = fakeLock();
-    lock.update({ ...base, locked: false, user: true });
-    let looked = 0;
-    const env = pauseOnTakeover({ entities: async (_radius: number) => ++looked }, lock, new AbortController().signal);
-    const pending = env.entities(16);
-    await Promise.resolve();
-    lock.update(base);
-    expect(await pending).toBe(1);
   });
 });

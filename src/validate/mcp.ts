@@ -1,7 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { formatDiagnostic } from "../core/diagnostic.ts";
-import { CHECKS, type ValidateOptions, type ValidationResult, validateProject, validateText } from "./index.ts";
+import { ok, summarySchema } from "../core/mcp.ts";
+import { CHECKS, toOptions, type ValidationResult, validateProject, validateText } from "./index.ts";
 
 const position = z.object({ line: z.number().int(), column: z.number().int() });
 const diagnostic = z.object({
@@ -23,7 +24,7 @@ const output = {
   packs: z.array(z.object({ kind: z.string(), relDir: z.string(), name: z.string().optional(), uuid: z.string().optional(), version: z.string().optional(), files: z.number() })),
   filesChecked: z.number(),
   checks: z.array(z.string()),
-  summary: z.object({ errors: z.number(), warnings: z.number(), infos: z.number() }),
+  summary: summarySchema,
   diagnostics: z.array(diagnostic),
   truncated: z.object({ total: z.number(), returned: z.number() }).optional().describe("present when max_diagnostics cut the list (errors first)"),
   schemaSources: z.record(z.string(), z.number()).describe("files validated per schema source"),
@@ -50,26 +51,6 @@ const common = {
   engine_schemas_dir: z.string().optional().describe("engine schema dump (bedrock-samples root or <area>/<kind>/<version>/ layout)"),
   rockide_dir: z.string().optional().describe("rockide/schemas checkout to use instead of the cached copy"),
 };
-
-interface CommonArgs {
-  channel?: "stable" | "preview" | undefined;
-  fail_on?: "error" | "warning" | undefined;
-  samples_root?: string | undefined;
-  typings_dir?: string | undefined;
-  engine_schemas_dir?: string | undefined;
-  rockide_dir?: string | undefined;
-}
-
-function options(a: CommonArgs): ValidateOptions {
-  const o: ValidateOptions = {};
-  if (a.channel) o.channel = a.channel;
-  if (a.fail_on) o.failOn = a.fail_on;
-  if (a.samples_root) o.samplesRoot = a.samples_root;
-  if (a.typings_dir) o.typingsDir = a.typings_dir;
-  if (a.engine_schemas_dir) o.engineSchemasDir = a.engine_schemas_dir;
-  if (a.rockide_dir) o.rockideSchemasDir = a.rockide_dir;
-  return o;
-}
 
 const RANK = { error: 0, warning: 1, info: 2 } as const;
 
@@ -134,12 +115,9 @@ export function register(server: McpServer): void {
       outputSchema: output,
     },
     async (args) => {
-      const o = options(args);
-      if (args.checks) o.checks = args.checks;
-      if (args.regolith) o.regolith = args.regolith;
-      const r = await validateProject(args.path, o);
+      const r = await validateProject(args.path, toOptions(args));
       const max = args.max_diagnostics ?? 200;
-      return { content: [{ type: "text" as const, text: summaryText(r, max) }], structuredContent: structured(r, max) };
+      return ok(summaryText(r, max), structured(r, max));
     },
   );
 
@@ -158,9 +136,9 @@ export function register(server: McpServer): void {
       outputSchema: output,
     },
     async (args) => {
-      const r = await validateText(args.path, args.content, options(args));
+      const r = await validateText(args.path, args.content, toOptions(args));
       const max = args.max_diagnostics ?? 200;
-      return { content: [{ type: "text" as const, text: summaryText(r, max) }], structuredContent: structured(r, max) };
+      return ok(summaryText(r, max), structured(r, max));
     },
   );
 }

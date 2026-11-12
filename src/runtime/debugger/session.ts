@@ -2,38 +2,18 @@
  * Minecraft Script Debugger client (protocol of Mojang/minecraft-debugger, MIT). Two ways to attach:
  * - `connectTo(host, port)`: BDS `script debugger listen <port>` (needs `allow-inbound-script-debugging=true`).
  * - `listen(port)`: we accept; the game dials in with `/script debugger connect <host> <port>`.
- * The session negotiates the protocol version, answers the passcode, resumes the game whenever it reports a stop,
- * and surfaces prints (with `file:line`), stats, profiler captures and notifications as events.
+ * The session negotiates the protocol version, resumes the game whenever it reports a stop, and surfaces prints
+ * (with `file:line`) and profiler captures as events.
  */
 import { EventEmitter } from "node:events";
 import { createConnection, createServer, type AddressInfo, type Server, type Socket } from "node:net";
+import { setTimeout as sleep } from "node:timers/promises";
 import { encodeFrame, FrameDecoder } from "./framing.ts";
+import { errorMessage } from "../../core/errors.ts";
 import { parseLocations } from "../gamelog/frames.ts";
 import type { PrintEvent } from "./print.ts";
-import {
-  MAX_PROTOCOL_VERSION,
-  PRINT_LEVELS,
-  PROTOCOL,
-  type PluginDetails,
-  type ProfilerCaptureMessage,
-  type ProtocolEventMessage,
-  type StatEventMessage,
-} from "./protocol.ts";
+import { MAX_PROTOCOL_VERSION, PRINT_LEVELS, PROTOCOL, type PluginDetails, type ProfilerCaptureMessage, type ProtocolEventMessage } from "./protocol.ts";
 import { decodeCapture, type CpuProfile } from "./profile.ts";
-
-export interface SessionOptions {
-  /** Script module uuid (manifest `modules[].uuid` of the script module) to attach to. Default: first plugin. */
-  targetModuleUuid?: string;
-  /** Answer when the game requires a passcode (`script debugger listen <port> <passcode>`). */
-  passcode?: string;
-  /** Keep this many prints in memory for `prints(since)`. */
-  printBuffer?: number;
-}
-
-export interface NotificationEvent {
-  message: string;
-  level: string;
-}
 
 export interface ProtocolInfo {
   /** Version the game announced. */
@@ -50,22 +30,21 @@ export interface ProfilerCapture {
   profile: CpuProfile;
 }
 
-/** Event map: `print`, `notification`, `stat`, `profilerCapture`, `protocol`, `stopped`, `message`, `close`, `error`. */
+/** How long the game may take to echo a command it received. */
+const ECHO_TIMEOUT_MS = 10_000;
+
+/** Event map: `print`, `profilerCapture`, `close`, `error`. */
 export class DebuggerSession extends EventEmitter {
   #socket: Socket;
   #decoder = new FrameDecoder();
-  #opts: SessionOptions;
   #seq = 0;
-  #prints: PrintEvent[] = [];
   #ready: PromiseWithResolvers<ProtocolInfo> = Promise.withResolvers<ProtocolInfo>();
   #closed = false;
   info?: ProtocolInfo;
-  lastStats?: StatEventMessage;
 
-  constructor(socket: Socket, opts: SessionOptions = {}) {
+  constructor(socket: Socket) {
     super();
     this.#socket = socket;
-    this.#opts = opts;
     // Avoid unhandled rejection when nobody awaits `ready` before the socket dies.
     this.#ready.promise.catch(() => {});
     socket.on("data", (chunk: Buffer) => {
@@ -102,17 +81,18 @@ export class DebuggerSession extends EventEmitter {
     return this.info?.version ?? 0;
   }
 
-  /** Prints with `seq > since`. */
-  prints(since = 0): PrintEvent[] {
-    return this.#prints.filter((p) => p.seq > since);
-  }
-
   send(message: Record<string, unknown>): void {
     if (!this.#closed) this.#socket.write(encodeFrame(message));
   }
 
+  /** Protocol 5-7 nest a request's fields under `nestedKey`; older and newer (Cereal) versions send them flat. */
+  #sendVersioned(type: string, fields: Record<string, unknown>, nestedKey: string): void {
+    const v = this.protocolVersion;
+    const nested = v >= PROTOCOL.SupportProfilerCaptures && v < PROTOCOL.SupportCerealSerialization;
+    this.send(nested ? { type, [nestedKey]: fields } : { type, ...fields });
+  }
+
   #receive(envelope: unknown): void {
-    this.emit("message", envelope);
     if (!envelope || typeof envelope !== "object" || !("type" in envelope) || envelope.type !== "event") return;
     if (!("event" in envelope) || !envelope.event || typeof envelope.event !== "object") return;
     const event = envelope.event as { type?: unknown } & Record<string, unknown>;
@@ -126,22 +106,9 @@ export class DebuggerSession extends EventEmitter {
         const print: PrintEvent = { seq: ++this.#seq, time: Date.now(), level, message };
         const [location] = parseLocations(message);
         if (location) print.location = location;
-        this.#prints.push(print);
-        const max = this.#opts.printBuffer ?? 5000;
-        if (this.#prints.length > max) this.#prints.splice(0, this.#prints.length - max);
         this.emit("print", print);
         break;
       }
-      case "NotificationEvent":
-        this.emit("notification", {
-          message: String(event.message ?? ""),
-          level: PRINT_LEVELS[Number(event.logLevel)] ?? "log",
-        } satisfies NotificationEvent);
-        break;
-      case "StatEvent2":
-        this.lastStats = event as unknown as StatEventMessage;
-        this.emit("stat", this.lastStats);
-        break;
       case "ProfilerCapture": {
         const msg = event as unknown as ProfilerCaptureMessage;
         try {
@@ -153,7 +120,6 @@ export class DebuggerSession extends EventEmitter {
       }
       case "StoppedEvent":
         // We are not an interactive debugger: never leave the game paused.
-        this.emit("stopped", event);
         this.send({ type: "resume" });
         break;
       default:
@@ -165,72 +131,95 @@ export class DebuggerSession extends EventEmitter {
     const gameVersion = Number(event.version) || 1;
     const version = Math.min(gameVersion, MAX_PROTOCOL_VERSION);
     const plugins = Array.isArray(event.plugins) ? event.plugins : [];
-    const wanted = this.#opts.targetModuleUuid?.toLowerCase();
-    const target =
-      version >= PROTOCOL.SupportTargetSelection
-        ? (plugins.find((p) => p.module_uuid.toLowerCase() === wanted) ?? plugins[0])?.module_uuid
-        : undefined;
+    const target = version >= PROTOCOL.SupportTargetSelection ? plugins[0]?.module_uuid : undefined;
     const info: ProtocolInfo = { gameVersion, version, plugins, requirePasscode: event.require_passcode === true };
     if (target) info.targetModuleUuid = target;
     this.info = info;
     const reply: Record<string, unknown> = { type: "protocol", version };
     if (target) reply.target_module_uuid = target;
-    if (this.#opts.passcode !== undefined) reply.passcode = this.#opts.passcode;
     this.send(reply);
     // Like the VS Code extension's configurationDone: the game holds script execution after an attach (at
     // auto-attach, until this arrives). Without a script target BDS logs these as "unhandled": harmless.
     this.send({ type: "stopOnException", stopOnException: false });
     this.send({ type: "resume" });
-    this.emit("protocol", info);
     this.#ready.resolve(info);
   }
 
   /**
    * Run a command in the game. No direct reply: the game echoes `Executing command [<cmd>]` as a print, then
-   * prints the command's own output (or `Syntax error: …`); collect `print` events after the echo for output.
+   * prints the command's own output (or `Syntax error: …`); `runCommand` collects it.
    */
   command(commandLine: string, dimension = "overworld"): void {
+    this.#sendVersioned("minecraftCommand", { command: commandLine.replace(/^\//, ""), dimension_type: dimension }, "command");
+  }
+
+  /**
+   * Run a command and collect its output: the prints after the game's `Executing command [<cmd>]` echo until a quiet
+   * gap. Prints `ignore` matches (other traffic on the same session) neither extend the gap nor appear in the result.
+   */
+  async runCommand(commandLine: string, opts: { dimension?: string; ignore?: (message: string) => boolean } = {}): Promise<PrintEvent[]> {
     const command = commandLine.replace(/^\//, "");
-    const v = this.protocolVersion;
-    if (v < PROTOCOL.SupportProfilerCaptures || v >= PROTOCOL.SupportCerealSerialization) {
-      this.send({ type: "minecraftCommand", command, dimension_type: dimension });
-    } else {
-      this.send({ type: "minecraftCommand", command: { command, dimension_type: dimension } });
+    const ignore = opts.ignore ?? (() => false);
+    const prints: PrintEvent[] = [];
+    let echoAt = -1;
+    const echoed = Promise.withResolvers<void>();
+    const onPrint = (p: PrintEvent): void => {
+      prints.push(p);
+      if (echoAt < 0 && p.message.includes(`Executing command [${command}]`)) {
+        echoAt = prints.length;
+        echoed.resolve();
+      }
+    };
+    const onClose = (): void => echoed.reject(new Error("the debugger connection closed"));
+    this.on("print", onPrint);
+    this.once("close", onClose);
+    const timer = setTimeout(() => echoed.reject(new Error(`timed out after ${ECHO_TIMEOUT_MS} ms waiting for the game`)), ECHO_TIMEOUT_MS);
+    try {
+      this.command(command, opts.dimension);
+      await echoed.promise;
+      clearTimeout(timer);
+      // Output follows the echo; stop after a quiet gap. Only the command's own lines extend it: other traffic
+      // (the client's helper pack sends queries four times a second, each with an echo, a confirmation and a reply)
+      // would never let it go quiet.
+      let last = echoAt;
+      let quietUntil = Date.now() + 600;
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < quietUntil && Date.now() < deadline) {
+        await sleep(100);
+        if (prints.length > last) {
+          const fresh = prints.slice(last);
+          last = prints.length;
+          if (fresh.some((p) => !ignore(p.message))) quietUntil = Date.now() + 400;
+        }
+      }
+      return prints.slice(echoAt, last).filter((p) => !ignore(p.message));
+    } finally {
+      clearTimeout(timer);
+      this.off("print", onPrint);
+      this.off("close", onClose);
     }
   }
 
   startProfiler(): void {
     this.#requireVersion(PROTOCOL.SupportProfilerCaptures, "profiler");
-    const target = this.info?.targetModuleUuid;
-    if (this.protocolVersion >= PROTOCOL.SupportCerealSerialization) this.send({ type: "startProfiler", target_module_uuid: target });
-    else this.send({ type: "startProfiler", profiler: { target_module_uuid: target } });
+    this.#sendVersioned("startProfiler", { target_module_uuid: this.info?.targetModuleUuid }, "profiler");
   }
 
   /** Stop the profiler and wait for the capture the game sends back. */
   async stopProfiler(capturesPath = "", timeoutMs = 30_000): Promise<ProfilerCapture> {
     this.#requireVersion(PROTOCOL.SupportProfilerCaptures, "profiler");
     const { promise, resolve, reject } = Promise.withResolvers<ProfilerCapture>();
-    const timer = setTimeout(() => {
-      this.off("profilerCapture", resolve);
-      reject(new Error(`no profiler capture within ${timeoutMs} ms`));
-    }, timeoutMs);
-    this.once("profilerCapture", (c: ProfilerCapture) => {
+    const onCapture = (c: ProfilerCapture): void => {
       clearTimeout(timer);
       resolve(c);
-    });
-    const target = this.info?.targetModuleUuid;
-    if (this.protocolVersion >= PROTOCOL.SupportCerealSerialization) {
-      this.send({ type: "stopProfiler", captures_path: capturesPath, target_module_uuid: target });
-    } else {
-      this.send({ type: "stopProfiler", profiler: { captures_path: capturesPath, target_module_uuid: target } });
-    }
+    };
+    const timer = setTimeout(() => {
+      this.off("profilerCapture", onCapture);
+      reject(new Error(`no profiler capture within ${timeoutMs} ms`));
+    }, timeoutMs);
+    this.once("profilerCapture", onCapture);
+    this.#sendVersioned("stopProfiler", { captures_path: capturesPath, target_module_uuid: this.info?.targetModuleUuid }, "profiler");
     return promise;
-  }
-
-  /** Enable/disable diagnostics stat collectors (protocol >= 11). */
-  setDiagnosticsActive(collectorNames: string[], active: boolean): void {
-    this.#requireVersion(PROTOCOL.SupportDiagnosticsSetActive, "diagnostics-set-active");
-    this.send({ type: "diagnostics-set-active", collector_names: collectorNames, active });
   }
 
   #requireVersion(min: number, feature: string): void {
@@ -245,16 +234,18 @@ export class DebuggerSession extends EventEmitter {
   }
 }
 
-export interface ConnectOptions extends SessionOptions {
+export interface ConnectOptions {
   /** Keep retrying until this many ms passed (the game's listener may not be up yet). */
   timeoutMs?: number;
+  /** Stop retrying (and close a session that attaches anyway). */
+  signal?: AbortSignal;
 }
 
 /** Connect to a game that listens (`script debugger listen <port>`); resolves after the handshake. */
 export async function connectTo(host: string, port: number, opts: ConnectOptions = {}): Promise<DebuggerSession> {
   const deadline = Date.now() + (opts.timeoutMs ?? 10_000);
   let lastError: unknown;
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !opts.signal?.aborted) {
     const { promise, resolve, reject } = Promise.withResolvers<Socket>();
     const socket = createConnection({ host, port });
     socket.once("connect", () => resolve(socket));
@@ -262,22 +253,27 @@ export async function connectTo(host: string, port: number, opts: ConnectOptions
     try {
       await promise;
       socket.removeAllListeners("error");
-      const session = new DebuggerSession(socket, opts);
+      const session = new DebuggerSession(socket);
       const timer = setTimeout(() => socket.destroy(), Math.max(1000, deadline - Date.now()));
       try {
         await session.ready;
       } finally {
         clearTimeout(timer);
       }
+      if (opts.signal?.aborted) {
+        session.close();
+        break;
+      }
       return session;
     } catch (err) {
       lastError = err;
       socket.destroy();
       // `script debugger listen` keeps its socket open only briefly: retry fast.
-      await new Promise((r) => setTimeout(r, 100));
+      await sleep(100);
     }
   }
-  throw new Error(`could not attach the script debugger at ${host}:${port}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+  if (opts.signal?.aborted) throw new Error(`attaching the script debugger at ${host}:${port} was cancelled`);
+  throw new Error(`could not attach the script debugger at ${host}:${port}: ${errorMessage(lastError)}`);
 }
 
 export interface DebuggerListener {
@@ -291,12 +287,12 @@ export interface DebuggerListener {
 }
 
 /** Listen for a game that dials in (`/script debugger connect <host> <port>`). */
-export async function listen(port: number, opts: SessionOptions & { host?: string } = {}): Promise<DebuggerListener> {
+export async function listen(port: number, opts: { host?: string } = {}): Promise<DebuggerListener> {
   const queue: DebuggerSession[] = [];
   const waiters: { got(s: DebuggerSession): void; fail(err: Error): void }[] = [];
   let closed: Error | undefined;
   const server = createServer((socket) => {
-    const session = new DebuggerSession(socket, opts);
+    const session = new DebuggerSession(socket);
     session.ready.then(
       () => {
         if (closed) return session.close();

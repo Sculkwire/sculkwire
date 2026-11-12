@@ -1,12 +1,16 @@
 /** File helpers every feature shares: atomic writes and tolerant reads. */
-import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-/** Write via a sibling temp file and rename, so concurrent readers never see a partial file. */
-export async function writeFileAtomic(path: string, data: string | Uint8Array): Promise<void> {
+/**
+ * Write via a sibling temp file and rename, so concurrent readers never see a partial file. `mode` sets the file's
+ * POSIX permissions (independent of the umask).
+ */
+export async function writeFileAtomic(path: string, data: string | Uint8Array, options: { mode?: number } = {}): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmp, data);
+  await writeFile(tmp, data, options.mode === undefined ? {} : { mode: options.mode });
+  if (options.mode !== undefined) await chmod(tmp, options.mode);
   await rename(tmp, path);
 }
 

@@ -166,9 +166,3 @@ export async function writeWorldIcon(world: CreatedWorld): Promise<void> {
   if (!world.levelId.startsWith(WORLD_PREFIX)) throw new Error(`refusing to write into world folder ${world.levelId}`);
   await writeFile(join(world.dir, ICON_FILE), worldIcon(world.levelId));
 }
-
-/** Remove a world this tool created (name must carry the prefix). */
-export async function deleteWorld(world: CreatedWorld): Promise<void> {
-  if (!world.name.startsWith(WORLD_PREFIX)) throw new Error(`refusing to delete non-sculkwire world ${world.name}`);
-  await rm(world.dir, { recursive: true, force: true });
-}

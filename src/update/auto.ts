@@ -3,15 +3,17 @@
  * background: at most once per 24 h, never awaited by startup or a tool call, silent apart from one stderr line.
  * The running server keeps its version; the next session starts the new one through the launcher.
  */
-import { join } from "node:path";
+import { errorMessage } from "../core/errors.ts";
 import { VERSION } from "../core/meta.ts";
-import { readChannel } from "./config.ts";
-import { type Channel, detectRunning, dueForCheck, type Hooks, markInUse, readCurrent, readState, type Running, update, type UpdateResult } from "./install.ts";
+import { autoUpdateDisabled, readChannel, type UpdateChannel } from "./config.ts";
+import { type Hooks, update, type UpdateResult } from "./install.ts";
+import { detectRunning, readCurrent, type Running } from "./layout.ts";
+import { dueForCheck, readState } from "./state.ts";
 
 export interface VersionInfo {
   /** package.json version of the running code. */
   version: string;
-  channel: Channel;
+  channel: UpdateChannel;
   /** Runs from a managed install (`sculk update` applies), not a development checkout. */
   managed: boolean;
   /** Checkout the running code belongs to. */
@@ -76,9 +78,8 @@ export async function autoUpdate(options: AutoUpdateOptions = {}): Promise<Updat
   try {
     const running = options.running ?? detectRunning();
     if (!running.managed) return undefined;
-    const { layout: l, version } = running.managed;
-    markInUse(join(l.versions, version));
-    if ((options.env ?? process.env).SCULKWIRE_AUTO_UPDATE === "0") return undefined;
+    const l = running.managed.layout;
+    if (autoUpdateDisabled(options.env ?? process.env)) return undefined;
     const channel = await readChannel();
     if (channel === "off") return undefined;
     const now = options.now ?? Date.now();
@@ -95,7 +96,7 @@ export async function autoUpdate(options: AutoUpdateOptions = {}): Promise<Updat
     }
     return result;
   } catch (err) {
-    log(`sculkwire: automatic update check failed: ${err instanceof Error ? err.message : String(err)}`);
+    log(`sculkwire: automatic update check failed: ${errorMessage(err)}`);
     return undefined;
   }
 }

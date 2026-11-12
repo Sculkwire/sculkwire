@@ -3,32 +3,27 @@
  * that it found no way, and fast: the box closes the goal in, so no wider window or walk is tried. Success is that
  * failure within 15 s, its message naming the closest reachable spot, and the player unharmed.
  */
-import { wall } from "../kit.ts";
-import { blocks } from "./nav-kit.ts";
-import type { Offset, Scenario } from "../types.ts";
+import { blocks, course } from "../navkit.ts";
+import type { Scenario } from "../types.ts";
 
-const AREA = { radius: 12, height: 6 };
-const GOAL: Offset = { dx: 0, dy: 0, dz: 6 };
 const LIMIT_MS = 15_000;
 
-const sealed: Scenario = {
+const box = course({
   name: "sealed",
-  suite: "nav",
   summary: "the goal inside a closed glass box 6 blocks ahead; success: a failure answer within 15 s naming the closest spot, no damage",
-  runs: 3,
+  area: { radius: 12, height: 6 },
   timeoutMs: LIMIT_MS,
-  area: AREA,
-  floor: "stone",
-  build: (ctx) => {
-    const b = blocks(ctx.origin);
+  goal: { dx: 0, dy: 0, dz: 6 },
+  build: (o) => {
+    const b = blocks(o);
     // A 3 x 3 x 4 glass box, then its inside (the goal block and the one above) cleared.
-    return [...wall(ctx.origin, AREA.radius, 4), ...b.fill(-1, 0, 5, 1, 3, 7, "glass"), ...b.fill(0, 0, 6, 0, 1, 6, "air")];
+    return [...b.fill(-1, 0, 5, 1, 3, 7, "glass"), ...b.fill(0, 0, 6, 0, 1, 6, "air")];
   },
-  player: { gameMode: "survival", time: "day", yaw: 0 },
-  action: (ctx) => {
-    const g = ctx.at(GOAL);
-    return { action: "goto", x: g.x + 0.5, y: g.y, z: g.z + 0.5, radius: 0.6, timeoutMs: LIMIT_MS };
-  },
+});
+
+/** The course's arena and `goto`, with its own extras and its success inverted: the answer that there is no way. */
+const sealed: Scenario = {
+  ...box,
   measure: (ctx, o) => {
     const p = o.state?.location;
     const start = ctx.at({ dx: 0, dy: 0, dz: 0 });
