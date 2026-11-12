@@ -1,11 +1,10 @@
 //! The game module's PE image: sections, string anchors, validated RIP-relative references,
-//! `.pdata` function boundaries, wildcard byte signatures and MSVC RTTI.
+//! `.pdata` function boundaries and MSVC RTTI.
 //!
 //! Everything here is build-agnostic: it reads the loaded image the process already has, and every
 //! answer is validated (an instruction boundary is decoded, a `.pdata` entry must contain the
 //! address, a vtable slot must point into `.text`), so a wrong hit is refused rather than returned.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::ffi::c_void;
 
@@ -28,6 +27,13 @@ impl Section {
     pub fn name(&self) -> &str {
         let end = self.name.iter().position(|c| *c == 0).unwrap_or(self.name.len());
         core::str::from_utf8(&self.name[..end]).unwrap_or("")
+    }
+
+    /// True for a section that holds data: not code (`.text*`) and not the exception, resource or
+    /// relocation tables.
+    pub fn is_data(&self) -> bool {
+        let name = self.name();
+        !(name.starts_with(".text") || matches!(name, ".pdata" | ".rsrc" | ".reloc"))
     }
 
     /// Bytes of the section, valid while the image is loaded.
@@ -138,11 +144,6 @@ impl Image {
     /// A data directory's RVA and size, for callers that walk the image themselves (the lock's
     /// import-table patching).
     pub fn data_directory(&self, index: u32) -> Option<(u32, u32)> {
-        self.data_dir(index)
-    }
-
-    /// A data directory's RVA and size.
-    fn data_dir(&self, index: u32) -> Option<(u32, u32)> {
         // SAFETY: the header is present (checked when the image was built).
         unsafe {
             let dos = self.base as *const u8;
@@ -178,8 +179,7 @@ impl Image {
             if found >= out.len() {
                 break;
             }
-            let name = section.name();
-            if name.starts_with(".text") || matches!(name, ".pdata" | ".rsrc" | ".reloc") {
+            if !section.is_data() {
                 continue;
             }
             let bytes = section.bytes();
@@ -267,7 +267,7 @@ impl Image {
 
     /// `.pdata`'s `RUNTIME_FUNCTION` entry containing `va`: `(start, end)` absolute addresses.
     fn function_range(&self, va: usize) -> Option<(usize, usize)> {
-        let (rva, size) = self.data_dir(DIR_EXCEPTION)?;
+        let (rva, size) = self.data_directory(DIR_EXCEPTION)?;
         let table = self.base + rva as usize;
         let count = size as usize / 12;
         if count == 0 || va < self.base {
@@ -319,42 +319,6 @@ impl Image {
         let string = self.find_string(needle)?;
         let reference = self.rip_ref(string)?;
         self.function_start(reference)
-    }
-
-    /// A wildcard byte signature: ASCII hex pairs separated by spaces, `??` for any byte, e.g.
-    /// `b"48 8B ?? 05"`. Searched in `section_name`.
-    pub fn scan_signature_in(&self, section_name: &str, pattern: &[u8]) -> Option<usize> {
-        let section = self.section(section_name)?;
-        let (bytes, mask) = parse_pattern(pattern)?;
-        let haystack = section.bytes();
-        if haystack.len() < bytes.len() {
-            return None;
-        }
-        let first_fixed = mask.iter().position(|fixed| *fixed).unwrap_or(0);
-        let mut offset = 0;
-        while offset + bytes.len() <= haystack.len() {
-            if haystack[offset + first_fixed] != bytes[first_fixed] {
-                offset += 1;
-                continue;
-            }
-            let mut ok = true;
-            for i in 0..bytes.len() {
-                if mask[i] && haystack[offset + i] != bytes[i] {
-                    ok = false;
-                    break;
-                }
-            }
-            if ok {
-                return Some(section.va + offset);
-            }
-            offset += 1;
-        }
-        None
-    }
-
-    /// [`scan_signature_in`](Self::scan_signature_in) over `.text`.
-    pub fn scan_signature(&self, pattern: &[u8]) -> Option<usize> {
-        self.scan_signature_in(".text", pattern)
     }
 
     /// The MSVC `TypeDescriptor` whose `.?AV...` (class) or `.?AU...` (struct) name is exactly `mangled`.
@@ -508,50 +472,4 @@ impl Image {
         }
         true
     }
-}
-
-/// Parses `"48 8B ?? 05"` into bytes and a per-byte "is fixed" mask.
-fn parse_pattern(pattern: &[u8]) -> Option<(Vec<u8>, Vec<bool>)> {
-    let mut bytes = Vec::new();
-    let mut mask = Vec::new();
-    let mut index = 0;
-    while index < pattern.len() {
-        let c = pattern[index];
-        if c == b' ' || c == b'\t' || c == b'\n' || c == b'\r' {
-            index += 1;
-            continue;
-        }
-        if c == b'?' {
-            // `??` (or a single `?`)
-            if index + 1 < pattern.len() && pattern[index + 1] == b'?' {
-                index += 2;
-            } else {
-                index += 1;
-            }
-            bytes.push(0);
-            mask.push(false);
-            continue;
-        }
-        let high = hex_digit(c)?;
-        let low_index = index + 1;
-        let low = hex_digit(*pattern.get(low_index)?)?;
-        bytes.push((high << 4) | low);
-        mask.push(true);
-        index += 2;
-    }
-    (!bytes.is_empty()).then_some((bytes, mask))
-}
-
-fn hex_digit(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
-}
-
-/// A short description of the image for `info` and log lines.
-pub fn describe(image: &Image) -> String {
-    alloc::format!("0x{:x} ({} bytes, {} sections)", image.base, image.size, image.sections.len())
 }

@@ -31,7 +31,7 @@ use agent_core::sync::SpinLock;
 use agent_core::{log, win, Anchor, Core, RpcError};
 
 /// `engine.status` anchor and hook site of the hooked `Present`.
-pub const SITE_PRESENT: &str = "screenshot.present";
+pub(crate) const SITE_PRESENT: &str = "screenshot.present";
 /// Hook site of the hooked `Present1`.
 const SITE_PRESENT1: &str = "screenshot.present1";
 /// Hook site of the hooked `ID3D12CommandQueue::ExecuteCommandLists`.
@@ -311,7 +311,7 @@ fn export(module: &str, name: &[u8]) -> usize {
 }
 
 /// Finds the swap chain's `Present` and `Present1` and hooks both (see the module docs). Runs once, at attach.
-pub fn resolve(core: &'static Core) -> Vec<Anchor> {
+pub(crate) fn resolve(core: &'static Core) -> Vec<Anchor> {
     match swap_chain_entries() {
         Ok((present, present1, execute)) => {
             log::fmt(format_args!(
@@ -334,7 +334,7 @@ pub fn resolve(core: &'static Core) -> Vec<Anchor> {
 }
 
 /// The anchor as it is now.
-pub fn report() -> Vec<Anchor> {
+pub(crate) fn report() -> Vec<Anchor> {
     alloc::vec![Anchor { name: SITE_PRESENT, addr: PRESENT.load(Ordering::Acquire) }]
 }
 
@@ -705,7 +705,7 @@ impl PixelFormat {
  * ---------------------------------------------------------------------------------------------- */
 
 /// Takes the next presented frame and writes it to `path` (a Windows path) as a PNG. Answers the size.
-pub fn request(path: &str) -> Result<(u32, u32), RpcError> {
+pub(crate) fn request(path: &str) -> Result<(u32, u32), RpcError> {
     if PRESENT.load(Ordering::Acquire) == 0 && PRESENT1.load(Ordering::Acquire) == 0 {
         return Err(RpcError::anchor(SITE_PRESENT));
     }
@@ -836,7 +836,6 @@ fn encode(frame: &Frame) -> Vec<u8> {
 
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const CREATE_ALWAYS: u32 = 2;
-const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 
 /// Writes `data` to `path`, replacing the file.
 fn write(path: &str, data: &[u8]) -> Result<(), RpcError> {
@@ -844,7 +843,7 @@ fn write(path: &str, data: &[u8]) -> Result<(), RpcError> {
     let not_writable = || RpcError::standard(agent_core::engine::PATH_NOT_WRITABLE).with_data(serde_json::json!({ "path": path }));
     // SAFETY: `wide` is NUL-terminated; the handle is closed on every path below.
     let handle = unsafe {
-        win::CreateFileW(wide.as_ptr(), GENERIC_WRITE, 0, core::ptr::null_mut::<c_void>(), CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0)
+        win::CreateFileW(wide.as_ptr(), GENERIC_WRITE, 0, core::ptr::null_mut::<c_void>(), CREATE_ALWAYS, win::FILE_ATTRIBUTE_NORMAL, 0)
     };
     if handle == win::INVALID_HANDLE_VALUE || handle == 0 {
         return Err(not_writable());

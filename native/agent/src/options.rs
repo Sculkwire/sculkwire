@@ -35,7 +35,7 @@ use agent_core::sync::SpinLock;
 use agent_core::{Image, RpcError};
 use serde_json::{json, Value};
 
-use crate::pe;
+use crate::{live, pe};
 
 /* ------------------------------------------------------------------------------------------------
  * The registry object
@@ -196,7 +196,7 @@ static SCAN_REFUSED_AT: AtomicUsize = AtomicUsize::new(0);
 /// body that also checks the 825-entry capacity, then every `.rdata` word holding that function gives
 /// the table it is slot `0x88` of. The record classes are derived from the registration function's
 /// constructors (see [`resolve_classes`]).
-pub fn resolve(image: &Image) -> Option<usize> {
+pub(crate) fn resolve(image: &Image) -> Option<usize> {
     let registry = match registry_vtable() {
         Some(vtable) => Some(vtable),
         None => resolve_registry(image),
@@ -263,8 +263,7 @@ fn resolve_registry(image: &Image) -> Option<usize> {
     let text_end = text.va + text.len;
     let mut found = 0usize;
     for section in image.sections() {
-        let name = section.name();
-        if name.starts_with(".text") || matches!(name, ".pdata" | ".rsrc" | ".reloc") {
+        if !section.is_data() {
             continue;
         }
         let Some(bytes) = pe::bytes(section.va, section.len) else {
@@ -346,7 +345,7 @@ fn resolve_classes(image: &Image) -> usize {
         let Some((start, end)) = pe::function_of(image, registry) else {
             continue;
         };
-        for callee in pe::callees(image, start, end) {
+        for callee in pe::callees(start, end) {
             if seen.contains(&callee) {
                 continue;
             }
@@ -395,7 +394,7 @@ fn resolve_classes(image: &Image) -> usize {
 /// True when `address` is one of the nine record class tables: in image data, five code slots, then a
 /// zero.
 fn is_class_table(image: &Image, address: usize) -> bool {
-    if address % 8 != 0 || !in_image_data(image, address) {
+    if address % 8 != 0 || !pe::in_data(image, address) {
         return false;
     }
     let Some(text) = image.text() else {
@@ -411,27 +410,13 @@ fn is_class_table(image: &Image, address: usize) -> bool {
     pe::read::<usize>(address + CLASS_CODE_SLOTS * 8) == Some(0)
 }
 
-/// True when `address` is inside the image and in a non-executable section.
-fn in_image_data(image: &Image, address: usize) -> bool {
-    if address < image.base() || address >= image.base() + image.size() {
-        return false;
-    }
-    image.sections().iter().any(|section| {
-        let name = section.name();
-        !name.starts_with(".text")
-            && !matches!(name, ".pdata" | ".rsrc" | ".reloc")
-            && address >= section.va
-            && address < section.va + section.len
-    })
-}
-
 /* ------------------------------------------------------------------------------------------------
  * Discovery
  * ---------------------------------------------------------------------------------------------- */
 
 /// Makes sure `settings.*` has a source: the registry object when it is reachable, otherwise the
 /// records. `-32001 options.object` when neither is available.
-pub fn ready(image: &Image) -> Result<(), RpcError> {
+pub(crate) fn ready(image: &Image) -> Result<(), RpcError> {
     if READY.load(Ordering::Acquire) {
         return Ok(());
     }
@@ -915,11 +900,11 @@ fn entry(record: usize) -> Option<Value> {
         KIND_FLOAT => {
             let value = pe::read::<f32>(record + RECORD_VALUE)?;
             entry.insert(String::from("type"), Value::String(String::from("float")));
-            entry.insert(String::from("value"), number(value));
+            entry.insert(String::from("value"), live::number(value));
             if let (Some(min), Some(max)) = (pe::read::<f32>(record + RECORD_MIN), pe::read::<f32>(record + RECORD_MAX)) {
                 if min <= max {
-                    entry.insert(String::from("min"), number(min));
-                    entry.insert(String::from("max"), number(max));
+                    entry.insert(String::from("min"), live::number(min));
+                    entry.insert(String::from("max"), live::number(max));
                 }
             }
         }
@@ -959,16 +944,12 @@ fn int_values(record: usize) -> Vec<i32> {
     values
 }
 
-fn number(value: f32) -> Value {
-    serde_json::Number::from_f64(value as f64).map(Value::Number).unwrap_or(Value::Null)
-}
-
 /// Every option the engine can report, in id order, one entry per save tag.
 ///
 /// Every record found is looked at, not one per numeric id: the heap scan finds several records under
 /// one id (546 records for 445 ids live), and keeping only the first per id dropped options such as
 /// `gfx_viewdistance` that `settings.get` still found by tag.
-pub fn list(filter: Option<&str>) -> Result<Value, RpcError> {
+pub(crate) fn list(filter: Option<&str>) -> Result<Value, RpcError> {
     let needle = filter.map(|filter| filter.to_ascii_lowercase());
     let mut seen = alloc::collections::BTreeSet::new();
     let mut settings = Vec::new();
@@ -996,7 +977,7 @@ fn all_records() -> Vec<usize> {
 }
 
 /// One option, found by its save tag.
-pub fn get(id: &str) -> Result<Value, RpcError> {
+pub(crate) fn get(id: &str) -> Result<Value, RpcError> {
     let records = find(id)?;
     entry(records[0]).ok_or_else(|| RpcError::invalid_params("this option's value kind is not readable"))
 }
@@ -1007,7 +988,7 @@ pub fn get(id: &str) -> Result<Value, RpcError> {
 /// user-initialised one) then answers the same whichever one the settings screen reads — and the
 /// first is the one reported. The registry's own writer is armed afterwards when the object is known;
 /// `saved` says whether the game itself was asked to write `options.txt`.
-pub fn set(id: &str, value: &Value) -> Result<Value, RpcError> {
+pub(crate) fn set(id: &str, value: &Value) -> Result<Value, RpcError> {
     let records = find(id)?;
     let primary = records[0];
     let info = report(primary).ok_or_else(|| RpcError::invalid_params("the option has no definition"))?;

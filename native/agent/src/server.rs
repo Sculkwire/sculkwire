@@ -29,12 +29,12 @@ const RUNNING: u8 = 2;
 const DONE: u8 = 3;
 
 /// One request for the server thread.
-pub enum Request {
+pub(crate) enum Request {
     /// A pause/resume through the engine's own switch.
     Pause(bool),
     /// Exactly this many more ticks, then frozen (the engine's step budget).
     Step(u32),
-    /// Simulation time scale, `0.0 ..= 10.0`.
+    /// Simulation time scale, clamped to `0.0 ..= live::TIMER_MAX_SCALE`.
     Scale(f32),
     /// A command line, run as the local player with its output captured.
     Command { line: String, quiet: bool },
@@ -78,12 +78,12 @@ impl Slot {
 static SLOTS: [Slot; JOBS] = [const { Slot::new() }; JOBS];
 
 /// True when the simulation step is resolved, so queued work will actually run.
-pub fn available() -> bool {
+fn available() -> bool {
     anchors::sim_update().is_some()
 }
 
 /// Queues `request` for the next simulation step and keeps the caller's request open.
-pub fn submit(core: &'static agent_core::Core, request: Request) -> Result<Value, RpcError> {
+pub(crate) fn submit(core: &'static agent_core::Core, request: Request) -> Result<Value, RpcError> {
     if !available() {
         return Err(RpcError::anchor("sim.update"));
     }
@@ -105,7 +105,7 @@ pub fn submit(core: &'static agent_core::Core, request: Request) -> Result<Value
 }
 
 /// Runs `request` on the server thread and waits for it, up to `timeout_ms`.
-pub fn run(request: Request, timeout_ms: u32) -> Result<Value, RpcError> {
+pub(crate) fn run(request: Request, timeout_ms: u32) -> Result<Value, RpcError> {
     if !available() {
         return Err(RpcError::anchor("sim.update"));
     }
@@ -154,7 +154,7 @@ fn enqueue(request: Request, deferred: Option<queue::Deferred>) -> Option<usize>
 }
 
 /// Applies every queued request. Called from the simulation step, on the server thread.
-pub fn drain(minecraft: usize) {
+pub(crate) fn drain(minecraft: usize) {
     for index in 0..JOBS {
         let slot = &SLOTS[index];
         if slot.state.compare_exchange(QUEUED, RUNNING, Ordering::AcqRel, Ordering::Acquire).is_err() {
@@ -247,7 +247,7 @@ fn apply(minecraft: usize, request: Request) -> Result<Value, RpcError> {
     }
 }
 
-pub(crate) fn write_float(address: usize, value: f32) -> Result<(), RpcError> {
+fn write_float(address: usize, value: f32) -> Result<(), RpcError> {
     if !pe::writable(address, 4) {
         return Err(RpcError::anchor("sim.update"));
     }

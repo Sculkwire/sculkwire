@@ -37,19 +37,6 @@ impl<T> SpinLock<T> {
         }
         SpinGuard { lock: self }
     }
-
-    /// Locks only when it is free right now.
-    pub fn try_lock(&self) -> Option<SpinGuard<'_, T>> {
-        if self.locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
-            Some(SpinGuard { lock: self })
-        } else {
-            None
-        }
-    }
-
-    pub fn into_inner(self) -> T {
-        self.value.into_inner()
-    }
 }
 
 pub struct SpinGuard<'a, T> {

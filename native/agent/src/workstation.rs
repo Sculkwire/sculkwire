@@ -40,28 +40,6 @@
 //! every station's inputs, the cursor and the crafting grids) own the slots its per-name predicate
 //! accepts. The request's outcome is the server's own answer: `handleItemStackResponse` is hooked to
 //! record each response's `(clientRequestId, result)`, and a move answers once its own id comes back.
-//!
-//! # What is still missing, and why each gap is named
-//!
-//! * `screen.craft` — the recipe net id a craft, a stonecutter recipe, a smithing transform or a trade
-//!   sends (`CraftRecipe`): the client's recipe registry and the trade model are not located;
-//! * `screen.enchanting` — the three options' `Enchant Net Id`s (`PlayerEnchantOptionsPacket`) are not
-//!   located on the client;
-//! * `screen.anvil`, `screen.grindstone`, `screen.loom`, `screen.cartography` — the preview's net id
-//!   and the per-screen scalars (cost, rename text, pattern) the screen's model holds;
-//! * `screen.beacon` — which removal action pays the beacon (`Consume` is refused without a craft).
-//!
-//! # Wiring (for `lib.rs`, which this module does not edit)
-//!
-//! ```text
-//! Method::main("interact.block",  workstation::h_interact_block),
-//! Method::main("interact.entity", workstation::h_interact_entity),
-//! Method::main("screen.state",    workstation::h_screen_state),
-//! Method::main("screen.move",     workstation::h_screen_move),
-//! Method::main("screen.act",      workstation::h_screen_act),
-//! Method::main("screen.close",    workstation::h_screen_close),
-//! Method::main("container.open",  workstation::h_container_open),
-//! ```
 
 use alloc::format;
 use alloc::string::String;
@@ -75,7 +53,7 @@ use agent_core::sync::SpinLock;
 use agent_core::{hook, win, Anchor, Core, Image, RpcError};
 use serde_json::{json, Map, Value};
 
-use crate::{anchors, ecs, input, inventory, live, pe, ui};
+use crate::{anchors, ecs, input, inventory, live, look, pe, ui};
 
 /* ------------------------------------------------------------------------------------------------
  * The screens the game registers, and what each family is called on the wire
@@ -228,25 +206,12 @@ fn write_look(pitch: f32, yaw: f32) -> Result<(), RpcError> {
         })));
     }
     let shown = reading.read_look().ok_or_else(|| RpcError::anchor("component.getter"))?;
-    if (shown[0] - pitch).abs() > 0.01 || wrap(shown[1] - yaw).abs() > 0.01 {
+    if (shown[0] - pitch).abs() > 0.01 || look::wrap(shown[1] - yaw).abs() > 0.01 {
         return Err(RpcError::anchor("component.getter").with_data(json!({
             "message": format!("the rotation component kept {:.2}/{:.2}, not the aim {pitch:.2}/{yaw:.2}", shown[0], shown[1]),
         })));
     }
     Ok(())
-}
-
-/// The aim that points from `eye` at `target`: `[pitch, yaw]` in degrees, the convention the game
-/// stores (`+pitch` looks down, `0` yaw is `+Z`, `-90` is `+X`).
-fn look_at(eye: [f32; 3], target: [f32; 3]) -> Option<[f32; 2]> {
-    let dx = target[0] - eye[0];
-    let dy = target[1] - eye[1];
-    let dz = target[2] - eye[2];
-    let horizontal = sqrt(dx * dx + dz * dz);
-    if !dx.is_finite() || !dy.is_finite() || !dz.is_finite() || (horizontal == 0.0 && dy == 0.0) {
-        return None;
-    }
-    Some([degrees(-atan2(dy, horizontal)), wrap(degrees(atan2(-dx, dz)))])
 }
 
 /// The point a use on `block` aims at: the requested face's centre, or the block's closest point to
@@ -278,7 +243,7 @@ fn block_target(block: [i32; 3], face: Option<usize>, eye: [f32; 3]) -> Result<[
             for axis in 0..3 {
                 target[axis] = eye[axis].max(min[axis] + 0.05).min(max[axis] - 0.05);
             }
-            if distance(eye, target) < 0.1 {
+            if look::distance(eye, target) < 0.1 {
                 return Err(RpcError::invalid_params(
                     "the player stands inside that block: there is no face to use from here",
                 ));
@@ -304,99 +269,16 @@ fn block_aims(block: [i32; 3], face: Option<usize>, eye: [f32; 3]) -> Result<Vec
         Some(index) => [0.25, 0.0, -0.25, -(0.5 - AIM_INSET)].iter().map(|out| along(NORMALS[index], *out)).collect(),
         None => {
             let mut sides: Vec<[f32; 3]> = NORMALS.iter().map(|normal| along(*normal, 0.5 - AIM_INSET)).collect();
-            sides.sort_by(|a, b| distance(eye, *a).partial_cmp(&distance(eye, *b)).unwrap_or(core::cmp::Ordering::Equal));
+            sides.sort_by(|a, b| look::distance(eye, *a).partial_cmp(&look::distance(eye, *b)).unwrap_or(core::cmp::Ordering::Equal));
             let mut points = alloc::vec![centre];
             points.extend(sides);
             points
         }
     };
-    more.retain(|point| distance(eye, *point) <= BLOCK_REACH && distance(eye, *point) >= 0.1);
+    more.retain(|point| look::distance(eye, *point) <= BLOCK_REACH && look::distance(eye, *point) >= 0.1);
     let mut aims = alloc::vec![first];
     aims.extend(more);
     Ok(aims)
-}
-
-/// The straight-line distance between two points.
-fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
-    let dx = a[0] - b[0];
-    let dy = a[1] - b[1];
-    let dz = a[2] - b[2];
-    sqrt(dx * dx + dy * dy + dz * dz)
-}
-
-/// `sqrt`, implemented here because this crate links no floating-point library.
-///
-/// Newton from a halved-exponent seed: the seed is good to about 3 %, and six steps reach single
-/// precision (each one halves the relative error).
-fn sqrt(value: f32) -> f32 {
-    if !(value > 0.0) || !value.is_finite() {
-        return 0.0;
-    }
-    // `(bits >> 1) + 0x1fbd1df5` is the classic square-root seed of the fast-inverse-sqrt family.
-    let mut guess = f32::from_bits((value.to_bits() >> 1) + 0x1fbd_1df5);
-    for _ in 0..6 {
-        guess = 0.5 * (guess + value / guess);
-    }
-    guess
-}
-
-/// `atan(x)` for `|x| <= 1`, from Eberly's minimax polynomial (`|error| < 1.5e-4 rad`).
-fn atan(value: f32) -> f32 {
-    let square = value * value;
-    value
-        * (0.999_866
-            + square * (-0.330_299_5 + square * (0.180_141 + square * (-0.085_133 + square * 0.020_835_1))))
-}
-
-/// `atan2(y, x)` in radians, computed from [`atan`] with the quadrant folded in.
-fn atan2(y: f32, x: f32) -> f32 {
-    if !x.is_finite() || !y.is_finite() {
-        return 0.0;
-    }
-    let ax = if x < 0.0 { -x } else { x };
-    let ay = if y < 0.0 { -y } else { y };
-    if ax == 0.0 && ay == 0.0 {
-        return 0.0;
-    }
-    let mut angle = if ax >= ay {
-        let base = atan(ay / ax);
-        if x < 0.0 {
-            core::f32::consts::PI - base
-        } else {
-            base
-        }
-    } else {
-        let base = core::f32::consts::FRAC_PI_2 - atan(ax / ay);
-        if x < 0.0 {
-            core::f32::consts::PI - base
-        } else {
-            base
-        }
-    };
-    if y < 0.0 {
-        angle = -angle;
-    }
-    angle
-}
-
-fn degrees(radians: f32) -> f32 {
-    radians * (180.0 / core::f32::consts::PI)
-}
-
-/// `value` inside `(-180, 180]`, the range the game keeps yaw in.
-fn wrap(value: f32) -> f32 {
-    if !value.is_finite() {
-        return 0.0;
-    }
-    let turns = (value / 360.0) as i64 as f32;
-    let mut wrapped = value - turns * 360.0;
-    if wrapped > 180.0 {
-        wrapped -= 360.0;
-    }
-    if wrapped <= -180.0 {
-        wrapped += 360.0;
-    }
-    wrapped
 }
 
 /* ------------------------------------------------------------------------------------------------
@@ -448,18 +330,18 @@ fn block_use(params: &Value) -> Result<([i32; 3], Option<usize>), RpcError> {
 /// screen opened or the block's state changed (a lever, a button, a door).
 pub(crate) fn h_interact_block(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     expire(core);
-    world()?;
+    live::require_world()?;
     let (block, face) = block_use(params)?;
     let before = playing(core)?;
     let eye = eye()?;
     let aims = block_aims(block, face, eye)?;
-    let distance = distance(eye, aims[0]);
+    let distance = look::distance(eye, aims[0]);
     if distance > BLOCK_REACH {
         return Err(RpcError::invalid_params(format!(
             "the block is {distance:.1} blocks from the player's eye, beyond the {BLOCK_REACH}-block reach: move the player closer"
         )));
     }
-    let looks: Vec<[f32; 2]> = aims.iter().filter_map(|point| look_at(eye, *point)).collect();
+    let looks: Vec<[f32; 2]> = aims.iter().filter_map(|point| look::look_at(eye, *point)).collect();
     let [pitch, yaw] = *looks
         .first()
         .ok_or_else(|| RpcError::invalid_params("the block is at the player's eye: there is no view to aim"))?;
@@ -475,19 +357,19 @@ pub(crate) fn h_interact_block(core: &'static Core, params: &Value) -> Result<Va
 /// at and used exactly like a block.
 pub(crate) fn h_interact_entity(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     expire(core);
-    world()?;
+    live::require_world()?;
     let id = unique_id(params)?;
     let before = playing(core)?;
     let eye = eye()?;
     let position = entity_position(id)?;
     let target = [position[0], position[1] + ENTITY_AIM, position[2]];
-    let distance = distance(eye, target);
+    let distance = look::distance(eye, target);
     if distance > ENTITY_REACH {
         return Err(RpcError::invalid_params(format!(
             "the entity is {distance:.1} blocks from the player's eye, beyond the {ENTITY_REACH}-block reach: walk the player closer"
         )));
     }
-    let [pitch, yaw] = look_at(eye, target)
+    let [pitch, yaw] = look::look_at(eye, target)
         .ok_or_else(|| RpcError::invalid_params("the entity is at the player's eye: there is no view to aim"))?;
     write_look(pitch, yaw)?;
     park(core, before, Phase::Aim, None)
@@ -520,9 +402,6 @@ fn unique_id(params: &Value) -> Result<u64, RpcError> {
         .map_err(|_| RpcError::invalid_params("id must be an entity's unique id: a whole number in text"))
 }
 
-/// The `ActorUniqueIDComponent` entity vector's begin/end, the same fields `ecs` walks.
-const ENTITY_BEGIN: usize = 0x20;
-const ENTITY_END: usize = 0x28;
 /// An ECS holds a few hundred entities on a client; anything larger is not an entity vector.
 const ENTITY_LIMIT: u64 = 4_096;
 
@@ -539,7 +418,7 @@ fn entity_position(id: u64) -> Result<[f32; 3], RpcError> {
     let state = ecs::storage(accessor, anchors::component_hash("StateVectorComponent"))
         .ok_or_else(|| RpcError::anchor("entity.position"))?;
     let local = ecs::read(accessor).map(|reading| reading.sample.entity);
-    let (Some(begin), Some(end)) = (pe::read::<usize>(unique + ENTITY_BEGIN), pe::read::<usize>(unique + ENTITY_END)) else {
+    let (Some(begin), Some(end)) = (pe::read::<usize>(unique + ecs::ENTITY_BEGIN), pe::read::<usize>(unique + ecs::ENTITY_END)) else {
         return Err(RpcError::anchor("entity.unique_id"));
     };
     if end <= begin || (end - begin) % 4 != 0 || (end - begin) as u64 / 4 > ENTITY_LIMIT {
@@ -869,7 +748,6 @@ fn ensure_timer() -> bool {
     true
 }
 
-/// Stops the settle timer.
 fn stop_timer() {
     if TIMER.swap(0, Ordering::AcqRel) == 0 {
         return;
@@ -882,7 +760,7 @@ fn stop_timer() {
 
 /// `agent.unload`: stops the settle timer, whose callback is this crate's code, and the response hook's
 /// bookkeeping (the hook itself is removed with every other inline hook).
-pub fn detach() {
+pub(crate) fn detach() {
     stop_timer();
     SETTLE.lock().take();
 }
@@ -1363,7 +1241,6 @@ fn container_names() -> Vec<(u8, String)> {
     out
 }
 
-/// The name of enum value `id`.
 fn name_of(id: u8) -> Option<String> {
     container_names().into_iter().find(|(known, _)| *known == id).map(|(_, name)| name)
 }
@@ -1920,7 +1797,7 @@ pub(crate) fn h_screen_state(core: &'static Core, _params: &Value) -> Result<Val
 /// own region; a screen of an entity (a horse, a villager, a chest boat) or the inventory has none.
 pub(crate) fn h_container_open(core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
     expire(core);
-    world()?;
+    live::require_world()?;
     let screen = screen_now(core)?;
     let kind = kind_of(&screen.top);
     if kind == "other" {
@@ -1990,7 +1867,7 @@ fn container<'a>(open: &'a [Open], name: &str, key: &str) -> Result<&'a Open, Rp
 /// when it refused, or did not answer in time).
 pub(crate) fn h_screen_move(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     expire(core);
-    world()?;
+    live::require_world()?;
     let from = slot_ref(params, "from")?;
     let to = slot_ref(params, "to")?;
     let count = match params.get("count") {
@@ -2291,7 +2168,7 @@ static TRADE2_SELECT: AtomicUsize = AtomicUsize::new(0);
 const TRADE2_SELECT_PATTERN: &str = "69 C0 13 DA 4B 68 39 C7 0F 8D ?? ?? ?? ?? 89 BE ?? ?? ?? ?? 41 89 BF ?? ?? ?? ?? C6 85";
 
 fn resolve_trade2(image: &Image) {
-    let sites = inventory::all_sites(image, &[parse_pattern(TRADE2_SELECT_PATTERN)]).remove(0);
+    let sites = inventory::all_sites(image, &[pe::parse_pattern(TRADE2_SELECT_PATTERN)]).remove(0);
     let [site] = sites[..] else {
         return;
     };
@@ -2417,11 +2294,6 @@ static LOOM_SELECT: AtomicUsize = AtomicUsize::new(0);
 /// `controller + LOOM_OFFERED` = the patterns the screen offers now (`std::vector<i32>` of list indices).
 static LOOM_OFFERED: AtomicUsize = AtomicUsize::new(0);
 
-/// `"41 C6 ?? 08"` → wildcard bytes.
-fn parse_pattern(text: &str) -> Vec<Option<u8>> {
-    text.split_ascii_whitespace().map(|token| if token == "??" { None } else { u8::from_str_radix(token, 16).ok() }).collect()
-}
-
 /// The one place each pattern occurs in `.text` (`None` when absent or not unique), in one pass: every
 /// pattern starts with two fixed bytes, and a 64 Ki-entry table of those pairs keeps the pass to one
 /// lookup per byte.
@@ -2537,7 +2409,7 @@ static BREW_SYNC: AtomicUsize = AtomicUsize::new(0);
 fn resolve_progress(image: &Image) {
     let mut sites = inventory::all_sites(
         image,
-        &[parse_pattern(FURNACE_PATTERN), parse_pattern(BREW_PROGRESS_PATTERN), parse_pattern(BREW_FUEL_PATTERN), parse_pattern(BREW_SYNC_PATTERN)],
+        &[pe::parse_pattern(FURNACE_PATTERN), pe::parse_pattern(BREW_PROGRESS_PATTERN), pe::parse_pattern(BREW_FUEL_PATTERN), pe::parse_pattern(BREW_SYNC_PATTERN)],
     );
     let brewing: Vec<Option<usize>> = sites
         .drain(1..)
@@ -2670,14 +2542,14 @@ fn resolve_anvil(image: &Image) {
     let Some((start, body)) = (update != 0).then(|| body_of(image, update, 0x4000)).flatten() else {
         return;
     };
-    let cap = find(body, &parse_pattern("C7 86 ?? ?? ?? ?? 27 00 00 00")).and_then(|at| disp_at(start + at + 2));
-    let test = find(body, &parse_pattern("83 BE ?? ?? ?? ?? 28")).and_then(|at| disp_at(start + at + 2));
+    let cap = find(body, &pe::parse_pattern("C7 86 ?? ?? ?? ?? 27 00 00 00")).and_then(|at| disp_at(start + at + 2));
+    let test = find(body, &pe::parse_pattern("83 BE ?? ?? ?? ?? 28")).and_then(|at| disp_at(start + at + 2));
     if let (Some(cap), Some(test)) = (cap, test) {
         if cap == test && (0x10..0x1000).contains(&cap) {
             ANVIL_COST.store(cap, Ordering::Release);
         }
     }
-    let pattern = parse_pattern("48 89 F1 48 8D 96 ?? ?? ?? ?? E8");
+    let pattern = pe::parse_pattern("48 89 F1 48 8D 96 ?? ?? ?? ?? E8");
     let mut found: Option<(usize, usize)> = None;
     let mut at = 0;
     while let Some(hit) = body.get(at..).and_then(|rest| find(rest, &pattern)) {
@@ -2727,7 +2599,7 @@ fn resolve_screen_actions(core: &'static Core) {
     if begin == 0 || submit == 0 {
         return;
     }
-    let mut patterns: Vec<Vec<Option<u8>>> = HANDLER_RECIPES.iter().map(|recipe| parse_pattern(recipe.pattern)).collect();
+    let mut patterns: Vec<Vec<Option<u8>>> = HANDLER_RECIPES.iter().map(|recipe| pe::parse_pattern(recipe.pattern)).collect();
     let extra = patterns.len();
     for text in [
         SCOPE_END_PATTERN,
@@ -2739,7 +2611,7 @@ fn resolve_screen_actions(core: &'static Core) {
         LOOM_INDEX_PATTERN,
         LOOM_SELECT_PATTERN,
     ] {
-        patterns.push(parse_pattern(text));
+        patterns.push(pe::parse_pattern(text));
     }
     let sites = unique_sites(image, &patterns);
     for (recipe, (site, pattern)) in HANDLER_RECIPES.iter().zip(sites.iter().zip(&patterns)) {
@@ -2812,7 +2684,7 @@ fn resolve_screen_actions(core: &'static Core) {
                 STONECUTTER_SELECTION.store(offset, Ordering::Release);
                 // The recipe list builder the refresh calls right before it reads the selection.
                 if let Some((start, body)) = body_of(image, refresh, 0x4000) {
-                    if let Some(at) = find(body, &parse_pattern(STONECUTTER_LIST_PATTERN)) {
+                    if let Some(at) = find(body, &pe::parse_pattern(STONECUTTER_LIST_PATTERN)) {
                         let call = start + at + 6;
                         let list = pe::read::<i32>(call + 1).map(|rel| (call + 5).wrapping_add_signed(rel as isize));
                         if let Some(list) = list.filter(|list| image.function_start(*list) == Some(*list)) {
@@ -2838,8 +2710,8 @@ fn resolve_screen_actions(core: &'static Core) {
     if trade != 0 {
         if let Some((start, body)) = body_of(image, trade, 0x4000) {
             let call_target = |at: usize| pe::read::<i32>(at + 1).map(|rel| (at + 5).wrapping_add_signed(rel as isize)).filter(|target| image.function_start(*target) == Some(*target));
-            let lookup = find(body, &parse_pattern(TRADER_PATTERN)).map(|at| start + at);
-            let offers = find(body, &parse_pattern(OFFERS_PATTERN)).map(|at| start + at);
+            let lookup = find(body, &pe::parse_pattern(TRADER_PATTERN)).map(|at| start + at);
+            let offers = find(body, &pe::parse_pattern(OFFERS_PATTERN)).map(|at| start + at);
             if let (Some(lookup), Some(offers)) = (lookup, offers) {
                 let pieces = (
                     call_target(lookup + 4),
@@ -2876,7 +2748,7 @@ fn resolve_screen_actions(core: &'static Core) {
                 MOVE_TRANSFER.store(target, Ordering::Release);
                 // Its first resolve of a slot: `lea rdx,[rbp+..]; mov rcx,rdi; mov r8,rsi; call RESOLVE`.
                 if let Some((start, body)) = body_of(image, target, 0x4000) {
-                    if let Some(at) = find(&body[..body.len().min(0x200)], &parse_pattern("48 8D 55 ?? 48 89 F9 49 89 F0 E8")) {
+                    if let Some(at) = find(&body[..body.len().min(0x200)], &pe::parse_pattern("48 8D 55 ?? 48 89 F9 49 89 F0 E8")) {
                         let call = start + at + 10;
                         let resolve = pe::read::<i32>(call + 1).map(|rel| (call + 5).wrapping_add_signed(rel as isize));
                         if let Some(resolve) = resolve.filter(|resolve| image.function_start(*resolve) == Some(*resolve)) {
@@ -2912,7 +2784,7 @@ fn resolve_screen_actions(core: &'static Core) {
         let pieces = (disp_at(site + 2), rip_target(site, code, 17, 21), rip_target(site, code, 24, 28));
         if let (Some(builder), (Some(selected), Some(end), Some(begin))) = (builder, pieces) {
             let name = body_of(image, builder, 0x4000)
-                .and_then(|(start, body)| find(&body[site - start..], &parse_pattern(LOOM_NAME_PATTERN)).map(|at| site + at))
+                .and_then(|(start, body)| find(&body[site - start..], &pe::parse_pattern(LOOM_NAME_PATTERN)).map(|at| site + at))
                 .and_then(|at| disp_at(at + 3))
                 .filter(|name| *name + 0x20 <= LOOM_RECORD);
             if let Some(name) = name.filter(|_| end == begin + 8 && (0x10..0x1000).contains(&selected)) {
@@ -2951,7 +2823,7 @@ fn resolve_screen_actions(core: &'static Core) {
         // The crafting click path: `call TAKE(craft); …; call TRANSFER; nop; lea rdx,[rbp+..]; mov rcx,rsi;
         // call EXTRAS; nop; lea rcx,[rbp+..]; call SCOPE_END` — the result's move out of the created-output
         // slot, then the extra results (a bucket left by a cake) placed into the inventory.
-        let pattern = parse_pattern("E8 ?? ?? ?? ?? 90 48 8D 55 ?? 48 89 F1 E8 ?? ?? ?? ?? 90 48 8D 4D ?? E8");
+        let pattern = pe::parse_pattern("E8 ?? ?? ?? ?? 90 48 8D 55 ?? 48 89 F1 E8 ?? ?? ?? ?? 90 48 8D 4D ?? E8");
         let target = |at: usize| pe::read::<i32>(at + 1).map(|rel| (at + 5).wrapping_add_signed(rel as isize));
         let (transfer, scope_end) = (MOVE_TRANSFER.load(Ordering::Acquire), HANDLERS[H_SCOPE_END].load(Ordering::Acquire));
         let mut extras: Option<usize> = None;
@@ -3446,7 +3318,7 @@ fn take_through(controller: usize, entry: usize, collection: &[u8], amount: Amou
 /// reads), named through that map. Zero-terminated, for a [`SlotData`].
 fn handler_collection(entry: usize) -> Option<Vec<u8>> {
     let body = pe::bytes(entry, 0x80)?;
-    let at = find(body, &parse_pattern("C6 85 ?? ?? ?? ?? ?? 48 8D 0D"))?;
+    let at = find(body, &pe::parse_pattern("C6 85 ?? ?? ?? ?? ?? 48 8D 0D"))?;
     let key = body[at + 6];
     let disp = i32::from_le_bytes(body.get(at + 10..at + 14)?.try_into().ok()?);
     let map = (entry + at + 14).wrapping_add_signed(disp as isize);
@@ -3559,7 +3431,7 @@ fn resolve_bundle(image: &Image) {
         }
         leaf = Some(start);
     }
-    let Some(slot) = leaf.and_then(|leaf| crate::route::unique_data_slot(image, leaf)) else {
+    let Some(slot) = leaf.and_then(|leaf| pe::unique_data_slot(image, leaf)) else {
         return;
     };
     // `_Func_impl` slots: copy, move, call, target type, delete, get.
@@ -3579,11 +3451,11 @@ fn resolve_bundle(image: &Image) {
         return;
     };
     let mut found: Option<usize> = None;
-    for callee in pe::callees(image, start, start + body.len()) {
+    for callee in pe::callees(start, start + body.len()) {
         let Some((inner_start, inner)) = body_of(image, callee, 0x4000) else {
             continue;
         };
-        for insert in pe::callees(image, inner_start, inner_start + inner.len()) {
+        for insert in pe::callees(inner_start, inner_start + inner.len()) {
             if image.function_start(insert) != Some(insert) || !loads_key(insert) || !calls(image, insert, transfer) {
                 continue;
             }
@@ -4390,7 +4262,7 @@ fn plan(recipe: &inventory::Recipe, side: usize, times: u32, sources: &mut [Sour
 /// by then stay in the grid.
 pub(crate) fn craft_run(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     expire(core);
-    world()?;
+    live::require_world()?;
     let wanted = required_text(params, "recipe", "craft.run")?;
     let times = match params.get("times") {
         None | Some(Value::Null) => 1,
@@ -4553,7 +4425,7 @@ const ACTIONS: [&str; 11] = [
 /// into the first empty hotbar or inventory slot (`to` names that container).
 pub(crate) fn h_screen_act(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     expire(core);
-    world()?;
+    live::require_world()?;
     let action = params
         .get("action")
         .and_then(Value::as_str)
@@ -4948,13 +4820,4 @@ pub(crate) fn report() -> Vec<Anchor> {
     list.extend(HANDLER_ANCHORS.iter().zip(HANDLERS.iter()).map(|(name, entry)| Anchor { name: *name, addr: entry.load(Ordering::Acquire) }));
     list.extend(MISSING.iter().map(|name: &&str| Anchor { name: *name, addr: 0 }));
     list
-}
-
-/// True while a world is loaded: the screens and containers of this module all belong to one.
-fn world() -> Result<(), RpcError> {
-    if live::in_world() {
-        Ok(())
-    } else {
-        Err(RpcError::not_in_world())
-    }
 }

@@ -52,7 +52,7 @@ static ORIGIN_BUILD: AtomicUsize = AtomicUsize::new(0);
 static COMMAND_RUN: AtomicUsize = AtomicUsize::new(0);
 
 /// Installs every hook whose anchor resolved. Called once, from `Engine::attach`.
-pub fn install() {
+pub(crate) fn install() {
     hook_one(SITE_FRAME, anchors::frame(), frame as *const () as usize, &FRAME);
     hook_one(SITE_PLAYER, anchors::system(), player_system as *const () as usize, &PLAYER_SYSTEM);
     hook_one(SITE_SERVER, anchors::local_server(), local_server as *const () as usize, &LOCAL_SERVER);
@@ -144,7 +144,7 @@ fn record(name: &'static str, target: usize, trampoline: usize) {
 ///   what is there now, and the site is marked not installed. Re-patching over another mod's detour
 ///   would fight it and could break the mod, and the entry is no longer what the game calls, so the
 ///   honest answer is "this hook is not ours any more" — which is exactly what `engine.status` shows.
-pub fn watch() {
+pub(crate) fn watch() {
     let now = agent_core::win::tick_ms();
     if now.saturating_sub(WATCH_AT.load(Ordering::Relaxed)) < 1_000 {
         return;
@@ -258,8 +258,8 @@ extern "C" fn frame(game: usize, second: usize, third: usize, fourth: usize) -> 
         return 0;
     }
     // SAFETY: the trampoline is the relocated prologue of the game's own frame function. It reads
-    // `rcx` (the game object), `rdx` and `r8` — `0x89ad1a` dereferences `[r8+8]` on the first frame
-    // this build spends in a world — so every argument register the caller set is forwarded
+    // `rcx` (the game object), `rdx` and `r8` — it dereferences `[r8+8]` on the first frame this
+    // build spends in a world — so every argument register the caller set is forwarded
     // unchanged; the detour's own Rust code would otherwise leave its leftovers in `rdx`/`r8`.
     unsafe {
         transmute::<usize, extern "C" fn(usize, usize, usize, usize) -> usize>(original)(game, second, third, fourth)
@@ -340,10 +340,10 @@ extern "C" fn command_run(commands: usize, result: usize, request: usize, from: 
     fired(SITE_RUN);
     if live::on_server_thread() {
         if anchors::command_commands() != Some(commands) {
-            let field = live::server_level().and_then(|level| pe::read::<usize>(level + live::LEVEL_COMMANDS[0])).unwrap_or(0);
+            let field = live::server_level().and_then(|level| pe::read::<usize>(level + live::LEVEL_COMMANDS)).unwrap_or(0);
             log::fmt(format_args!(
                 "command.run: the server runs commands with 0x{commands:x} ([server Level+0x{:x}] is 0x{field:x})",
-                live::LEVEL_COMMANDS[0]
+                live::LEVEL_COMMANDS
             ));
         }
         anchors::set_command_commands(commands);

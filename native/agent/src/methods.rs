@@ -50,19 +50,10 @@ fn flag(params: &Value, key: &str) -> Result<bool, RpcError> {
         .ok_or_else(|| RpcError::invalid_params(alloc::format!("{key} must be a boolean")))
 }
 
-/// `-32002` unless a world this process hosts is loaded with a local player.
-fn world() -> Result<(), RpcError> {
-    if live::in_world() {
-        Ok(())
-    } else {
-        Err(RpcError::not_in_world())
-    }
-}
-
 /// `command.prime` → `{armed: true}`: the client types one chat line next only so the game captures the player's
 /// command origin (`command` answers -32001 `command.origin` until a player command was seen in this world). That
 /// line's own output is kept out of chat. Socket thread: it only arms a flag.
-pub fn command_prime(_core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn command_prime(_core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
     crate::command::arm_prime();
     Ok(json!({ "armed": true }))
 }
@@ -75,7 +66,7 @@ pub fn command_prime(_core: &'static Core, _params: &Value) -> Result<Value, Rpc
 ///
 /// The line runs on the server thread through the game's own synchronous entry, as the local player,
 /// with the messages the command body writes captured instead of the dispatcher's script status.
-pub fn command(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn command(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     let line = text(params, "command")?;
     let line = line.trim().trim_start_matches('/');
     if line.is_empty() {
@@ -96,14 +87,14 @@ pub fn command(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
 /// `tick.pause {paused}` → `{paused, success}`, through the engine's own pause switch, which freezes
 /// the simulation timer (so block, redstone, fluid, scheduled, entity and time-of-day updates all
 /// stop) while the server loop keeps running.
-pub fn tick_pause(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn tick_pause(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     let paused = flag(params, "paused")?;
     server::submit(core, server::Request::Pause(paused))
 }
 
 /// `tick.step {count}` → `{paused: true, ticks}`: the engine's step budget (`Timer+0x3c`) is set to
 /// `count`, so the server's own loop runs exactly that many ticks and then stays frozen.
-pub fn tick_step(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn tick_step(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     let count = required(params, "count")?
         .as_u64()
         .ok_or_else(|| RpcError::invalid_params("count must be an integer"))?;
@@ -113,9 +104,9 @@ pub fn tick_step(core: &'static Core, params: &Value) -> Result<Value, RpcError>
     server::submit(core, server::Request::Step(count as u32))
 }
 
-/// `tick.scale {value}` → `{scale, success}`: the simulation timer's time scale, in the engine's own
-/// range `0 ..= 10`.
-pub fn tick_scale(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+/// `tick.scale {value}` → `{scale, success}`: the simulation timer's time scale. Any positive value is
+/// accepted; the server thread clamps it to the engine's own maximum (`live::TIMER_MAX_SCALE`).
+pub(crate) fn tick_scale(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     let scale = float(params, "value")?;
     if scale <= 0.0 {
         return Err(RpcError::invalid_params("value must be positive"));
@@ -130,7 +121,7 @@ pub fn tick_scale(core: &'static Core, params: &Value) -> Result<Value, RpcError
 /// `screenshot {path}` → `{path, named: true, route: "present", width, height}`: the next frame the game
 /// presents, copied from its swap chain and written to `path` as a PNG (see [`capture`]). Works in menus
 /// and outside a world; the game's own screenshot (gallery, toast, sound) is not involved.
-pub fn screenshot(_core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn screenshot(_core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     let path = text(params, "path")?;
     if path.trim().is_empty() {
         return Err(RpcError::invalid_params("path must not be empty"));
@@ -157,7 +148,7 @@ fn options_ready(core: &'static Core) -> Result<(), RpcError> {
 }
 
 /// `settings.list {filter?}` → `{settings: [...]}`.
-pub fn settings_list(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn settings_list(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     let filter = match params.get("filter") {
         Some(filter) => Some(filter.as_str().ok_or_else(|| RpcError::invalid_params("filter must be a string"))?),
         None => None,
@@ -167,13 +158,13 @@ pub fn settings_list(core: &'static Core, params: &Value) -> Result<Value, RpcEr
 }
 
 /// `settings.get {id}` → one entry.
-pub fn settings_get(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn settings_get(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     options_ready(core)?;
     options::get(text(params, "id")?.trim())
 }
 
 /// `settings.set {id, value}` → `{id, previous, value}`.
-pub fn settings_set(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn settings_set(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     if text(params, "id")?.trim().is_empty() {
         return Err(RpcError::invalid_params("id must not be empty"));
     }
@@ -198,8 +189,8 @@ pub fn settings_set(core: &'static Core, params: &Value) -> Result<Value, RpcErr
 
 /// `world.settings` → `{name, seed, gameType, difficulty, cheats, education, experiments, gamerules,
 /// time, dayCycle, weather, spawn, dimension}`.
-pub fn world_settings_read(core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
-    world()?;
+pub(crate) fn world_settings_read(core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
+    live::require_world()?;
     // On the server thread: the game type is read through the level data's own lookup, which writes
     // the key's cache and so must run on the thread that owns that level data.
     server::submit(core, server::Request::Settings)
@@ -223,7 +214,7 @@ fn rule_value(name: &str, value: &Value) -> Result<String, RpcError> {
 /// `/gamerule`, `/difficulty`, `/defaultgamemode` plus `/gamemode … @s`, `/time set`, `/weather`.
 /// `gameType` sets the level's own game type (what `world.settings.gameType` reads back) and the local
 /// player's game mode (what a player sees change).
-pub fn world_set(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn world_set(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     let mut lines: Vec<String> = Vec::new();
     if let Some(rules) = params.get("gamerules") {
         let Value::Object(rules) = rules else {
@@ -282,7 +273,7 @@ pub fn world_set(core: &'static Core, params: &Value) -> Result<Value, RpcError>
     if !changed {
         return Err(RpcError::invalid_params("give at least one of gamerules, difficulty, gameType, time or weather"));
     }
-    world()?;
+    live::require_world()?;
     world_settings::changeable()?;
     if anchors::command_execute().is_none() {
         return Err(RpcError::anchor("command.execute"));
@@ -303,7 +294,7 @@ pub fn world_set(core: &'static Core, params: &Value) -> Result<Value, RpcError>
 /// `VirtualQuery` reports committed and readable, at most 4 KiB per call. The address is accepted as a
 /// number or as a `"0x…"` string, because that is how the log and `engine.status` spell one.
 #[cfg(feature = "debug-rpc")]
-pub fn debug_mem(_core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn debug_mem(_core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     let address = match required(params, "addr")? {
         Value::Number(number) => number
             .as_u64()
@@ -337,7 +328,7 @@ pub fn debug_mem(_core: &'static Core, params: &Value) -> Result<Value, RpcError
 /// Runs on the connection's thread and only reads memory, like [`debug_mem`]: a value that names a
 /// vtable, an object or a string is how a live offset is proved without installing a hook.
 #[cfg(feature = "debug-rpc")]
-pub fn debug_find(_core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn debug_find(_core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     let needle = match required(params, "value")? {
         Value::Number(number) => number
             .as_u64()
@@ -427,7 +418,7 @@ pub fn debug_find(_core: &'static Core, params: &Value) -> Result<Value, RpcErro
 /// This is what proves a virtual getter's argument order and out layout on a live object, without
 /// waiting for the game to call it. Both addresses are checked to be code and a readable object.
 #[cfg(feature = "debug-rpc")]
-pub fn debug_str(_core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn debug_str(_core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     let object = match required(params, "addr")? {
         Value::Number(number) => number
             .as_u64()
@@ -485,7 +476,7 @@ pub fn debug_str(_core: &'static Core, params: &Value) -> Result<Value, RpcError
 /// timeout, slot reuse and drain recovery can be checked on a live game. The game's frame stalls for
 /// exactly that long.
 #[cfg(feature = "debug-rpc")]
-pub fn debug_sleep(_core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn debug_sleep(_core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     let ms = required(params, "ms")?
         .as_u64()
         .filter(|ms| *ms <= 20_000)
@@ -499,7 +490,7 @@ pub fn debug_sleep(_core: &'static Core, params: &Value) -> Result<Value, RpcErr
 /// Whether the game survives is the game's and Wine's own exception handling, exactly as for a real
 /// fault; nothing here catches it.
 #[cfg(feature = "debug-rpc")]
-pub fn debug_fault(_core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn debug_fault(_core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
     // An address no process maps: the first page is reserved on every Windows and Wine process.
     let address = core::hint::black_box(8usize);
     // SAFETY: deliberately unsound — the read faults, which is the whole point of this test hook.
@@ -512,7 +503,7 @@ pub fn debug_fault(_core: &'static Core, _params: &Value) -> Result<Value, RpcEr
 /// first frame and which fall back to the word search, so the check can be judged on a live game
 /// before an unload depends on it. Every thread is suspended for the length of its own look.
 #[cfg(feature = "debug-rpc")]
-pub fn debug_threads(_core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn debug_threads(_core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
     use agent_core::hook::End;
     let own = agent_core::win::module_from_address(debug_threads as *const () as usize);
     let size = agent_core::Image::size_of_module(own);

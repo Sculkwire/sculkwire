@@ -237,9 +237,3 @@ pub unsafe fn decode(bytes: *const u8, max: usize) -> Option<Insn> {
     insn.len = i;
     Some(insn)
 }
-
-/// [`decode`] over a slice.
-pub fn decode_slice(bytes: &[u8]) -> Option<Insn> {
-    // SAFETY: the slice is readable for its length, which is passed as the bound.
-    unsafe { decode(bytes.as_ptr(), bytes.len()) }
-}

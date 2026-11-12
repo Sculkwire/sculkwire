@@ -11,7 +11,6 @@
 //! primitives and the panic handler defined here, and a global allocator over the process heap.
 
 #![no_std]
-#![allow(non_snake_case)]
 
 extern crate alloc;
 
@@ -89,7 +88,7 @@ extern "system" fn attach_thread(_arg: usize) -> u32 {
     0
 }
 
-/// One JSON-RPC error code as its agent.c message, for the wire.
+/// One JSON-RPC error code as its fixed message, for the wire.
 pub fn error_message(code: i32) -> &'static str {
     match code {
         -32700 => "parse error",

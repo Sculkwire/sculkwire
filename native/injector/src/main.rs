@@ -315,10 +315,6 @@ fn basename(path: &[u8]) -> &[u8] {
     &path[start..]
 }
 
-fn equals_ignore_case(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_ascii_lowercase() == y.to_ascii_lowercase())
-}
-
 /// UTF-16 to ASCII (non-ASCII units become `?`), stopping at the first NUL.
 fn ascii(units: &[u16], out: &mut [u8]) -> usize {
     let mut used = 0usize;
@@ -359,7 +355,7 @@ fn main_module_is(pid: u32, name: &[u8]) -> bool {
         let used = ascii(&entry.name, &mut module);
         let mut path = [0u8; 260];
         let path_used = ascii(&entry.path, &mut path);
-        equals_ignore_case(&module[..used], name) || equals_ignore_case(basename(&path[..path_used]), name)
+        module[..used].eq_ignore_ascii_case(name) || basename(&path[..path_used]).eq_ignore_ascii_case(name)
     };
     // SAFETY: the handle was created above.
     unsafe {
@@ -399,8 +395,8 @@ fn loaded_module_path(pid: u32, wanted: &[u8]) -> Option<([u8; 260], usize)> {
             let mut path = [0u8; 260];
             let used = ascii(&entry.path, &mut path);
             if used != 0
-                && (equals_ignore_case(&path[..used], wanted)
-                    || equals_ignore_case(basename(&path[..used]), basename(wanted)))
+                && (path[..used].eq_ignore_ascii_case(wanted)
+                    || basename(&path[..used]).eq_ignore_ascii_case(basename(wanted)))
             {
                 found = Some((path, used));
                 break;
@@ -446,7 +442,7 @@ fn find_process(name: &[u8]) -> Option<u32> {
         loop {
             let mut bytes = [0u8; 260];
             let used = ascii(&entry.exe_file, &mut bytes);
-            if equals_ignore_case(&bytes[..used], name) {
+            if bytes[..used].eq_ignore_ascii_case(name) {
                 found = Some(entry.process_id);
                 break;
             }

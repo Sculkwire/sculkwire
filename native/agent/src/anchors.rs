@@ -99,7 +99,7 @@ static SERVER_INSTANCE: AtomicUsize = AtomicUsize::new(0);
 static LEVEL_DATA: AtomicUsize = AtomicUsize::new(0);
 
 /// The anchor names, in the order `engine.status` reports them.
-pub const NAMES: &[&str] = &[
+pub(crate) const NAMES: &[&str] = &[
     "frame",
     "system.player",
     "component.getter",
@@ -123,11 +123,11 @@ pub const NAMES: &[&str] = &[
     "world.gameType",
 ];
 
-pub fn frame() -> Option<usize> {
+pub(crate) fn frame() -> Option<usize> {
     get(&FRAME)
 }
 
-pub fn system() -> Option<usize> {
+pub(crate) fn system() -> Option<usize> {
     get(&SYSTEM)
 }
 
@@ -136,64 +136,64 @@ pub fn system() -> Option<usize> {
 /// # Safety
 /// It may create a storage in the registry, so it must run on the thread that owns the entity
 /// context — the game's own tick, which is where [`crate::hooks::player_system`] calls it.
-pub fn getter() -> Option<usize> {
+pub(crate) fn getter() -> Option<usize> {
     get(&GETTER)
 }
 
-pub fn local_server() -> Option<usize> {
+pub(crate) fn local_server() -> Option<usize> {
     get(&LOCAL_SERVER)
 }
 
 /// The simulation step: the per-tick boundary and the only source of `Minecraft*`.
-pub fn sim_update() -> Option<usize> {
+pub(crate) fn sim_update() -> Option<usize> {
     get(&SIM_UPDATE)
 }
 
 /// `_setPaused(Minecraft*, bool)`: the engine's own pause/resume switch.
-pub fn sim_pause() -> Option<usize> {
+pub(crate) fn sim_pause() -> Option<usize> {
     get(&SIM_PAUSE)
 }
 
-pub fn command_execute() -> Option<usize> {
+pub(crate) fn command_execute() -> Option<usize> {
     get(&COMMAND_EXECUTE)
 }
 
-/// The dispatcher (`0x577ac10`): entered for every command the game runs, its own included.
-pub fn command_dispatcher() -> Option<usize> {
+/// The dispatcher: entered for every command the game runs, its own included.
+pub(crate) fn command_dispatcher() -> Option<usize> {
     get(&COMMAND_DISPATCHER)
 }
 
 /// `CommandOrigin::fromData`, the game's own origin builder (it allocates with the game's allocator).
-pub fn command_origin() -> Option<usize> {
+pub(crate) fn command_origin() -> Option<usize> {
     get(&COMMAND_ORIGIN)
 }
 
 /// `CommandOutput::addMessage`, hooked to capture a command's feedback.
-pub fn command_add_message() -> Option<usize> {
+pub(crate) fn command_add_message() -> Option<usize> {
     get(&COMMAND_ADD_MESSAGE)
 }
 
 /// `MinecraftCommands`' run entry, hooked to record the server's own manager.
-pub fn command_run() -> Option<usize> {
+pub(crate) fn command_run() -> Option<usize> {
     get(&COMMAND_RUN)
 }
 
 /// The GameInput reading consumer, hooked to neutralize a pad while the lock is on.
-pub fn input_pad() -> Option<usize> {
+pub(crate) fn input_pad() -> Option<usize> {
     get(&INPUT_PAD)
 }
 
-pub fn options_registry() -> Option<usize> {
+pub(crate) fn options_registry() -> Option<usize> {
     get(&OPTIONS_REGISTRY)
 }
 
 /// The `Options` object, captured when the game registers its options (0 until it does).
-pub fn options_object() -> Option<usize> {
+pub(crate) fn options_object() -> Option<usize> {
     get(&OPTIONS_OBJECT)
 }
 
 /// Records the `Options` object the registration function was entered with.
-pub fn set_options_object(object: usize) {
+pub(crate) fn set_options_object(object: usize) {
     if object != 0 && !OPTIONS_SEEN.swap(true, Ordering::AcqRel) {
         OPTIONS_OBJECT.store(object, Ordering::Release);
         agent_core::log::fmt(format_args!("options: registration entered with 0x{:x}", object));
@@ -202,29 +202,29 @@ pub fn set_options_object(object: usize) {
 
 /// The server's command manager (`MinecraftCommands*`), 0 until the game itself runs a command with it
 /// on the server thread (see [`crate::hooks`]).
-pub fn command_commands() -> Option<usize> {
+pub(crate) fn command_commands() -> Option<usize> {
     get(&COMMAND_COMMANDS)
 }
 
 /// Forgets the command manager of a level that is no longer loaded.
-pub fn clear_command_commands() {
+pub(crate) fn clear_command_commands() {
     COMMAND_COMMANDS.store(0, Ordering::Release);
 }
 
 /// Records the manager the game ran a command with on the server thread; a different one replaces it
 /// (the game's own call is the authority) and is logged.
-pub fn set_command_commands(commands: usize) {
+pub(crate) fn set_command_commands(commands: usize) {
     if commands != 0 && COMMAND_COMMANDS.swap(commands, Ordering::AcqRel) != commands {
         agent_core::log::fmt(format_args!("command: MinecraftCommands at 0x{:x}", commands));
     }
 }
 
 /// The local server (`ServerInstance*`), 0 until [`crate::live`] resolves it.
-pub fn server_instance() -> Option<usize> {
+pub(crate) fn server_instance() -> Option<usize> {
     get(&SERVER_INSTANCE)
 }
 
-pub fn set_server_instance(server: usize) {
+pub(crate) fn set_server_instance(server: usize) {
     if server != 0 && SERVER_INSTANCE.load(Ordering::Acquire) == 0 {
         SERVER_INSTANCE.store(server, Ordering::Release);
         agent_core::log::fmt(format_args!("command: ServerInstance at 0x{:x}", server));
@@ -233,7 +233,7 @@ pub fn set_server_instance(server: usize) {
 
 /// The loaded level's own data (`LevelData*`), set by [`crate::world`] once it locates it; reported by
 /// `engine.status`, and 0 until then.
-pub fn set_level_data(level_data: usize) {
+pub(crate) fn set_level_data(level_data: usize) {
     if level_data != 0 && LEVEL_DATA.load(Ordering::Acquire) == 0 {
         LEVEL_DATA.store(level_data, Ordering::Release);
         agent_core::log::fmt(format_args!("world: LevelData at 0x{:x}", level_data));
@@ -241,18 +241,18 @@ pub fn set_level_data(level_data: usize) {
 }
 
 /// The loaded world's `LevelData*`, once [`crate::world`] has located it.
-pub fn level_data() -> Option<usize> {
+pub(crate) fn level_data() -> Option<usize> {
     get(&LEVEL_DATA)
 }
 
 /// Forgets the level data of a world that is no longer loaded.
-pub fn clear_level_data() {
+pub(crate) fn clear_level_data() {
     LEVEL_DATA.store(0, Ordering::Release);
 }
 
 /// FNV-1a 32 of a plain type name: the ECS component hash the game itself computes for a component
 /// (`StateVectorComponent` → the immediate its accessor is called with).
-pub fn component_hash(name: &str) -> u32 {
+pub(crate) fn component_hash(name: &str) -> u32 {
     let mut hash: u32 = 0x811C_9DC5;
     for byte in name.as_bytes() {
         hash = (hash ^ *byte as u32).wrapping_mul(0x0100_0193);
@@ -261,7 +261,7 @@ pub fn component_hash(name: &str) -> u32 {
 }
 
 /// The image-wide resolution pass. Logs each recipe's outcome and leaves unresolved anchors at 0.
-pub fn resolve(image: &Image) -> Vec<Anchor> {
+pub(crate) fn resolve(image: &Image) -> Vec<Anchor> {
     let log = |text: alloc::string::String| agent_core::log::line(&text);
 
     /* ---- the frame hook: the assert-metadata triple, body-checked by its size ---- */
@@ -407,7 +407,7 @@ pub fn resolve(image: &Image) -> Vec<Anchor> {
         let Some((start, end)) = pe::function_of(image, dispatcher) else {
             return None;
         };
-        let calls = pe::callees(image, start, end);
+        let calls = pe::callees(start, end);
         let mut found: Option<usize> = None;
         for target in calls.iter().copied() {
             if calls.iter().filter(|other| **other == target).count() < 2 {
@@ -510,7 +510,7 @@ pub fn resolve(image: &Image) -> Vec<Anchor> {
 }
 
 /// The level data's tag lookup and the `"GameType"` key, when both resolve.
-pub fn game_type() -> Option<(usize, usize)> {
+pub(crate) fn game_type() -> Option<(usize, usize)> {
     Some((get(&GAME_TYPE_LOOKUP)?, get(&GAME_TYPE_KEY)?))
 }
 
@@ -584,7 +584,7 @@ fn describe(image: &Image, address: usize) -> alloc::string::String {
 }
 
 /// The anchor table `engine.status` reports: every name with its address, 0 for missing.
-pub fn report() -> Vec<Anchor> {
+pub(crate) fn report() -> Vec<Anchor> {
     let mut anchors = Vec::with_capacity(NAMES.len());
     for name in NAMES {
         let address = match *name {
@@ -616,7 +616,7 @@ pub fn report() -> Vec<Anchor> {
 }
 
 /// `component.getter` and `system.player` and `frame` must all be present for anything to work.
-pub fn attached() -> bool {
+pub(crate) fn attached() -> bool {
     frame().is_some() && system().is_some() && getter().is_some()
 }
 

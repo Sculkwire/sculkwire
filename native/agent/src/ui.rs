@@ -101,23 +101,17 @@ struct Point {
 
 #[link(name = "user32", kind = "raw-dylib")]
 extern "system" {
-    /// The window class procedure, which a subclass does not replace.
-    fn GetClassLongPtrW(window: win::Hwnd, index: i32) -> isize;
     /// The children of the game's window: the OreUI host is one of them, and it is the window a click on
     /// an OreUI button has to reach.
     fn EnumChildWindows(window: win::Hwnd, callback: win::EnumWindowsProc, arg: win::Lparam) -> win::Bool;
     /// Screen pixels to a window's client pixels.
     fn ScreenToClient(window: win::Hwnd, point: *mut Point) -> win::Bool;
-    /// A message into a window's queue: the normal path input takes.
-    fn PostMessageW(window: win::Hwnd, message: u32, wparam: win::Wparam, lparam: win::Lparam) -> win::Bool;
     /// `MAPVK_VK_TO_VSC`: the scan code the key messages carry in `lParam`.
     fn MapVirtualKeyW(code: u32, map: u32) -> u32;
     /// Client pixels to screen pixels, for `WM_MOUSEWHEEL`'s `lParam`.
     fn ClientToScreen(window: win::Hwnd, point: *mut Point) -> win::Bool;
 }
 
-/// `GetClassLongPtrW(hwnd, GCLP_WNDPROC)`.
-const GCLP_WNDPROC: i32 = -24;
 /// `GetWindowLongPtrW(hwnd, GWLP_USERDATA)`: whatever the game stores on its own window.
 const GWLP_USERDATA: i32 = -21;
 
@@ -633,8 +627,8 @@ pub(crate) fn h_scroll(_core: &'static Core, params: &Value) -> Result<Value, Rp
             let moved = unsafe { ScreenToClient(host as win::Hwnd, &mut local) } != 0;
             let at = if moved { Point { x: local.x, y: local.y } } else { Point { x: point.x, y: point.y } };
             unsafe {
-                PostMessageW(host as win::Hwnd, WM_MOUSEMOVE, 0, point_lparam(at.x, at.y));
-                PostMessageW(host as win::Hwnd, WM_MOUSEWHEEL, wparam as usize, point_lparam(point.x, point.y));
+                win::PostMessageW(host as win::Hwnd, WM_MOUSEMOVE, 0, point_lparam(at.x, at.y));
+                win::PostMessageW(host as win::Hwnd, WM_MOUSEWHEEL, wparam as usize, point_lparam(point.x, point.y));
             }
             "child"
         }
@@ -729,9 +723,9 @@ fn click_child(window: usize, child: usize, x: i32, y: i32, right: bool) -> bool
         } else {
             (WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON)
         };
-        PostMessageW(child as win::Hwnd, WM_MOUSEMOVE, 0, at);
-        PostMessageW(child as win::Hwnd, down, keys, at);
-        PostMessageW(child as win::Hwnd, up, 0, at);
+        win::PostMessageW(child as win::Hwnd, WM_MOUSEMOVE, 0, at);
+        win::PostMessageW(child as win::Hwnd, down, keys, at);
+        win::PostMessageW(child as win::Hwnd, up, 0, at);
     }
     true
 }
@@ -822,7 +816,7 @@ pub(crate) fn detach() {
     if let Some(release) = RELEASE.lock().take() {
         // SAFETY: a plain message into the queue of a window of this process.
         unsafe {
-            PostMessageW(release.window as win::Hwnd, release.message, 0, release.lparam);
+            win::PostMessageW(release.window as win::Hwnd, release.message, 0, release.lparam);
         }
     }
 }
@@ -2129,7 +2123,7 @@ fn window() -> Result<(usize, usize), RpcError> {
         WINDOW.store(handle, Ordering::Release);
     }
     // SAFETY: `handle` is a window of this process.
-    let class_procedure = unsafe { GetClassLongPtrW(handle as win::Hwnd, GCLP_WNDPROC) } as usize;
+    let class_procedure = unsafe { win::GetClassLongPtrW(handle as win::Hwnd, win::GCLP_WNDPROC) } as usize;
     if class_procedure != 0 {
         return Ok((handle, class_procedure));
     }
@@ -2508,7 +2502,6 @@ fn character_of(vk: u32, shift: bool) -> Option<u16> {
     Some(character as u16)
 }
 
-/// ASCII-lowercase of a key name.
 fn lower(text: &str) -> String {
     text.chars().map(|c| c.to_ascii_lowercase()).collect()
 }
@@ -2613,7 +2606,7 @@ fn client_stack_owner(image: &agent_core::Image, table: usize) -> Option<(usize,
             let Some(owner) = image.function_start(site) else {
                 continue;
             };
-            let Some(holder) = data_slot_of(image, owner) else {
+            let Some(holder) = pe::unique_data_slot(image, owner) else {
                 continue;
             };
             let candidates: Vec<usize> = (0..0x400usize).map(|index| holder - index * 8).collect();
@@ -2648,33 +2641,6 @@ fn owner_store(site: usize) -> Option<usize> {
     None
 }
 
-/// The address of the one qword in the image's data that holds `function` (a vtable slot), when exactly
-/// one does.
-fn data_slot_of(image: &agent_core::Image, function: usize) -> Option<usize> {
-    let mut found: Option<usize> = None;
-    for section in image.sections() {
-        let name = section.name();
-        if name.starts_with(".text") || matches!(name, ".pdata" | ".rsrc" | ".reloc") {
-            continue;
-        }
-        let Some(bytes) = pe::bytes(section.va, section.len) else {
-            continue;
-        };
-        let mut offset = 0usize;
-        while offset + 8 <= bytes.len() {
-            // SAFETY: eight bytes inside a readable section; table slots are 8-byte aligned.
-            let word = unsafe { ptr::read_unaligned(bytes.as_ptr().add(offset) as *const u64) } as usize;
-            if word == function {
-                if found.is_some() {
-                    return None;
-                }
-                found = Some(section.va + offset);
-            }
-            offset += 8;
-        }
-    }
-    found
-}
 
 /// The function that pushes the always-active screens and the owner field it pushes them onto.
 ///
@@ -2812,8 +2778,7 @@ fn scene_name_functions(image: &agent_core::Image) -> Vec<usize> {
 fn scene_stack_vtable(image: &agent_core::Image, function: usize) -> Option<(usize, usize)> {
     let mut candidate: Option<(usize, usize)> = None;
     for section in image.sections() {
-        let name = section.name();
-        if name.starts_with(".text") || matches!(name, ".pdata" | ".rsrc" | ".reloc") {
+        if !section.is_data() {
             continue;
         }
         let Some(bytes) = pe::bytes(section.va, section.len) else {

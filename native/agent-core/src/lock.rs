@@ -42,7 +42,7 @@ const MODE_OFF: i32 = 0;
 const MODE_ON: i32 = 1;
 const MODE_AUTO: i32 = 2;
 
-/// Lock mode; `auto` like agent.c.
+/// Lock mode.
 static MODE: AtomicI32 = AtomicI32::new(MODE_AUTO);
 /// One bit per connection that declared an action running.
 static ACTIVE: AtomicU32 = AtomicU32::new(0);
@@ -478,7 +478,8 @@ pub fn remove() -> (usize, usize) {
         if address == 0 {
             continue;
         }
-        for module in [win::module("gameinput.dll"), win::module("Microsoft.InputStateManager.dll"), win::module("Microsoft.UI.Input.dll"), win::main_module()] {
+        let modules = [win::module(POLLED_MODULES[0]), win::module(POLLED_MODULES[1]), win::module(POLLED_MODULES[2]), win::main_module()];
+        for module in modules {
             if module == 0 {
                 continue;
             }
@@ -527,17 +528,19 @@ fn patch_key_state_imports(module: win::Hmodule, cursor: bool) -> u32 {
     patched
 }
 
-/// Modules that import the polled key-state APIs. A module that is not loaded is skipped and retried
-/// a second later.
+/// Modules that import the polled key-state APIs, besides the main module (bit 3 of `IAT_DONE`).
+const POLLED_MODULES: [&str; 3] = ["gameinput.dll", "Microsoft.InputStateManager.dll", "Microsoft.UI.Input.dll"];
+
+/// Patches the modules that import the polled key-state APIs. A module that is not loaded is skipped
+/// and retried a second later.
 fn install_key_state_hooks() {
-    const MODULES: [&str; 3] = ["gameinput.dll", "Microsoft.InputStateManager.dll", "Microsoft.UI.Input.dll"];
     let now = win::tick_ms();
     if IAT_DONE.load(Ordering::Acquire) == 0b1111 || now.saturating_sub(IAT_AT.load(Ordering::Relaxed)) < 1000 {
         return;
     }
     IAT_AT.store(now, Ordering::Release);
     let mut modules: [win::Hmodule; 4] = [0; 4];
-    for (index, name) in MODULES.iter().enumerate() {
+    for (index, name) in POLLED_MODULES.iter().enumerate() {
         modules[index] = win::module(name);
     }
     modules[3] = win::main_module();
@@ -882,7 +885,7 @@ pub fn json() -> Value {
         "dropped": DROPPED.load(Ordering::Relaxed),
         "focusLost": FOCUS_LOST.load(Ordering::Relaxed),
         "focusKept": FOCUS_KEPT.load(Ordering::Relaxed),
-        // `focused` is the composed view agent.c reported; the two parts are reported as well.
+        // `focused` is the composed view; the two parts are reported as well.
         "focused": APP_FOCUSED.load(Ordering::Relaxed) && FOREGROUND.load(Ordering::Relaxed),
         "appFocused": APP_FOCUSED.load(Ordering::Relaxed),
         "foreground": FOREGROUND.load(Ordering::Relaxed),
@@ -906,17 +909,6 @@ pub fn json() -> Value {
             "hidden": PAD_HIDDEN.load(Ordering::Relaxed),
         },
     })
-}
-
-/// Records that the engine's focus-lost handler ran (diagnostic).
-pub fn note_app_focus(focused: bool) {
-    APP_FOCUSED.store(focused, Ordering::Relaxed);
-}
-
-/// Records that the engine's focus-lost handler was kept from the game.
-pub fn note_focus_kept() {
-    FOCUS_LOST.fetch_add(1, Ordering::Relaxed);
-    FOCUS_KEPT.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Spins the window procedure once, for tests and for the engine's `debug.focus` equivalent.

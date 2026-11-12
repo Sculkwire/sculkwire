@@ -149,15 +149,6 @@ fn number(params: &Value, key: &str) -> Result<f64, RpcError> {
     }
 }
 
-/// `-32002` unless a world this process hosts is loaded with a local player.
-fn world() -> Result<(), RpcError> {
-    if live::in_world() {
-        Ok(())
-    } else {
-        Err(RpcError::not_in_world())
-    }
-}
-
 fn set(object: &mut Value, key: &'static str, value: Value) {
     if let Value::Object(map) = object {
         map.insert(String::from(key), value);
@@ -185,17 +176,6 @@ fn floats(values: &[f32]) -> Value {
  * method, so it is already on that thread; the window is looked up once and revalidated on every use
  * because a world load does not destroy it but a resolution change can.
  * ---------------------------------------------------------------------------------------------- */
-
-#[link(name = "user32", kind = "raw-dylib")]
-extern "system" {
-    /// `GetClassLongPtrW`: `GCLP_WNDPROC` is the *class* procedure. Calling it is how a message
-    /// reaches the game's own handler without passing the input lock's subclass. Declared here
-    /// because `agent_core::win` does not import it.
-    fn GetClassLongPtrW(window: win::Hwnd, index: i32) -> isize;
-}
-
-/// `GCLP_WNDPROC`: the class procedure's slot in `GetClassLongPtrW`'s index space.
-const GCLP_WNDPROC: i32 = -24;
 
 /// The window the synthesized messages go to, 0 until one is found.
 static WINDOW: AtomicUsize = AtomicUsize::new(0);
@@ -380,7 +360,7 @@ const HOLD_MS: u64 = 1_000;
 /// order.
 fn deliver(window: win::Hwnd, message: u32, wparam: win::Wparam, lparam: win::Lparam) {
     // SAFETY: `GetClassLongPtrW` with a valid window and index.
-    let class = unsafe { GetClassLongPtrW(window, GCLP_WNDPROC) } as usize;
+    let class = unsafe { win::GetClassLongPtrW(window, win::GCLP_WNDPROC) } as usize;
     if class != 0 {
         // SAFETY: the slot is the class's window procedure, whose signature is `WndProc`.
         let procedure = unsafe { core::mem::transmute::<usize, win::WndProc>(class) };
@@ -457,7 +437,7 @@ fn stop_timer(window: win::Hwnd) {
 /// this runs on the unload thread where the game's input state is not ours to touch. The two hooks are
 /// taken out by the core's unload with every other inline hook, and the movement hold stops applying as
 /// soon as its stamp is cleared.
-pub fn detach() {
+pub(crate) fn detach() {
     if let Some(window) = window() {
         stop_timer(window);
     }
@@ -851,7 +831,7 @@ fn lambda_body(table: usize) -> Option<usize> {
 /// share (the handlers differ only in the action bits they pass).
 fn action_core(image: &Image, handler: usize) -> Option<usize> {
     let end = image.function_end(handler)?;
-    let mut targets = pe::callees(image, handler, end);
+    let mut targets = pe::callees(handler, end);
     targets.sort_unstable();
     targets.dedup();
     match targets.as_slice() {
@@ -1368,8 +1348,8 @@ fn registry_slot_live() -> Option<bool> {
 /// uses for [`Movement::bits`](agent_core::hub::Movement) and its analog vector at their exact value;
 /// the hold is applied to the game's move-input state every client tick until [`HOLD_MS`] after this
 /// call (see the module documentation).
-pub fn h_input_move(_core: &'static Core, params: &Value) -> Result<Value, RpcError> {
-    world()?;
+pub(crate) fn h_input_move(_core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+    live::require_world()?;
     expire();
     let movement = Movement {
         forward: axis(params, "forward")?,
@@ -1409,7 +1389,7 @@ pub fn h_input_move(_core: &'static Core, params: &Value) -> Result<Value, RpcEr
 ///
 /// Never gated on a world: this is the call that takes input *off* the game, and it has to work while
 /// the world is unloading, which is exactly when a stuck hold would be worst.
-pub fn h_input_release(_core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn h_input_release(_core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
     let mut released = state_names(clear_movement());
     for held in HELD {
         if release_held(held) {
@@ -1427,13 +1407,13 @@ pub fn h_input_release(_core: &'static Core, _params: &Value) -> Result<Value, R
 /// written, `[8.84, -0.03]` read 2 s later). The view is therefore written into the camera the player
 /// follows ([`write_camera_look`]) and into the player's rotation for an immediate read-back. `pitch`
 /// is the number `player.state.rotation` reports (+ looks down).
-pub fn h_input_look(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn h_input_look(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     let pitch = number(params, "pitch")?;
     let yaw = number(params, "yaw")?;
     if !(-90.0..=90.0).contains(&pitch) {
         return Err(RpcError::invalid_params("pitch must be -90..90"));
     }
-    world()?;
+    live::require_world()?;
     let pitch = pitch as f32;
     let yaw = look::wrap_degrees(yaw as f32);
     let Some(accessor) = registry() else {
@@ -1479,8 +1459,8 @@ const MAX_CAMERAS: usize = 64;
 
 /// The storage's entity ids, when its vector is readable and holds a camera-sized count.
 fn camera_entities(storage: usize) -> Option<Vec<u32>> {
-    let begin = pe::read::<usize>(storage + ENTITY_BEGIN)?;
-    let end = pe::read::<usize>(storage + ENTITY_END)?;
+    let begin = pe::read::<usize>(storage + ecs::ENTITY_BEGIN)?;
+    let end = pe::read::<usize>(storage + ecs::ENTITY_END)?;
     if begin == 0 || end < begin || (end - begin) / 4 > MAX_CAMERAS {
         return None;
     }
@@ -1776,7 +1756,7 @@ fn frame_hook_alive() -> bool {
 /// After every main-thread drain (the engine's `lock_frame`), on the game's main thread: gives a
 /// waiting click its turn. The drains run from the message loop and the client's step, several per
 /// frame; the frame hook itself is not where they run on this build.
-pub fn frame() {
+pub(crate) fn frame() {
     FRAME_MS.store(win::tick_ms(), Ordering::Release);
     run_waiting(false);
     #[cfg(feature = "debug-rpc")]
@@ -1914,7 +1894,7 @@ fn run_waiting(now: bool) {
     };
     // The game is called below: no lock is held across it.
     drop(slot);
-    let result = world().and_then(|()| {
+    let result = live::require_world().and_then(|()| {
         let target = match pick {
             Some(Pick::Read(target)) => target,
             _ => None,
@@ -1938,8 +1918,8 @@ fn run_waiting(now: bool) {
 /// crosshair was on when it ran (a block with its face, or an entity with its id and type; `null` when
 /// nothing in reach or nothing validated), and `hit` the struck entity's id alone. A click waits up to
 /// [`click::WAIT_MS`] for a frame in which the game holds its crosshair pick ([`click_when_picked`]).
-pub fn h_input_attack(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
-    world()?;
+pub(crate) fn h_input_attack(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+    live::require_world()?;
     expire();
     match params.get("hold") {
         None => click_when_picked(core, Button::Attack),
@@ -1956,8 +1936,8 @@ pub fn h_input_attack(core: &'static Core, params: &Value) -> Result<Value, RpcE
 /// button is its own domain — `input.move` restates the movement and leaves it alone. `target` is the
 /// crosshair's target when the click (or the hold) began, as `input.attack` reports it; a click waits
 /// for the pick as `input.attack`'s does.
-pub fn h_input_use(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
-    world()?;
+pub(crate) fn h_input_use(core: &'static Core, params: &Value) -> Result<Value, RpcError> {
+    live::require_world()?;
     expire();
     match params.get("hold") {
         None => click_when_picked(core, Button::Use),
@@ -1987,7 +1967,7 @@ fn held_button(held: &Held, down: bool, target: Value) -> Result<Value, RpcError
 /// `live` counts. A field neither source can read is `null`, never a guess — `dimension` is one of
 /// them: the raw `DimensionStateComponent` dword is reported as `dimensionState` and left unmapped,
 /// because the id ↔ dimension table is not decoded in this build.
-pub fn h_player_state(_core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn h_player_state(_core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
     let mut out = live::player_state().ok_or_else(RpcError::not_in_world)?;
     set(&mut out, "health", Value::Null);
     set(&mut out, "selectedSlot", Value::Null);
@@ -2012,11 +1992,11 @@ pub fn h_player_state(_core: &'static Core, _params: &Value) -> Result<Value, Rp
  * The client's component registry
  *
  * Every read below needs the accessor the game's own systems pass to `getStorage` — the `EntityContext`
- * plus 0x30 (`area-player` §1.1). It comes only from the pointer chains the game itself walks: the
+ * plus 0x30. It comes only from the pointer chains the game itself walks: the
  * accessor the client's own tick reads through ([`crate::live::client_accessor`], captured from the
  * game's `getStorage` calls on the client thread) and the player system's own `EntityContext`
  * ([`note_context`]). The registry's node array (`registry + 0x68 .. + 0x70`, one 0x20-byte node per
- * component: `+0x08` hash, `+0x10` storage — `area-player` §1.3) is what proves a candidate: it must
+ * component: `+0x08` hash, `+0x10` storage) is what proves a candidate: it must
  * hold every component this module reads. The result is cached and revalidated on every use, so a
  * world change that replaces the registry is noticed and a build whose layouts moved answers
  * "unreadable" instead of a wrong number.
@@ -2029,7 +2009,7 @@ static REGISTRY: AtomicUsize = AtomicUsize::new(0);
 const REGISTRY_NODES: usize = 0x68;
 /// The registry's bucket vector begin, used only as a shape check.
 const REGISTRY_BUCKETS: usize = 0x48;
-/// One node: `+0x08` component hash, `+0x10` its storage (`area-player` §1.3).
+/// One node: `+0x08` component hash, `+0x10` its storage.
 const NODE_STRIDE: usize = 0x20;
 const NODE_HASH: usize = 0x08;
 const NODE_STORAGE: usize = 0x10;
@@ -2130,8 +2110,8 @@ static NOTED: AtomicUsize = AtomicUsize::new(0);
 /// Records the registry accessor from the `EntityContext` the player system runs with.
 ///
 /// `context + 0x30` **is** the accessor the game itself passes to `getStorage(accessor, hash)` — the
-/// registry is embedded in the context, not a pointer stored there (`area-player` §1.1: the system
-/// body does `lea rbx,[rdx+0x30]` and passes `rbx` as the getter's `rcx`). The player-system hook
+/// registry is embedded in the context, not a pointer stored there (the system body does
+/// `lea rbx,[rdx+0x30]` and passes `rbx` as the getter's `rcx`). The player-system hook
 /// receives that context, so this costs one shape check; a value whose node array does not hold the
 /// components every client has is refused rather than stored.
 pub(crate) fn note_context(context: usize) {
@@ -2161,10 +2141,6 @@ fn discover() -> Option<usize> {
     }
     None
 }
-
-/// The storage's own entity vector, as `ecs` and `area-player` §1.3 describe it.
-const ENTITY_BEGIN: usize = 0x20;
-const ENTITY_END: usize = 0x28;
 
 fn read_vec3(address: usize) -> Option<[f32; 3]> {
     let vector = [pe::read::<f32>(address)?, pe::read::<f32>(address + 4)?, pe::read::<f32>(address + 8)?];
@@ -2204,10 +2180,10 @@ impl Player {
     /// `minecraft:health`'s current value, from the attribute container's own instances.
     ///
     /// The container is a sorted name-hash array at `+0x00` and a parallel array of
-    /// `AttributeInstance` (stride 0x88) at `+0x18` (`area-player` §2.7): the instance's `+0x08` is its
+    /// `AttributeInstance` (stride 0x88) at `+0x18`: the instance's `+0x08` is its
     /// `Attribute` definition and its `+0x7c` the current value. The definition is identified by its
-    /// *name*, not by the hash — the key the map uses is not the FNV-1a of the name (`area-inventory`
-    /// §1.2) — so the name is read out of the definition as an MSVC `std::string` and compared with the
+    /// *name*, not by the hash — the key the map uses is not the FNV-1a of the name — so the name is
+    /// read out of the definition as an MSVC `std::string` and compared with the
     /// two spellings the engine registers (`minecraft:health`, `generic.health`).
     fn health(&self) -> Option<f32> {
         let element = self.element("AttributesComponent", ATTRIBUTES_STRIDE)?;
@@ -2342,7 +2318,7 @@ impl Player {
         let Some(state) = self.storage("StateVectorComponent") else {
             return out;
         };
-        let (Some(begin), Some(end)) = (pe::read::<usize>(unique + ENTITY_BEGIN), pe::read::<usize>(unique + ENTITY_END)) else {
+        let (Some(begin), Some(end)) = (pe::read::<usize>(unique + ecs::ENTITY_BEGIN), pe::read::<usize>(unique + ecs::ENTITY_END)) else {
             return out;
         };
         if end <= begin || (end - begin) % 4 != 0 || (end - begin) / 4 > 1024 {
@@ -2377,9 +2353,9 @@ impl Player {
 /// `debug.hit` (debug-rpc only) → the entities in reach and, per candidate stride, the raw
 /// `HitResultComponent` element and the first qwords of the object it points at.
 #[cfg(feature = "debug-rpc")]
-pub fn h_debug_hit(_core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn h_debug_hit(_core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
     use alloc::format;
-    world()?;
+    live::require_world()?;
     let player = Player::open().ok_or_else(|| RpcError::anchor("ecs.registry"))?;
     let entities: Vec<Value> = player.entities().iter().map(|(id, at)| json!({ "id": format!("{}", *id as i64), "at": [at[0], at[1], at[2]] })).collect();
     let storage = player.storage("HitResultComponent");
@@ -2402,8 +2378,8 @@ pub fn h_debug_hit(_core: &'static Core, _params: &Value) -> Result<Value, RpcEr
             storages.push(json!({ "name": name, "storage": null }));
             continue;
         };
-        let begin = pe::read::<usize>(storage + ENTITY_BEGIN).unwrap_or(0);
-        let end = pe::read::<usize>(storage + ENTITY_END).unwrap_or(0);
+        let begin = pe::read::<usize>(storage + ecs::ENTITY_BEGIN).unwrap_or(0);
+        let end = pe::read::<usize>(storage + ecs::ENTITY_END).unwrap_or(0);
         let count = if end > begin { (end - begin) / 4 } else { 0 };
         let ids: Vec<Value> = (0..count.min(64)).filter_map(|i| pe::read::<u32>(begin + i * 4)).map(Value::from).collect();
         // Each entity's packed page and its slot in it (element = page + slot × stride).
@@ -2423,8 +2399,8 @@ pub fn h_debug_hit(_core: &'static Core, _params: &Value) -> Result<Value, RpcEr
         for name in ["ActorUniqueIDComponent", "StateVectorComponent", "LocalPlayerComponent"] {
             let storage = ecs::storage(accessor, anchors::component_hash(name));
             let count = storage.map(|storage| {
-                let begin = pe::read::<usize>(storage + ENTITY_BEGIN).unwrap_or(0);
-                let end = pe::read::<usize>(storage + ENTITY_END).unwrap_or(0);
+                let begin = pe::read::<usize>(storage + ecs::ENTITY_BEGIN).unwrap_or(0);
+                let end = pe::read::<usize>(storage + ecs::ENTITY_END).unwrap_or(0);
                 if end > begin { (end - begin) / 4 } else { 0 }
             });
             counts.push(json!({ "name": name, "count": count }));
@@ -2434,7 +2410,7 @@ pub fn h_debug_hit(_core: &'static Core, _params: &Value) -> Result<Value, RpcEr
     Ok(json!({ "crosshair": crosshair, "local": player.entity(), "accessor": format!("{:#x}", player.accessor), "registries": registries, "storage": storage.map(|s| format!("{s:#x}")), "entities": entities, "storages": storages, "strides": strides, "pickFrames": pick_frames() }))
 }
 
-/// `AttributesComponent` element stride and the container's fields (`area-player` §2.7).
+/// `AttributesComponent` element stride and the container's fields.
 const ATTRIBUTES_STRIDE: usize = 0x50;
 const ATTRIBUTES_IDS: usize = 0x00;
 const ATTRIBUTES_IDS_END: usize = 0x08;
@@ -2474,9 +2450,9 @@ const HIT_REACH: f32 = 8.0;
 
 /// The `Attribute` definition's own name, as an MSVC `std::string` (`{buffer, size, capacity}`).
 ///
-/// The definition's field order is not pinned (`area-inventory` §1.2), so the three layouts the
-/// finding proposes are tried in turn; a name has to be printable ASCII of a plausible length, and the
-/// caller only accepts it when it is exactly the health attribute, so a wrong probe answers nothing.
+/// The definition's field order is not pinned, so three candidate layouts are tried in turn; a name
+/// has to be printable ASCII of a plausible length, and the caller only accepts it when it is exactly
+/// the health attribute, so a wrong probe answers nothing.
 fn definition_name(definition: usize) -> Option<&'static [u8]> {
     for (buffer, size) in [(0x08usize, 0x18usize), (0x00, 0x10), (0x28, 0x38)] {
         let Some(buffer) = pe::read::<usize>(definition + buffer) else {

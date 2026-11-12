@@ -24,6 +24,9 @@
 //! `+Z`) that is `azimuth = yaw - 90°`, `polar = 90° - pitch` along the camera and
 //! `azimuth = yaw + 90°`, `polar = 90° + pitch` at the camera: no trigonometry needed.
 //!
+//! It also holds the aim math the workstation's `interact.*` uses ([`look_at`]), with the `sqrt` and
+//! `atan2` it needs written out, because the agent links no floating-point library.
+//!
 //! Only `core` is used, so this file also builds on its own as a test crate on the host:
 //! `rustc --edition 2021 --test agent/src/look.rs -o target/look-test.exe && ./target/look-test.exe`
 //! (from `native/`).
@@ -126,6 +129,102 @@ pub fn orbit_angles(mode: LookMode, pitch: f32, yaw: f32) -> [f32; 2] {
 /// An orbit camera's angles are believable: finite, the polar angle inside `[0, π]`.
 pub fn orbit_plausible(azimuth: f32, polar: f32) -> bool {
     azimuth.is_finite() && polar.is_finite() && azimuth.abs() <= 7.0 && (0.0..=3.2).contains(&polar)
+}
+
+/// The aim that points from `eye` at `target`: `[pitch, yaw]` in degrees, the convention the game
+/// stores (`+pitch` looks down, `0` yaw is `+Z`, `-90` is `+X`).
+pub fn look_at(eye: [f32; 3], target: [f32; 3]) -> Option<[f32; 2]> {
+    let dx = target[0] - eye[0];
+    let dy = target[1] - eye[1];
+    let dz = target[2] - eye[2];
+    let horizontal = sqrt(dx * dx + dz * dz);
+    if !dx.is_finite() || !dy.is_finite() || !dz.is_finite() || (horizontal == 0.0 && dy == 0.0) {
+        return None;
+    }
+    Some([degrees(-atan2(dy, horizontal)), wrap(degrees(atan2(-dx, dz)))])
+}
+
+/// The straight-line distance between two points.
+pub fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    sqrt(dx * dx + dy * dy + dz * dz)
+}
+
+/// `sqrt`, implemented here because this crate links no floating-point library.
+///
+/// Newton from a halved-exponent seed: the seed is good to about 3 %, and six steps reach single
+/// precision (each one halves the relative error).
+pub fn sqrt(value: f32) -> f32 {
+    if !(value > 0.0) || !value.is_finite() {
+        return 0.0;
+    }
+    // `(bits >> 1) + 0x1fbd1df5` is the classic square-root seed of the fast-inverse-sqrt family.
+    let mut guess = f32::from_bits((value.to_bits() >> 1) + 0x1fbd_1df5);
+    for _ in 0..6 {
+        guess = 0.5 * (guess + value / guess);
+    }
+    guess
+}
+
+/// `atan(x)` for `|x| <= 1`, from Eberly's minimax polynomial (`|error| < 1.5e-4 rad`).
+pub fn atan(value: f32) -> f32 {
+    let square = value * value;
+    value
+        * (0.999_866
+            + square * (-0.330_299_5 + square * (0.180_141 + square * (-0.085_133 + square * 0.020_835_1))))
+}
+
+/// `atan2(y, x)` in radians, computed from [`atan`] with the quadrant folded in.
+pub fn atan2(y: f32, x: f32) -> f32 {
+    if !x.is_finite() || !y.is_finite() {
+        return 0.0;
+    }
+    let ax = if x < 0.0 { -x } else { x };
+    let ay = if y < 0.0 { -y } else { y };
+    if ax == 0.0 && ay == 0.0 {
+        return 0.0;
+    }
+    let mut angle = if ax >= ay {
+        let base = atan(ay / ax);
+        if x < 0.0 {
+            core::f32::consts::PI - base
+        } else {
+            base
+        }
+    } else {
+        let base = core::f32::consts::FRAC_PI_2 - atan(ax / ay);
+        if x < 0.0 {
+            core::f32::consts::PI - base
+        } else {
+            base
+        }
+    };
+    if y < 0.0 {
+        angle = -angle;
+    }
+    angle
+}
+
+pub fn degrees(radians: f32) -> f32 {
+    radians * (180.0 / core::f32::consts::PI)
+}
+
+/// `value` inside `(-180, 180]`, the range the game keeps yaw in.
+pub fn wrap(value: f32) -> f32 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+    let turns = (value / 360.0) as i64 as f32;
+    let mut wrapped = value - turns * 360.0;
+    if wrapped > 180.0 {
+        wrapped -= 360.0;
+    }
+    if wrapped <= -180.0 {
+        wrapped += 360.0;
+    }
+    wrapped
 }
 
 #[cfg(test)]
@@ -248,5 +347,45 @@ mod tests {
         assert!(close(wrap_degrees(-180.0), 180.0));
         assert!(close(wrap_degrees(540.0), 180.0));
         assert!(close(wrap_degrees(-725.0), -5.0));
+    }
+
+    #[test]
+    fn an_aim_points_the_way_the_game_stores_a_view() {
+        // `+pitch` looks down, yaw 0 is `+Z`, -90 is `+X`.
+        let [pitch, yaw] = look_at([0.0, 0.0, 0.0], [0.0, 0.0, 5.0]).unwrap();
+        assert!(close(pitch, 0.0) && close(yaw, 0.0));
+        let [pitch, yaw] = look_at([0.0, 0.0, 0.0], [5.0, 0.0, 0.0]).unwrap();
+        assert!(close(pitch, 0.0) && (yaw + 90.0).abs() < 0.01);
+        let [pitch, yaw] = look_at([0.0, 0.0, 0.0], [-5.0, 0.0, 0.0]).unwrap();
+        assert!(close(pitch, 0.0) && (yaw - 90.0).abs() < 0.01);
+        let [pitch, _] = look_at([0.0, 2.0, 0.0], [0.0, 0.0, 2.0]).unwrap();
+        assert!((pitch - 45.0).abs() < 0.01);
+        assert_eq!(look_at([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]), None);
+        assert_eq!(look_at([0.0, 0.0, 0.0], [f32::NAN, 0.0, 0.0]), None);
+    }
+
+    #[test]
+    fn the_hand_rolled_math_matches_the_library() {
+        for value in [1e-6f32, 0.25, 2.0, 9.0, 1234.5, 1e12] {
+            assert!((sqrt(value) - value.sqrt()).abs() <= value.sqrt() * 1e-6, "sqrt({value})");
+        }
+        assert_eq!(sqrt(-1.0), 0.0);
+        assert_eq!(sqrt(f32::INFINITY), 0.0);
+        for (y, x) in [(1.0f32, 2.0f32), (2.0, 1.0), (1.0, -2.0), (-2.0, -1.0), (-1.0, 3.0), (0.0, -1.0), (3.0, 0.0)] {
+            assert!((atan2(y, x) - y.atan2(x)).abs() < 2e-4, "atan2({y}, {x})");
+        }
+        assert_eq!(atan2(0.0, 0.0), 0.0);
+        assert!((degrees(core::f32::consts::PI) - 180.0).abs() < 1e-4);
+        assert!((distance([0.0, 0.0, 0.0], [2.0, 3.0, 6.0]) - 7.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn an_aim_yaw_wraps_and_a_non_finite_one_is_zero() {
+        assert!(close(wrap(190.0), -170.0));
+        assert!(close(wrap(-180.0), 180.0));
+        assert!(close(wrap(725.0), 5.0));
+        assert!(close(wrap(-1e6), 80.0));
+        assert_eq!(wrap(f32::NAN), 0.0);
+        assert_eq!(wrap(f32::INFINITY), 0.0);
     }
 }

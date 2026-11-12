@@ -18,7 +18,7 @@ use crate::engine::{Handler, RpcError, DEFERRED};
 use crate::sync::SpinLock;
 use crate::{log, win};
 
-/// Slots, matching `agent.c`'s `QCAP`.
+/// Slots.
 pub const CAPACITY: usize = 16;
 
 /// No slot is running right now.
@@ -68,7 +68,7 @@ static SLOTS: [Slot; CAPACITY] = [const { Slot::new() }; CAPACITY];
 /// The slot whose handler is running, for [`defer`].
 static CURRENT: AtomicUsize = AtomicUsize::new(NO_SLOT);
 
-/// The request timeout `agent.c` uses per method.
+/// The request timeout per method.
 pub fn timeout_for(method: &str) -> u32 {
     if method == "tick.step" {
         30_000
@@ -201,7 +201,7 @@ pub fn drain(resolve: impl Fn(&'static str) -> Option<Handler>) {
             continue;
         };
         let Some(handler) = resolve(method) else {
-            *slot.result.lock() = Some(Err(RpcError::new(crate::engine::UNKNOWN_METHOD, crate::error_message(crate::engine::UNKNOWN_METHOD))));
+            *slot.result.lock() = Some(Err(RpcError::standard(crate::engine::UNKNOWN_METHOD)));
             slot.state.store(DONE, Ordering::Release);
             continue;
         };

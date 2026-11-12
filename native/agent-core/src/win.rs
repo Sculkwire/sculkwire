@@ -8,21 +8,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::ffi::c_void;
 
-#[allow(non_camel_case_types)]
 pub type Hmodule = usize;
-#[allow(non_camel_case_types)]
 pub type Hwnd = isize;
-#[allow(non_camel_case_types)]
 pub type Handle = usize;
-#[allow(non_camel_case_types)]
 pub type Bool = i32;
-#[allow(non_camel_case_types)]
 pub type Dword = u32;
-#[allow(non_camel_case_types)]
 pub type Lresult = isize;
-#[allow(non_camel_case_types)]
 pub type Wparam = usize;
-#[allow(non_camel_case_types)]
 pub type Lparam = isize;
 
 pub const DLL_PROCESS_ATTACH: u32 = 1;
@@ -30,15 +22,11 @@ pub const DLL_PROCESS_ATTACH: u32 = 1;
 pub const INVALID_HANDLE_VALUE: Handle = usize::MAX;
 
 /* Threads. */
-pub const CREATE_SUSPENDED: u32 = 0x0000_0004;
-pub const INFINITE: u32 = 0xFFFF_FFFF;
 pub const THREAD_SUSPEND_RESUME: u32 = 0x0002;
 /// Read a suspended thread's registers.
 pub const THREAD_GET_CONTEXT: u32 = 0x0008;
 /// Read a thread's exit state and the thread's own identity.
 pub const THREAD_QUERY_INFORMATION: u32 = 0x0040;
-/// `CONTEXT_CONTROL`: the control registers (Rsp, Rip, flags, segments).
-pub const CONTEXT_CONTROL: u32 = 0x0010_0001;
 /// `CONTEXT_CONTROL | CONTEXT_INTEGER`: what an unwind needs, because a frame may be addressed through a
 /// frame register (usually Rbp) rather than Rsp.
 pub const CONTEXT_UNWIND: u32 = 0x0010_0003;
@@ -51,11 +39,6 @@ pub struct Context {
 }
 
 impl Context {
-    /// A context asking for the control registers.
-    pub fn control() -> Self {
-        Self::with_flags(CONTEXT_CONTROL)
-    }
-
     /// A context asking for the control and integer registers: one `RtlVirtualUnwind` can step.
     pub fn unwindable() -> Self {
         Self::with_flags(CONTEXT_UNWIND)
@@ -87,7 +70,6 @@ impl Context {
 /* Process memory. */
 pub const MEM_COMMIT: u32 = 0x1000;
 pub const MEM_RESERVE: u32 = 0x2000;
-pub const MEM_RELEASE: u32 = 0x8000;
 pub const MEM_FREE: u32 = 0x1_0000;
 pub const PAGE_NOACCESS: u32 = 0x01;
 pub const PAGE_READONLY: u32 = 0x02;
@@ -106,7 +88,6 @@ pub const GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT: u32 = 0x2;
 pub const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 0x4;
 
 /* Toolhelp snapshots. */
-pub const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
 pub const TH32CS_SNAPTHREAD: u32 = 0x0000_0004;
 pub const TH32CS_SNAPMODULE: u32 = 0x0000_0008;
 pub const TH32CS_SNAPMODULE32: u32 = 0x0000_0010;
@@ -128,6 +109,8 @@ pub const WM_KEYUP: u32 = 0x0101;
 pub const WM_SYSKEYDOWN: u32 = 0x0104;
 pub const WM_SYSKEYUP: u32 = 0x0105;
 pub const GWLP_WNDPROC: i32 = -4;
+/// `GCLP_WNDPROC`: the class procedure's slot in `GetClassLongPtrW`'s index space.
+pub const GCLP_WNDPROC: i32 = -24;
 pub const GW_OWNER: u32 = 4;
 
 /* Raw input. */
@@ -152,18 +135,6 @@ pub const FILE_SHARE_READ_WRITE: u32 = 3;
 pub const OPEN_ALWAYS: u32 = 4;
 pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 pub const FILE_END: u32 = 2;
-
-/// `CRITICAL_SECTION`'s storage. Opaque: only the initialise/enter/leave/delete calls touch it.
-#[repr(C, align(8))]
-pub struct CriticalSection {
-    data: [u8; 40],
-}
-
-impl CriticalSection {
-    pub const fn new() -> Self {
-        Self { data: [0; 40] }
-    }
-}
 
 #[repr(C)]
 pub struct MemoryBasicInformation {
@@ -211,46 +182,6 @@ pub struct ThreadEntry32 {
 }
 
 impl Default for ThreadEntry32 {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-
-#[repr(C)]
-pub struct ModuleEntry32 {
-    pub size: u32,
-    pub module_id: u32,
-    pub process_id: u32,
-    pub global_usage: u32,
-    pub process_usage: u32,
-    pub base: *mut u8,
-    pub base_size: u32,
-    pub module: Hmodule,
-    pub name: [u8; 256],
-    pub path: [u8; 260],
-}
-
-impl Default for ModuleEntry32 {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-
-#[repr(C)]
-pub struct ProcessEntry32W {
-    pub size: u32,
-    pub usage: u32,
-    pub process_id: u32,
-    pub default_heap_id: usize,
-    pub module_id: u32,
-    pub threads: u32,
-    pub parent_process_id: u32,
-    pub pri_class_base: i32,
-    pub flags: u32,
-    pub exe_file: [u16; 260],
-}
-
-impl Default for ProcessEntry32W {
     fn default() -> Self {
         unsafe { core::mem::zeroed() }
     }
@@ -330,7 +261,6 @@ extern "system" {
     ) -> *mut c_void;
 
     pub fn VirtualAlloc(address: *mut c_void, size: usize, kind: Dword, protect: Dword) -> *mut c_void;
-    pub fn VirtualFree(address: *mut c_void, size: usize, kind: Dword) -> Bool;
     pub fn VirtualProtect(address: *mut c_void, size: usize, protect: Dword, old: *mut Dword) -> Bool;
     pub fn VirtualQuery(address: *const c_void, info: *mut MemoryBasicInformation, size: usize) -> usize;
     pub fn FlushInstructionCache(process: Handle, address: *const c_void, size: usize) -> Bool;
@@ -368,35 +298,10 @@ extern "system" {
     pub fn HeapFree(heap: Handle, flags: u32, block: *mut u8) -> Bool;
     pub fn HeapReAlloc(heap: Handle, flags: u32, block: *mut u8, size: usize) -> *mut u8;
 
-    pub fn InitializeCriticalSection(section: *mut CriticalSection);
-    pub fn EnterCriticalSection(section: *mut CriticalSection);
-    pub fn LeaveCriticalSection(section: *mut CriticalSection);
-    pub fn DeleteCriticalSection(section: *mut CriticalSection);
-
-    pub fn Process32FirstW(snapshot: Handle, entry: *mut ProcessEntry32W) -> Bool;
-    pub fn Process32NextW(snapshot: Handle, entry: *mut ProcessEntry32W) -> Bool;
-    pub fn OpenProcess(access: Dword, inherit: Bool, id: Dword) -> Handle;
-    pub fn VirtualAllocEx(process: Handle, address: *mut c_void, size: usize, kind: Dword, protect: Dword) -> *mut c_void;
-    pub fn VirtualFreeEx(process: Handle, address: *mut c_void, size: usize, kind: Dword) -> Bool;
-    pub fn WriteProcessMemory(process: Handle, address: *mut c_void, buf: *const c_void, size: usize, wrote: *mut usize) -> Bool;
-    pub fn CreateRemoteThread(
-        process: Handle,
-        attributes: *mut c_void,
-        stack: usize,
-        start: extern "system" fn(*mut c_void) -> Dword,
-        arg: *mut c_void,
-        flags: Dword,
-        id: *mut Dword,
-    ) -> Handle;
-    pub fn WaitForSingleObject(handle: Handle, ms: Dword) -> Dword;
-    pub fn GetExitCodeThread(thread: Handle, code: *mut Dword) -> Bool;
-    pub fn ExitProcess(code: u32) -> !;
     pub fn FreeLibrary(module: Hmodule) -> Bool;
     pub fn FreeLibraryAndExitThread(module: Hmodule, code: u32) -> !;
     pub fn DebugBreak();
     pub fn TerminateProcess(process: Handle, code: u32) -> Bool;
-    pub fn GetCommandLineW() -> *const u16;
-    pub fn GetStdHandle(kind: u32) -> Handle;
 }
 
 #[link(name = "user32", kind = "raw-dylib")]
@@ -421,6 +326,15 @@ extern "system" {
     ) -> u32;
     pub fn GetForegroundWindow() -> Hwnd;
     pub fn PostMessageW(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> Bool;
+    /// The window class procedure, which a subclass does not replace: `GCLP_WNDPROC` reaches the game's
+    /// own handler without passing the input lock's subclass.
+    pub fn GetClassLongPtrW(window: Hwnd, index: i32) -> isize;
+    /// The OS pointer, in screen pixels: where the game's own cursor is before the agent moves it, and
+    /// the space the runtime reports the absolute mouse position in.
+    pub fn GetCursorPos(point: *mut i32) -> Bool;
+    /// Moves the OS pointer, so the runtime publishes a mouse reading for the position the agent asked
+    /// for (see [`crate::gameinput`]'s `warp`).
+    pub fn SetCursorPos(x: i32, y: i32) -> Bool;
     /// A message into a thread's own queue, with no window: it makes a thread blocked in `GetMessage`
     /// run one wake-up, which is when user32 drops the reference a `WH_GETMESSAGE` hook took on this DLL.
     pub fn PostThreadMessageW(thread: Dword, message: u32, wparam: Wparam, lparam: Lparam) -> Bool;
@@ -638,7 +552,7 @@ pub fn current_thread_id() -> u32 {
     unsafe { GetCurrentThreadId() }
 }
 
-/// Milliseconds since the process started, matching agent.c's `GetTickCount64` uses.
+/// Milliseconds since the process started (`GetTickCount64`).
 pub fn tick_ms() -> u64 {
     // SAFETY: no arguments, no invariants.
     unsafe { GetTickCount64() }

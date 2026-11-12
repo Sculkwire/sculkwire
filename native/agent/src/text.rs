@@ -9,14 +9,14 @@
 use agent_core::win;
 
 /// The bytes of a `std::string`, plus the block a long text needs.
-pub struct Text {
+pub(crate) struct Text {
     bytes: [u8; 32],
     block: usize,
 }
 
 impl Text {
     /// A `std::string` holding `text`, or `None` when its buffer cannot be allocated.
-    pub fn new(text: &str) -> Option<Text> {
+    pub(crate) fn new(text: &str) -> Option<Text> {
         let text = text.as_bytes();
         let mut bytes = [0u8; 32];
         let mut block = 0usize;
@@ -44,7 +44,7 @@ impl Text {
     }
 
     /// The address of the 32-byte `std::string`.
-    pub fn as_ptr(&self) -> *const u8 {
+    pub(crate) fn as_ptr(&self) -> *const u8 {
         self.bytes.as_ptr()
     }
 }

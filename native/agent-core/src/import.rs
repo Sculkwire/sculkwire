@@ -53,7 +53,8 @@ pub fn find(module: win::Hmodule, dll: &str, function: &str) -> Option<Slot> {
         if name_rva == 0 || first_thunk == 0 {
             return None; // the terminator: the module does not import it
         }
-        if c_string(&image, name_rva).is_some_and(|name| equals_ignore_case(name, dll.as_bytes())) {
+        // ASCII case-insensitive, which is how the loader compares import names.
+        if c_string(&image, name_rva).is_some_and(|name| name.eq_ignore_ascii_case(dll.as_bytes())) {
             return thunks(&image, original_thunk, first_thunk, function);
         }
         descriptor += DESCRIPTOR;
@@ -80,7 +81,7 @@ fn thunks(image: &Image, original_thunk: u32, first_thunk: u32, function: &str) 
         // The top bit marks an ordinal import, which has no name to compare.
         if entry >> 63 == 0 {
             if let Some(name) = c_string(image, entry as u32 + 2) {
-                if equals_ignore_case(name, function.as_bytes()) {
+                if name.eq_ignore_ascii_case(function.as_bytes()) {
                     let slot = slots + index * 8;
                     // SAFETY: the slot was verified readable above.
                     let target = unsafe { ptr::read_unaligned(slot as *const usize) };
@@ -128,9 +129,4 @@ fn c_string(image: &Image, rva: u32) -> Option<&'static [u8]> {
         len += 1;
     }
     None
-}
-
-/// ASCII case-insensitive equality, which is how the loader compares import names.
-pub fn equals_ignore_case(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.to_ascii_lowercase() == y.to_ascii_lowercase())
 }

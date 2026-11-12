@@ -12,7 +12,7 @@ use core::slice;
 use agent_core::{x64, Image};
 
 /// True when `[addr, addr + len)` is committed, readable and not a guard page.
-pub fn readable(addr: usize, len: usize) -> bool {
+pub(crate) fn readable(addr: usize, len: usize) -> bool {
     addr >= 0x1_0000 && Image::range_readable(addr, len)
 }
 
@@ -23,7 +23,7 @@ pub fn readable(addr: usize, len: usize) -> bool {
 /// game. One walk (a few hundred regions) plus a binary search per candidate costs milliseconds and
 /// answers the same question — and it is fresh for every scan, so a heap region committed since the
 /// last one is still accepted.
-pub fn regions() -> Vec<(usize, usize)> {
+pub(crate) fn regions() -> Vec<(usize, usize)> {
     let mut out: Vec<(usize, usize)> = Vec::new();
     let mut address = 0x1_0000usize;
     // The user-mode half of a 47-bit address space; the walk stops earlier when it runs out.
@@ -78,7 +78,7 @@ pub fn regions() -> Vec<(usize, usize)> {
 }
 
 /// True when `[addr, addr + len)` lies inside one of `regions` (a [`regions`] walk).
-pub fn in_regions(regions: &[(usize, usize)], addr: usize, len: usize) -> bool {
+pub(crate) fn in_regions(regions: &[(usize, usize)], addr: usize, len: usize) -> bool {
     let end = addr.saturating_add(len);
     // The regions are ascending and disjoint: the only candidate is the one containing `addr`.
     let index = regions.partition_point(|(start, _)| *start <= addr);
@@ -95,7 +95,7 @@ pub fn in_regions(regions: &[(usize, usize)], addr: usize, len: usize) -> bool {
 /// addresses (the game objects already known) are searched first and the rest follow by size, and the
 /// total is capped by `budget`. Read-only, and every region in the list was verified committted and
 /// readable when it was built.
-pub fn find_qword(needle: usize, budget: usize, preferred: &[usize]) -> (Option<usize>, usize, usize) {
+pub(crate) fn find_qword(needle: usize, budget: usize, preferred: &[usize]) -> (Option<usize>, usize, usize) {
     let mut regions = regions();
     // The regions holding a known object first, then the smaller ones (they are cheaper to rule out).
     let rank = |region: &(usize, usize)| -> (u8, usize) {
@@ -170,7 +170,7 @@ fn scan_qwords(chunk: &[u8], base: usize, needle: usize) -> Option<usize> {
 
 /// Reads `T` at `addr`, or `None` when the range is not readable. Every game-structure read goes
 /// through this.
-pub fn read<T: Copy>(addr: usize) -> Option<T> {
+pub(crate) fn read<T: Copy>(addr: usize) -> Option<T> {
     if !readable(addr, core::mem::size_of::<T>()) {
         return None;
     }
@@ -179,7 +179,7 @@ pub fn read<T: Copy>(addr: usize) -> Option<T> {
 }
 
 /// A readable byte range of the image.
-pub fn bytes(addr: usize, len: usize) -> Option<&'static [u8]> {
+pub(crate) fn bytes(addr: usize, len: usize) -> Option<&'static [u8]> {
     if !readable(addr, len) {
         return None;
     }
@@ -188,20 +188,20 @@ pub fn bytes(addr: usize, len: usize) -> Option<&'static [u8]> {
 }
 
 /// A NUL-terminated string of at most `max` bytes.
-pub fn cstr(addr: usize, max: usize) -> Option<&'static [u8]> {
+pub(crate) fn cstr(addr: usize, max: usize) -> Option<&'static [u8]> {
     let text = bytes(addr, max)?;
     let len = text.iter().position(|c| *c == 0)?;
     Some(&text[..len])
 }
 
 /// The executable section: its address and bytes.
-pub struct Code {
+pub(crate) struct Code {
     pub va: usize,
     pub bytes: &'static [u8],
 }
 
 /// The image's `.text`, for a scan that walks every byte.
-pub fn code(image: &Image) -> Option<Code> {
+pub(crate) fn code(image: &Image) -> Option<Code> {
     let text = image.text()?;
     Some(Code { va: text.va, bytes: bytes(text.va, text.len)? })
 }
@@ -212,7 +212,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 /// The function (`(start, end)`) holding `va`, from `.pdata`.
-pub fn function_of(image: &Image, va: usize) -> Option<(usize, usize)> {
+pub(crate) fn function_of(image: &Image, va: usize) -> Option<(usize, usize)> {
     Some((image.function_start(va)?, image.function_end(va)?))
 }
 
@@ -220,7 +220,7 @@ pub fn function_of(image: &Image, va: usize) -> Option<(usize, usize)> {
 ///
 /// Component hashes and other immediates are found this way; callers keep only the hits they can
 /// tie to an instruction, a function or an accessor call.
-pub fn scan_u32(image: &Image, targets: &[u32]) -> Vec<Vec<usize>> {
+pub(crate) fn scan_u32(image: &Image, targets: &[u32]) -> Vec<Vec<usize>> {
     let mut out: Vec<Vec<usize>> = targets.iter().map(|_| Vec::new()).collect();
     let Some(code) = code(image) else {
         return out;
@@ -245,7 +245,7 @@ pub fn scan_u32(image: &Image, targets: &[u32]) -> Vec<Vec<usize>> {
 /// A displacement is only accepted when an instruction ending exactly at it decodes to a
 /// RIP-relative `lea`/`mov` form, which is the same rule [`Image::rip_refs`] applies one target at a
 /// time; doing every target in one pass is what keeps attach time reasonable on a 200 MB `.text`.
-pub fn scan_refs(image: &Image, targets: &[usize]) -> Vec<Vec<usize>> {
+pub(crate) fn scan_refs(image: &Image, targets: &[usize]) -> Vec<Vec<usize>> {
     let mut out: Vec<Vec<usize>> = targets.iter().map(|_| Vec::new()).collect();
     if targets.is_empty() {
         return out;
@@ -299,7 +299,7 @@ pub fn scan_refs(image: &Image, targets: &[usize]) -> Vec<Vec<usize>> {
 /// A displacement that is not an instruction start cannot be a call site, so only the four bytes
 /// after an `E8` are read; the scan skips them so a byte inside a displacement is never mistaken for
 /// an opcode.
-pub fn callees(_image: &Image, start: usize, end: usize) -> Vec<usize> {
+pub(crate) fn callees(start: usize, end: usize) -> Vec<usize> {
     let mut out = Vec::new();
     let Some(body) = bytes(start, end.saturating_sub(start)) else {
         return out;
@@ -323,7 +323,7 @@ pub fn callees(_image: &Image, start: usize, end: usize) -> Vec<usize> {
 
 /// `pattern` in `.text` exactly once, at an instruction the image's unwind table names as a function
 /// entry; `None` when it occurs zero or several times (a recipe that is not unique is refused).
-pub fn signature_function(image: &Image, pattern: &[u8]) -> Option<usize> {
+pub(crate) fn signature_function(image: &Image, pattern: &[u8]) -> Option<usize> {
     if pattern.is_empty() {
         return None;
     }
@@ -345,7 +345,7 @@ pub fn signature_function(image: &Image, pattern: &[u8]) -> Option<usize> {
 
 /// The targets of every `lea r8,[rip+disp32]` (`4C 8D 05`) and `lea rdx,[rip+disp32]` (`48 8D 15`)
 /// in `[start, end)` that name a function entry: the code pointers a body hands to a register.
-pub fn lea_function_targets(image: &Image, start: usize, end: usize) -> Vec<usize> {
+pub(crate) fn lea_function_targets(image: &Image, start: usize, end: usize) -> Vec<usize> {
     let mut out = Vec::new();
     let Some(body) = bytes(start, end.saturating_sub(start)) else {
         return out;
@@ -369,16 +369,19 @@ pub fn lea_function_targets(image: &Image, start: usize, end: usize) -> Vec<usiz
     out
 }
 
-/// True when `address` is inside the image and in a non-executable section: a vtable or other data
-/// the game dispatches through, never code.
-pub fn in_image_data(address: usize) -> bool {
-    let image = agent_core::image::game();
+/// True when `address` is inside the game image and in a non-executable section: a vtable or other
+/// data the game dispatches through, never code.
+pub(crate) fn in_image_data(address: usize) -> bool {
+    in_data(agent_core::image::game(), address)
+}
+
+/// True when `address` is inside `image` and in a non-executable section.
+pub(crate) fn in_data(image: &Image, address: usize) -> bool {
     if address < image.base() || address >= image.base() + image.size() {
         return false;
     }
     for section in image.sections() {
-        let name = section.name();
-        if name.starts_with(".text") || matches!(name, ".pdata" | ".rsrc" | ".reloc") {
+        if !section.is_data() {
             continue;
         }
         if address >= section.va && address < section.va + section.len {
@@ -388,8 +391,40 @@ pub fn in_image_data(address: usize) -> bool {
     false
 }
 
+/// `"41 C6 ?? 08"` → wildcard bytes.
+pub(crate) fn parse_pattern(text: &str) -> Vec<Option<u8>> {
+    text.split_ascii_whitespace().map(|token| if token == "??" { None } else { u8::from_str_radix(token, 16).ok() }).collect()
+}
+
+/// The address of the one qword in the image's data equal to `value`, when exactly one is.
+pub(crate) fn unique_data_slot(image: &Image, value: usize) -> Option<usize> {
+    let mut found: Option<usize> = None;
+    for section in image.sections() {
+        if !section.is_data() {
+            continue;
+        }
+        let Some(bytes) = bytes(section.va, section.len) else {
+            continue;
+        };
+        let mut offset = 0usize;
+        while offset + 8 <= bytes.len() {
+            // SAFETY: eight bytes inside a readable section; table slots are 8-byte aligned.
+            let word = unsafe { ptr::read_unaligned(bytes.as_ptr().add(offset) as *const u64) } as usize;
+            if word == value {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(section.va + offset);
+            }
+            offset += 8;
+        }
+    }
+    found
+}
+
+
 /// True when `address` is inside the image's executable section: a code pointer.
-pub fn in_image_code(address: usize) -> bool {
+pub(crate) fn in_image_code(address: usize) -> bool {
     match agent_core::image::game().text() {
         Some(text) => address >= text.va && address < text.va + text.len,
         None => false,
@@ -397,7 +432,7 @@ pub fn in_image_code(address: usize) -> bool {
 }
 
 /// The sites of every direct `call rel32` to `target`.
-pub fn callers(image: &Image, target: usize) -> Vec<usize> {
+pub(crate) fn callers(image: &Image, target: usize) -> Vec<usize> {
     let mut out = Vec::new();
     let Some(code) = code(image) else {
         return out;
@@ -419,7 +454,7 @@ pub fn callers(image: &Image, target: usize) -> Vec<usize> {
 
 /// A MSVC `std::string` at `address`: buffer at `+0x00` (inline when the capacity is under 16, a heap
 /// pointer otherwise), size at `+0x10`, capacity at `+0x18`.
-pub fn std_string(address: usize) -> Option<alloc::string::String> {
+pub(crate) fn std_string(address: usize) -> Option<alloc::string::String> {
     let size = read::<usize>(address + 0x10)?;
     let capacity = read::<usize>(address + 0x18)?;
     if size > 4096 {
@@ -437,13 +472,12 @@ pub fn std_string(address: usize) -> Option<alloc::string::String> {
 
 /// True when `function` appears as an 8-byte pointer in a non-executable section: a vtable slot, or
 /// some other table entry the game dispatches through.
-pub fn is_vtable_slot(image: &Image, function: usize) -> bool {
+pub(crate) fn is_vtable_slot(image: &Image, function: usize) -> bool {
     if function == 0 {
         return false;
     }
     for section in image.sections() {
-        let name = section.name();
-        if name.starts_with(".text") || matches!(name, ".pdata" | ".rsrc" | ".reloc") {
+        if !section.is_data() {
             continue;
         }
         let Some(section_bytes) = bytes(section.va, section.len) else {
@@ -463,7 +497,7 @@ pub fn is_vtable_slot(image: &Image, function: usize) -> bool {
 }
 
 /// True when `[addr, addr + len)` is committed and writable, so a write to game state cannot fault.
-pub fn writable(addr: usize, len: usize) -> bool {
+pub(crate) fn writable(addr: usize, len: usize) -> bool {
     if !readable(addr, len) {
         return false;
     }
@@ -506,7 +540,7 @@ pub fn writable(addr: usize, len: usize) -> bool {
 }
 
 /// True when `[addr, addr + len)` is readable and holds `pattern`.
-pub fn has_pattern(addr: usize, len: usize, pattern: &[u8]) -> bool {
+pub(crate) fn has_pattern(addr: usize, len: usize, pattern: &[u8]) -> bool {
     match bytes(addr, len) {
         Some(window) => contains(window, pattern),
         None => false,
@@ -517,7 +551,7 @@ pub fn has_pattern(addr: usize, len: usize, pattern: &[u8]) -> bool {
 /// followed by packed line/column words, the path ends in `.cpp` and the signature is the C++
 /// prototype. `needle` selects the prototype, and the answer is refused unless exactly one triple
 /// matches.
-pub fn named_function(image: &Image, needle: &[u8]) -> Option<usize> {
+pub(crate) fn named_function(image: &Image, needle: &[u8]) -> Option<usize> {
     let rdata = image.section(".rdata")?;
     let text = image.text()?;
     if !readable(rdata.va, rdata.len) {
@@ -560,7 +594,7 @@ pub fn named_function(image: &Image, needle: &[u8]) -> Option<usize> {
 ///
 /// Read out of the mapped `.rsrc` tree (RT_VERSION / 1 / any language) instead of the file, so no
 /// extra import and no file access is needed.
-pub fn version(image: &Image) -> Option<[u16; 4]> {
+pub(crate) fn version(image: &Image) -> Option<[u16; 4]> {
     let (rva, _size) = image.data_directory(2)?;
     let root = image.base() + rva as usize;
     let (type_dir, is_dir) = resource_entry(root, root, 16)?; // RT_VERSION
@@ -611,7 +645,7 @@ fn resource_entry(root: usize, directory: usize, id: u32) -> Option<(usize, bool
 }
 
 /// The distinct functions that hold any of `sites`, in the order they first appear.
-pub fn functions_of(image: &Image, sites: &[usize]) -> Vec<usize> {
+pub(crate) fn functions_of(image: &Image, sites: &[usize]) -> Vec<usize> {
     let mut out: Vec<usize> = Vec::new();
     for site in sites {
         let Some(start) = image.function_start(*site) else {

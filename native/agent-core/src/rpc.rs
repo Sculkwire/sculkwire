@@ -23,7 +23,7 @@ use crate::queue;
 use crate::sync::SpinLock;
 use crate::{error_message, lock, log, stream, win};
 
-/// Connections served at once, matching `agent.c`'s `MAX_CONN`.
+/// Connections served at once.
 const MAX_CONN: usize = 8;
 /// Longest request line; a longer line is dropped.
 const MAX_LINE: usize = 8192;
@@ -343,10 +343,10 @@ pub extern "system" fn connection_thread(slot: usize) -> u32 {
     let mut line: Vec<u8> = Vec::with_capacity(MAX_LINE);
     let mut chunk = [0u8; CHUNK];
     loop {
-        // SAFETY: reading from a connected socket this thread owns; the buffer and length agree.
         if crate::hub::started().is_some_and(|core| core.stopping()) {
             break;
         }
+        // SAFETY: reading from a connected socket this thread owns; the buffer and length agree.
         let got = unsafe { win::recv(conn.socket.load(Ordering::Acquire), chunk.as_mut_ptr(), CHUNK as i32, 0) };
         if got < 0 {
             // An accepted socket inherits the listener's non-blocking mode, so an idle connection answers
@@ -459,14 +459,14 @@ fn serve_line(slot: usize, conn: &Conn, line: &[u8]) {
     let request: Value = match serde_json::from_slice(line) {
         Ok(value) => value,
         Err(_) => {
-            let response = error_response(&Value::Null, RpcError::new(crate::engine::PARSE_ERROR, error_message(crate::engine::PARSE_ERROR)));
+            let response = error_response(&Value::Null, RpcError::standard(crate::engine::PARSE_ERROR));
             conn_send(conn, &response);
             return;
         }
     };
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let Some(method) = request.get("method").and_then(Value::as_str) else {
-        let response = error_response(&id, RpcError::new(crate::engine::INVALID_REQUEST, error_message(crate::engine::INVALID_REQUEST)));
+        let response = error_response(&id, RpcError::standard(crate::engine::INVALID_REQUEST));
         conn_send(conn, &response);
         return;
     };
@@ -501,7 +501,7 @@ fn dispatch(slot: usize, conn: &Conn, method: &str, params: &Value) -> Result<Va
 
     let core = crate::hub::instance();
     let Some(entry) = core.engine().methods().iter().find(|entry| entry.name == method) else {
-        return Err(RpcError::new(UNKNOWN_METHOD, error_message(UNKNOWN_METHOD)));
+        return Err(RpcError::standard(UNKNOWN_METHOD));
     };
     match entry.thread {
         Thread::Socket => (entry.handler)(core, params),
@@ -603,7 +603,7 @@ pub fn success_response(id: &Value, result: Value) -> Vec<u8> {
 
 pub fn error_response(id: &Value, error: RpcError) -> Vec<u8> {
     let message = match error.code {
-        // The agent's own codes have fixed messages, like agent.c's table; details travel in `data`.
+        // The agent's own codes have fixed messages; details travel in `data`.
         crate::engine::ANCHOR_MISSING
         | crate::engine::NOT_IN_WORLD
         | crate::engine::WRONG_THREAD

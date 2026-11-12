@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::sync::SpinLock;
 
-/// Lines the ring holds, matching `agent.c`'s `STREAM_RING`.
+/// Lines the ring holds.
 pub const RING: u32 = 128;
 
 /// Bytes per formatted line.

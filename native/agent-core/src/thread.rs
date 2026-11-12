@@ -15,8 +15,7 @@ pub fn alive() -> usize {
 
 /// The thread body: `entry(arg)`, with the alive counter kept around it so an unload can wait.
 extern "system" fn counted(arg: usize) -> u32 {
-    // `arg` packs the entry and its own argument: the entry in the high half is impossible (a pointer
-    // needs all 64 bits), so the two are passed as a pair allocated by the caller.
+    // `arg` is the boxed `(entry, argument)` pair `spawn` allocated.
     let pair = arg as *const (extern "system" fn(usize) -> u32, usize);
     // SAFETY: `spawn` allocated this pair and hands it over exactly once.
     let (entry, value) = unsafe { *pair };
@@ -31,9 +30,8 @@ extern "system" fn counted(arg: usize) -> u32 {
 
 /// Starts `entry(arg)` on a new OS thread. The handle is closed here: the agent never joins a thread.
 pub fn spawn(name: &str, entry: extern "system" fn(usize) -> u32, arg: usize) -> bool {
-    // The Win32 thread procedure takes a `void*`; the agent's threads take the small integer they
-    // interpret as a slot or a pointer, so the two signatures are the same call frame.
-    // The thread procedure takes one `void*`, so the entry and its argument travel as a pair.
+    // The thread procedure takes one `void*`, so the entry and its argument travel as a pair. `counted`
+    // takes that pointer as a `usize`: the two signatures are the same call frame.
     let pair = alloc::boxed::Box::into_raw(alloc::boxed::Box::new((entry, arg)));
     let entry_address: extern "system" fn(usize) -> u32 = counted;
     let start: extern "system" fn(*mut c_void) -> win::Dword = unsafe { core::mem::transmute(entry_address) };

@@ -25,7 +25,7 @@
 //! second inside the simulation — the FPS drop. Here the tick only stores two words; the scans are
 //! paced, capped per level, and stop as soon as the chain is complete.
 
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use crate::{live, world};
 
@@ -61,13 +61,11 @@ static PENDING_MINECRAFT: AtomicUsize = AtomicUsize::new(0);
 static PENDING_LEVEL: AtomicUsize = AtomicUsize::new(0);
 /// The recovery thread is running.
 static RUNNING: AtomicUsize = AtomicUsize::new(0);
-/// Scans have been run.
-static ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 
 /// Called from the simulation tick: stores the object pair and returns at once.
 ///
 /// Two atomic stores and a compare, so the tick never waits for a scan.
-pub fn note(minecraft: usize, level: Option<usize>) {
+pub(crate) fn note(minecraft: usize, level: Option<usize>) {
     let Some(level) = level else {
         return;
     };
@@ -147,7 +145,6 @@ extern "system" fn thread_main(_arg: usize) -> u32 {
             ));
             continue;
         }
-        ATTEMPTS.fetch_add(1, Ordering::Relaxed);
         // The role of each object comes from `sim.update` (validated there by the level's command
         // manager); the pair the tick handed over is only used while no role is known yet.
         let (minecraft, level) = match (live::server_object(), live::server_level()) {
@@ -166,10 +163,10 @@ extern "system" fn thread_main(_arg: usize) -> u32 {
         world::recover(level);
         // 2. The command manager, a field of the same level.
         agent_core::log::fmt(format_args!("recover: step 2 live::commands(minecraft 0x{minecraft:x})"));
-        live::commands(minecraft);
+        live::commands();
         // 3. The local server, as a hint only: its `+0xb8` must be an object we actually tick.
         agent_core::log::fmt(format_args!("recover: step 3 live::server_instance(minecraft 0x{minecraft:x})"));
-        live::server_instance(minecraft);
+        live::server_instance();
         // The `Options` object is deliberately **not** looked for here. Its discovery walks the
         // module's `.data` and then the heap, and this thread runs on the world-load path where the
         // renderer and the server are both allocating: a scan of a snapshot region list is one

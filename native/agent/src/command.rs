@@ -116,7 +116,7 @@ static PRIME_DROP_UNTIL: AtomicU64 = AtomicU64::new(0);
 /// `command.prime`: the client is about to type one line in chat only so the origin is captured
 /// (`engine command` right after an attach). That line's own output is kept out of chat, so the bootstrap
 /// leaves no trace for the player.
-pub fn arm_prime() {
+pub(crate) fn arm_prime() {
     PRIME_UNTIL.store(agent_core::win::tick_ms() + PRIME_ARM_MS, Ordering::Release);
 }
 
@@ -180,7 +180,7 @@ const PARAM_KIND: usize = 0x20;
 
 /// What the message hook does for a captured message.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Capture {
+pub(crate) enum Capture {
     /// The message belongs to a command the game is running on its own: forward untouched.
     Off,
     /// Ours, and the line may show feedback: copy it, then let the game add it.
@@ -205,10 +205,10 @@ static QUIET: AtomicBool = AtomicBool::new(false);
 static MESSAGES: SpinLock<Vec<Message>> = SpinLock::new(Vec::new());
 
 /// Runs `line` as the local player on the server thread and reports what the command said.
-pub fn run(minecraft: usize, line: &str, quiet: bool) -> Result<Value, RpcError> {
+pub(crate) fn run(minecraft: usize, line: &str, quiet: bool) -> Result<Value, RpcError> {
     let execute = anchors::command_execute().ok_or_else(|| RpcError::anchor("command.execute"))?;
     let from_data = anchors::command_origin().ok_or_else(|| RpcError::anchor("command.origin"))?;
-    let commands = live::commands(minecraft).ok_or_else(|| {
+    let commands = live::commands().ok_or_else(|| {
         RpcError::anchor("command.commands").with_data(json!({
             "message": "the server has not run a command yet: run one line in chat (t, /help, Return) and retry",
             "wait_for": "command.commands",
@@ -339,7 +339,7 @@ fn summary(messages: &[Message]) -> Value {
 }
 
 /// The `addMessage` hook's body: copies the message while our command runs and reports what to do.
-pub fn capture(_output: usize, key: usize, params: usize, kind: u32) -> Capture {
+pub(crate) fn capture(_output: usize, key: usize, params: usize, kind: u32) -> Capture {
     let ours = OURS.load(Ordering::Acquire);
     let thread = agent_core::win::current_thread_id();
     if ours == 0 || ours != thread {

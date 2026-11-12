@@ -237,7 +237,7 @@ pub trait Engine: Sync + 'static {
     fn detach(&'static self, _core: &'static Core) {}
 }
 
-/* Error codes. The agent's own range follows agent.c; the JSON-RPC ones are standard. */
+/* Error codes. The agent's own range starts at -32001; the JSON-RPC ones are standard. */
 pub const PARSE_ERROR: i32 = -32700;
 pub const INVALID_REQUEST: i32 = -32600;
 pub const UNKNOWN_METHOD: i32 = -32601;

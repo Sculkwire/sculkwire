@@ -21,7 +21,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use agent_core::RpcError;
 use serde_json::{json, Value};
 
-use crate::{anchors, pe};
+use crate::{anchors, live, pe};
 
 /// The `LevelData*` every `Level` holds at `+0x90` (confirmed live on both the client and the server
 /// level of 1.26.63.1).
@@ -72,7 +72,7 @@ static DATA: AtomicUsize = AtomicUsize::new(0);
 static DATA_LEVEL: AtomicUsize = AtomicUsize::new(0);
 
 /// Records the level the simulation step is running.
-pub fn note_level(level: usize) {
+pub(crate) fn note_level(level: usize) {
     if level == 0 {
         return;
     }
@@ -128,7 +128,7 @@ fn pointed(level: usize) -> Option<usize> {
 /// running is known from `Minecraft+0xd0`, and the level data sits somewhere inside it. A scan that
 /// finds nothing (or more than one offset) answers `None` and says why, so `level.data` stays an
 /// honest "missing" instead of a guessed address.
-pub fn recover(level: usize) -> Option<usize> {
+pub(crate) fn recover(level: usize) -> Option<usize> {
     if level == 0 {
         return None;
     }
@@ -230,7 +230,7 @@ fn plausible(candidate: usize) -> bool {
 }
 
 /// The loaded world's name, when it is readable.
-pub fn name() -> Option<alloc::string::String> {
+pub(crate) fn name() -> Option<alloc::string::String> {
     pe::std_string(level_data().ok()? + LEVEL_NAME)
 }
 
@@ -269,7 +269,7 @@ fn gamerules(level_data: usize) -> Option<serde_json::Map<String, Value>> {
         let value = match kind {
             1 => pe::read::<u8>(rule + RULE_VALUE).map(|value| Value::Bool(value != 0)),
             2 => pe::read::<i32>(rule + RULE_VALUE).map(Value::from),
-            3 => pe::read::<f32>(rule + RULE_VALUE).filter(|value| value.is_finite()).map(number),
+            3 => pe::read::<f32>(rule + RULE_VALUE).filter(|value| value.is_finite()).map(live::number),
             _ => None,
         };
         let Some(value) = value else {
@@ -311,12 +311,8 @@ fn spawn(level_data: usize) -> Value {
     Value::Array(out)
 }
 
-fn number(value: f32) -> Value {
-    serde_json::Number::from_f64(value as f64).map(Value::Number).unwrap_or(Value::Null)
-}
-
 /// `world.settings`: what the loaded level itself says.
-pub fn settings() -> Result<Value, RpcError> {
+pub(crate) fn settings() -> Result<Value, RpcError> {
     let level_data = level_data()?;
     let name = pe::std_string(level_data + LEVEL_NAME).map(Value::String).unwrap_or(Value::Null);
     let difficulty = pe::read::<u32>(level_data + LEVEL_DIFFICULTY).map(Value::from).unwrap_or(Value::Null);
@@ -408,7 +404,7 @@ fn game_type() -> Value {
 /// True when the loaded world is one the agent may change: its name starts with `sculkwire-`.
 ///
 /// An unreadable name is a refusal (`level.data`), never an allow.
-pub fn changeable() -> Result<(), RpcError> {
+pub(crate) fn changeable() -> Result<(), RpcError> {
     match name() {
         Some(name) if name.starts_with("sculkwire-") => Ok(()),
         Some(_) => Err(RpcError::invalid_params("only a world named sculkwire-* may be changed")),

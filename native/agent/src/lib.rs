@@ -54,7 +54,7 @@ use methods as m;
 /// this crate built itself faulted inside the game's own lookup.)
 const QUIET_TIMEOUT_MS: u32 = 1_000;
 
-/// The RPC methods, in the order the TypeScript client expects them.
+/// The RPC methods, looked up by name.
 static METHODS: &[Method] = &[
     Method::main("command", m::command),
     Method::socket("command.prime", m::command_prime),
@@ -141,8 +141,7 @@ impl Engine for Retail {
             image.base()
         ));
         let mut anchors = anchors::resolve(image);
-        // The screen/keyboard routes and the input module resolve their own anchors (today: the scene
-        // name getter and the window, and nothing for `input`).
+        // The screen/keyboard routes and the input module resolve their own anchors.
         anchors.extend(ui::resolve(core));
         anchors.extend(input::resolve(core));
         // After `anchors::resolve`: it hooks the entity-system runner to capture the client's context.
@@ -217,7 +216,7 @@ impl Engine for Retail {
         }
         // Nothing to wait for when the command path is not resolved: answering now keeps the drain
         // (the window thread) from blocking for the queue's whole timeout.
-        if live::commands_ready().is_none() {
+        if live::commands().is_none() {
             return Err(RpcError::anchor("command.commands"));
         }
         // No player command seen in this world yet: nothing to replay, so nothing is attempted. The
@@ -239,14 +238,15 @@ impl Engine for Retail {
         server::run(server::Request::Command { line: String::from(line), quiet: true }, QUIET_TIMEOUT_MS).map(|_| ())
     }
 
-    /// The lock's camera gate and key clearing run from the tick (`live::observe`). Per drain, after
+    /// The lock's camera gate needs nothing per frame: `live::observe` re-asserts the agent's view on
+    /// every client tick while the lock owns the camera, which is more often than the game's rotation
+    /// pass runs. Per drain, after
     /// the queue, no handler is running on this thread, so an item-registry scope still open here was
     /// left by a handler the game unwound past, and is closed; and a click waiting for the game's
     /// crosshair pick gets this drain (`click`).
-    fn lock_frame(&'static self, core: &'static Core) {
+    fn lock_frame(&'static self, _core: &'static Core) {
         input::close_abandoned_scopes(usize::MAX);
         input::frame();
-        live::lock_frame(core)
     }
 
     /// The timers this engine installs carry this crate's code as their callback, so they are killed

@@ -44,7 +44,7 @@ const LOOK_EPSILON: f32 = 0.05;
  * simulation `Timer`. All three are the fields the tick loop and the pause setter read.
  * ---------------------------------------------------------------------------------------------- */
 const MC_LEVEL_HOLDER: usize = 0xD0;
-pub const MC_TIMER: usize = 0xE8;
+pub(crate) const MC_TIMER: usize = 0xE8;
 const LEVEL_IN_HOLDER: usize = 0x40;
 const HOLDER_ACTIVE: usize = 0x30;
 
@@ -72,16 +72,17 @@ const MC_COMMANDS_QUEUE_CAP: usize = 0xB8;
 /// 1.26.63.1 process: the server level's `+0x78` and the client level's `+0x60` are the two command
 /// managers (provider with a `Level`-shaped vtable, registry, output sender, empty queue vector),
 /// while `[ServerInstance+0xc8]` is a small reference-counted object with a string in it — the
-/// `<server obj>` of the four `executeCommand` sites is the level, not the `ServerInstance`.
-pub const LEVEL_COMMANDS: [usize; 2] = [0x78, 0x60];
+/// `<server obj>` of the four `executeCommand` sites is the level, not the `ServerInstance`. Only the
+/// server level's is read.
+pub(crate) const LEVEL_COMMANDS: usize = 0x78;
 
 /// `Timer` fields the tick controls touch: the whole-tick count `Timer::advanceTime` produces, the
 /// time scale it multiplies with (engine range 0..10) and the step budget (`< 0` real time, `0`
 /// frozen, `N` = N more ticks).
-pub const TIMER_TICKS: usize = 0x04;
-pub const TIMER_SCALE: usize = 0x0C;
-pub const TIMER_STEP: usize = 0x3C;
-pub const TIMER_MAX_SCALE: f32 = 10.0;
+pub(crate) const TIMER_TICKS: usize = 0x04;
+pub(crate) const TIMER_SCALE: usize = 0x0C;
+pub(crate) const TIMER_STEP: usize = 0x3C;
+pub(crate) const TIMER_MAX_SCALE: f32 = 10.0;
 /// `advanceTime` never runs more than ten ticks for one step (its own catch-up clamp).
 const TIMER_MAX_TICKS: i32 = 10;
 
@@ -129,7 +130,7 @@ const LOOK_DONE: u8 = 2;
 /// The registry accessors the game's own `getStorage` was called with, and the thread each came from.
 ///
 /// This is the accessor the game itself passes to `getStorage(accessor, hash)` — the object inside the
-/// `EntityContext` at `+0x30` (`area-player` §1.1). Capturing it from the getter is what makes the
+/// `EntityContext` at `+0x30`. Capturing it from the getter is what makes the
 /// client tick independent of any one system: every system that reads a component hands it over, many
 /// times per tick, on the thread that owns that registry. Each slot also keeps when it was captured and
 /// the client frame the game last used it in, so a world change cannot leave the tick reading a
@@ -153,7 +154,7 @@ static CLIENT_ACCESSOR: AtomicUsize = AtomicUsize::new(0);
 /// nothing it does not need. An accessor already known only has its frame refreshed (a load and, once
 /// per frame, a store), and a value that could not be an object (below the lowest committed address,
 /// or unreadable) is never stored.
-pub fn note_accessor(accessor: usize) {
+pub(crate) fn note_accessor(accessor: usize) {
     if accessor < 0x1_0000 {
         return;
     }
@@ -200,7 +201,7 @@ fn captures() -> [registries::Capture; ACCESSOR_SLOTS] {
 
 /// Every captured accessor and its thread (debug-rpc's `debug.hit`).
 #[cfg(feature = "debug-rpc")]
-pub fn accessors() -> alloc::vec::Vec<(usize, u32)> {
+pub(crate) fn accessors() -> alloc::vec::Vec<(usize, u32)> {
     ACCESSORS
         .iter()
         .zip(ACCESSOR_THREADS.iter())
@@ -281,7 +282,7 @@ static ROLES_LOGGED: AtomicBool = AtomicBool::new(false);
 /// An object silent for [`registries::OBJECT_SILENT_MS`] belongs to a world that was left: called
 /// again, its role is proved again, and a new object takes its slot when none is free, so a session
 /// that changes worlds many times keeps classifying the current world's server and keeps its stream.
-pub fn observe_tick(minecraft: usize, level: Option<usize>) -> u8 {
+pub(crate) fn observe_tick(minecraft: usize, level: Option<usize>) -> u8 {
     let thread = agent_core::win::current_thread_id();
     let now = agent_core::win::tick_ms();
     let mut slot = None;
@@ -369,7 +370,7 @@ fn log_roles() {
 }
 
 /// The server's `Minecraft*`, once a tick proved which object that is.
-pub fn server_object() -> Option<usize> {
+pub(crate) fn server_object() -> Option<usize> {
     match SERVER_OBJECT.load(Ordering::Acquire) {
         0 => None,
         ptr => Some(ptr),
@@ -377,7 +378,7 @@ pub fn server_object() -> Option<usize> {
 }
 
 /// The integrated server's level, once known.
-pub fn server_level() -> Option<usize> {
+pub(crate) fn server_level() -> Option<usize> {
     let server = server_object()?;
     OBSERVED
         .iter()
@@ -389,7 +390,7 @@ pub fn server_level() -> Option<usize> {
 /// True on the integrated server's own simulation thread: the thread the server object was stepped on.
 /// The client runs the same command entry for a line typed in chat (on its own thread, against its own
 /// level's manager), so a hook that records the server's command manager asks this first.
-pub fn on_server_thread() -> bool {
+pub(crate) fn on_server_thread() -> bool {
     let Some(server) = server_object() else {
         return false;
     };
@@ -400,7 +401,7 @@ pub fn on_server_thread() -> bool {
 }
 
 /// The game objects this process is known to hold, for a scan that should look near them first.
-pub fn known_objects() -> alloc::vec::Vec<usize> {
+pub(crate) fn known_objects() -> alloc::vec::Vec<usize> {
     let mut out = alloc::vec::Vec::new();
     for observed in &OBSERVED {
         for address in [observed.ptr.load(Ordering::Acquire), observed.level.load(Ordering::Acquire)] {
@@ -418,7 +419,7 @@ pub fn known_objects() -> alloc::vec::Vec<usize> {
 }
 
 /// The per-object table for `engine.status`.
-pub fn objects_json() -> serde_json::Value {
+pub(crate) fn objects_json() -> serde_json::Value {
     let mut out = alloc::vec::Vec::new();
     for observed in &OBSERVED {
         let ptr = observed.ptr.load(Ordering::Acquire);
@@ -449,7 +450,7 @@ fn object_is_observed(minecraft: usize) -> bool {
 
 /// The command manager of `level`, if it has one (the server-side discriminator).
 fn commands_of(level: usize) -> Option<usize> {
-    let manager = pe::read::<usize>(level + crate::live::LEVEL_COMMANDS[0])?;
+    let manager = pe::read::<usize>(level + crate::live::LEVEL_COMMANDS)?;
     if manager == 0 || !plausible_commands(manager) {
         return None;
     }
@@ -469,7 +470,7 @@ static LOOK_STATE: AtomicU8 = AtomicU8::new(LOOK_IDLE);
 /// game's own objects are half-built, and a call into one of them then is a fault inside game code.
 static STEADY: AtomicU32 = AtomicU32::new(0);
 /// The frame count a caller waits for before it touches a freshly loaded world.
-pub const STEADY_FRAMES: u32 = 10;
+pub(crate) const STEADY_FRAMES: u32 = 10;
 const STEADY_MAX: u32 = 1 << 20;
 static LOOK_ATTEMPT: AtomicU32 = AtomicU32::new(0);
 
@@ -482,7 +483,7 @@ fn float(bits: u32) -> f32 {
 }
 
 /// A float for the wire, never a non-finite number.
-fn number(value: f32) -> Value {
+pub(crate) fn number(value: f32) -> Value {
     serde_json::Number::from_f64(value as f64).map(Value::Number).unwrap_or(Value::Null)
 }
 
@@ -490,8 +491,17 @@ fn number(value: f32) -> Value {
  * Where we are
  * ---------------------------------------------------------------------------------------------- */
 
+/// `-32002` unless a world this process hosts is loaded with a local player.
+pub(crate) fn require_world() -> Result<(), RpcError> {
+    if in_world() {
+        Ok(())
+    } else {
+        Err(RpcError::not_in_world())
+    }
+}
+
 /// True while a world hosted by this process is loaded and its local player was just read.
-pub fn in_world() -> bool {
+pub(crate) fn in_world() -> bool {
     // The local player's own reading, when the client's tick has produced one: the strongest answer.
     let stamp = LIVE.stamp.load(Ordering::Acquire);
     if LIVE.entity.load(Ordering::Acquire) != 0 && stamp != 0 && agent_core::win::tick_ms().saturating_sub(stamp) < FRESH_MS {
@@ -560,7 +570,7 @@ fn local_proof() -> bool {
 }
 
 /// Records that this process started its own server: a second, independent local-world signal.
-pub fn note_local_server() {
+pub(crate) fn note_local_server() {
     if !LIVE.local_server.swap(true, Ordering::AcqRel) {
         agent_core::log::line("local server started");
     }
@@ -571,7 +581,7 @@ const STEPPING_MS: u64 = 250;
 
 /// True when the server's object stepped within [`STEPPING_MS`]: a request queued now runs on its next
 /// step instead of waiting out a paused world.
-pub fn server_stepping() -> bool {
+pub(crate) fn server_stepping() -> bool {
     let sim = LIVE.sim_stamp.load(Ordering::Acquire);
     sim != 0 && agent_core::win::tick_ms().saturating_sub(sim) < STEPPING_MS
 }
@@ -580,13 +590,6 @@ pub fn server_stepping() -> bool {
  * The server thread's objects: the level being stepped, its command manager and the origin source
  * ---------------------------------------------------------------------------------------------- */
 
-/// The command manager, when the chain to it is already resolved: no scans, no reads beyond the
-/// cached pointer. `quiet_command` uses it to refuse at once instead of queueing a request nobody can
-/// run.
-pub fn commands_ready() -> Option<usize> {
-    crate::anchors::command_commands()
-}
-
 /// The command manager (`MinecraftCommands*`) of the running server: the one the game itself ran a
 /// command with on the server thread (recorded by the `command.run` and `command.execute` hooks).
 ///
@@ -594,7 +597,10 @@ pub fn commands_ready() -> Option<usize> {
 /// shape check below) the replay faulted inside the dispatcher's registry lookup (reading a map head
 /// of 5 000 000 000), so only a pointer the game handed its own command path is
 /// trusted. A player's chat line, which `engine_command` needs anyway for its origin, records it.
-pub fn commands(_minecraft: usize) -> Option<usize> {
+///
+/// No scans, no reads beyond the cached pointer: `quiet_command` uses it to refuse at once instead of
+/// queueing a request nobody can run.
+pub(crate) fn commands() -> Option<usize> {
     crate::anchors::command_commands()
 }
 
@@ -606,7 +612,7 @@ pub fn commands(_minecraft: usize) -> Option<usize> {
 /// * `+0x10` the command registry, and `+0x18` the output sender, both with vtables in image data;
 /// * `+0xa8`/`+0xb0`/`+0xb8` a `std::vector` (begin ≤ end ≤ cap, one allocation at most).
 ///
-/// The live server level answers all five at `+0x78` (0x2f3a130c400 in the 1.26.63.1 session), while
+/// The live server level answers all five at `+0x78` (in the 1.26.63.1 session), while
 /// its neighbour at `+0x60` fails the provider test — which is what makes this check worth having.
 fn plausible_commands(candidate: usize) -> bool {
     if candidate == 0 || !pe::readable(candidate, MC_COMMANDS_QUEUE_CAP + 8) {
@@ -660,7 +666,7 @@ fn plausible_commands(candidate: usize) -> bool {
 ///
 /// The point of finding it this way is that `[ServerInstance+0xb8]` then says **which** `Minecraft`
 /// is the server's — the other one this process ticks is the client's.
-pub fn server_instance(_minecraft: usize) -> Option<usize> {
+pub(crate) fn server_instance() -> Option<usize> {
     if let Some(server) = crate::anchors::server_instance() {
         return Some(server);
     }
@@ -753,12 +759,12 @@ fn scan_server_instance() -> Option<usize> {
 
 /// The `CommandSource` triple `CommandOrigin::fromData` resolves the local player from.
 ///
-/// Live/static finding (`area-commands` §1.4b): the third argument is a **0x18-byte struct**
+/// Live/static finding: the third argument is a **0x18-byte struct**
 /// `{ [level+0x08], [level+0x10], level }`, not a field of the `ServerInstance` — the old
 /// `ServerInstance+0x280` is a `std::string` in this build, and reading it as a source was the bug
 /// that kept `command` at `-32001`. `fromData` reads `src->[0]` (it must be set) and `src->[0x10]`
 /// (the level), then asks that level for the player actor.
-pub fn command_source(minecraft: usize) -> Option<[usize; 3]> {
+pub(crate) fn command_source(minecraft: usize) -> Option<[usize; 3]> {
     let level = level_of(minecraft)?;
     let first = pe::read::<usize>(level + 0x08)?;
     let second = pe::read::<usize>(level + 0x10)?;
@@ -776,7 +782,7 @@ pub fn command_source(minecraft: usize) -> Option<[usize; 3]> {
 ///
 /// `context` is the `EntityContext` the system was called with; its `+0x30` is the component
 /// accessor the system itself uses.
-pub fn observe(context: usize) {
+pub(crate) fn observe(context: usize) {
     if context == 0 {
         return;
     }
@@ -807,7 +813,7 @@ pub fn observe(context: usize) {
 /// ([`registries::stream_fresh`]).
 ///
 /// Returns the entity it published, or 0 when no local player could be read.
-pub fn client_tick() -> u32 {
+pub(crate) fn client_tick() -> u32 {
     // This frame's systems have not run yet: the frame that just ended is the newest one with uses.
     let frame = CLIENT_FRAME.fetch_add(1, Ordering::AcqRel);
     let thread = agent_core::win::current_thread_id();
@@ -833,7 +839,7 @@ pub fn client_tick() -> u32 {
 
 /// The client's registry accessor, once a tick has read the local player through it: the last one a
 /// client tick read the local player through, which is always a registry the game was using then.
-pub fn client_accessor() -> Option<usize> {
+pub(crate) fn client_accessor() -> Option<usize> {
     let accessor = CLIENT_ACCESSOR.load(Ordering::Acquire);
     (accessor != 0).then_some(accessor)
 }
@@ -935,7 +941,7 @@ fn publish(sample: &ecs::Sample) {
 /// `minecraft` is the object the step was called with. The number of ticks this step will run comes
 /// from the simulation timer, so a paused step publishes nothing and a catch-up step publishes one
 /// sample per tick.
-pub fn sim_tick(minecraft: usize) {
+pub(crate) fn sim_tick(minecraft: usize) {
     let Some(core) = agent_core::hub::started() else {
         return;
     };
@@ -1042,7 +1048,7 @@ fn timer_ticks(minecraft: usize) -> i32 {
 /// The newest reading as the wire's `player.state`, or `None` outside a world and until the first
 /// client tick of this agent has published one (right after an attach the slots still hold zeros,
 /// which a caller would take for a real position at the origin).
-pub fn player_state() -> Option<Value> {
+pub(crate) fn player_state() -> Option<Value> {
     if !in_world() || LIVE.published_client() == 0 {
         return None;
     }
@@ -1067,7 +1073,7 @@ pub fn player_state() -> Option<Value> {
 
 /// `input.look`: store the requested view and keep the request open until the next client tick
 /// confirms the game shows it.
-pub fn request_look(core: &'static agent_core::Core, pitch: f32, yaw: f32) -> Result<Value, RpcError> {
+pub(crate) fn request_look(core: &'static agent_core::Core, pitch: f32, yaw: f32) -> Result<Value, RpcError> {
     // The game keeps yaw in (-180, 180] and pitch in [-90, 90]; wrapping here means the value the
     // tick writes is the value the game would store, so the confirmation compares like with like.
     let yaw = wrap_degrees(yaw);
@@ -1193,15 +1199,8 @@ fn close(a: f32, b: f32) -> bool {
     (a - b).abs() <= LOOK_EPSILON
 }
 
-/// `input.lock`'s camera gate, called every frame on the main thread.
-///
-/// Nothing per frame is needed: [`observe`] re-asserts the agent's view on every client tick while
-/// the lock owns the camera, which is more often than the game's rotation pass runs. Movement keys
-/// are not written at all (see [`crate::methods`]), so there is nothing to clear here either.
-pub fn lock_frame(_core: &'static agent_core::Core) {}
-
 /// Consecutive simulation frames this process's own world has been loaded, capped at [`STEADY_MAX`].
-pub fn steady_frames() -> u32 {
+pub(crate) fn steady_frames() -> u32 {
     STEADY.load(Ordering::Acquire)
 }
 
@@ -1212,7 +1211,7 @@ pub fn steady_frames() -> u32 {
 /// while the client's own player has no position yet (`player: … with no readable position yet`), and
 /// acting on the world in that window is what took the game down. A world is settled when the player
 /// can be seen in it.
-pub fn settled() -> bool {
+pub(crate) fn settled() -> bool {
     steady_frames() >= STEADY_FRAMES && has_position()
 }
 

@@ -1,27 +1,5 @@
 //! Player attributes, the player's inventory and the game's `Container` interface.
 //!
-//! # Wiring note (for `lib.rs`, which this module does not edit)
-//!
-//! ```text
-//! mod inventory;
-//!
-//! // Engine::attach, after `anchors::resolve`: `let mut anchors = anchors::resolve(image);`
-//! anchors.extend(inventory::resolve(core));
-//!
-//! // the module's anchors after attach (`engine.status`): in `Retail::anchors`,
-//! // `let mut list = anchors::report(); list.extend(inventory::report());`
-//!
-//! // Engine::methods — every one of these runs on the client's own thread (`Thread::Main`), because
-//! // the component storage may be created by the first lookup and only that thread owns the
-//! // registry:
-//! Method::main("player.attributes", inventory::h_attributes),
-//! Method::main("player.inventory",  inventory::h_inventory),
-//! Method::main("container.get",     inventory::h_container_get),
-//! Method::main("container.open",    inventory::h_container_open),
-//! Method::main("craft.match",       inventory::h_craft_match),
-//! Method::main("craft.run",         inventory::h_craft_run),
-//! ```
-//!
 //! `resolve` must run **after** `anchors::resolve` (it takes the resolved player system as its
 //! recipe's seed) and installs the one hook this module owns, [`capture`], on the entity-system group
 //! runner that hands the client's `EntityContext` to that system. The runner takes the context and
@@ -36,7 +14,7 @@
 //!
 //! # What is proven, and how it is used
 //!
-//! `area-player` and `area-inventory` of the retail 1.26.63 analysis:
+//! From the retail 1.26.63 disassembly:
 //!
 //! * `EntityContext + 0x30` is the component registry the game's own systems pass to the storage
 //!   getter ([`crate::ecs::ACCESSOR`]);
@@ -73,11 +51,8 @@
 //! * that the local player entity carries `ActorOwnerComponent` and that its element is the `Player*`
 //!   (the game's own HUD helper reads it that way, but for the *HUD's* actor context);
 //! * the armour order: `Equipment` slots `0..3` are mapped to head/chest/legs/feet, which is the
-//!   order of the game's per-slot armour helper but not proven for the container itself; the offhand
-//!   is not mapped at all (the game reads slots `4` and `5` of the same container, but which is which
-//!   is not proven, so it stays null);
-//! * the cursor stack: it is not on the inventory object — the item-stack net manager and the
-//!   container model that hold it are not located, so it stays null;
+//!   order of the game's per-slot armour helper but not proven for the container itself;
+//! * the cursor stack: it is not on the inventory object, so `player.inventory` reports it null;
 //! * that `impl + 0xd8` holds the identifier the NBT `Name` gets (the save path reads exactly that
 //!   string; a live `/give` shows whether it is `minecraft:…` or `tile.…`);
 //! * the attribute bounds: `+0x74` is proven as the clamp floor (`maxss`) and `+0x6c` as the value the
@@ -243,7 +218,7 @@ static ARMOR_SITE: AtomicUsize = AtomicUsize::new(0);
 
 /// Finds the two sites of [`ARMOR_PATTERN`] and reads the two slots out of them.
 fn resolve_armor(image: &Image) {
-    let sites = all_sites(image, &[pattern(ARMOR_PATTERN)]).remove(0);
+    let sites = all_sites(image, &[pe::parse_pattern(ARMOR_PATTERN)]).remove(0);
     let [armor_site, toughness_site] = sites[..] else {
         return;
     };
@@ -428,7 +403,7 @@ const ATTRIBUTE_LIMIT: usize = 64;
 
 /// `player.attributes` → one entry per attribute on the player, plus the two derived totals.
 pub(crate) fn h_attributes(_core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
-    world()?;
+    live::require_world()?;
     let (accessor, entity) = context().ok_or_else(|| RpcError::anchor("inventory.context"))?;
     let storage = ecs::storage(accessor, anchors::component_hash("AttributesComponent"))
         .ok_or_else(|| RpcError::anchor("inventory.attributes"))?;
@@ -657,9 +632,8 @@ const ARMOR_PARTS: [&str; 4] = ["head", "chest", "legs", "feet"];
 
 /// One `ItemStack` as the wire spells it, or `None` for an empty slot.
 ///
-/// Only the fields this build can read are present: `item`, `count`, `data` and, for a damageable
-/// item, `durability`. `enchantments`, `name`, `lore` and `contents` live in the stack's user data
-/// compound, whose node layout is not decoded, so they are omitted rather than reported empty.
+/// `item`, `count`, `data` and, for a damageable item, `durability`; plus whatever the stack's user
+/// data compound holds (the name, the lore, the enchantments, a bundle's or shulker's contents).
 pub(crate) fn slot(stack: usize) -> Option<Value> {
     let impl_pointer = pe::read::<usize>(stack + STACK_IMPL)?;
     let count = pe::read::<u8>(stack + STACK_COUNT)?;
@@ -997,13 +971,10 @@ fn slots(container: usize, first: usize, count: usize) -> Vec<Value> {
 /// the game's `getContainerSize`/`getItem`; the armour from the `Equipment` container the
 /// `ActorEquipmentComponent` points at.
 ///
-/// The offhand and the cursor stack stay null. The offhand is not a second pointer on the inventory
-/// object — every read of it goes through the same container at `+0xb8` — and the game's equipment
-/// reads use slots `4` and `5` of the `Equipment` container without a proven mapping to "offhand".
-/// The cursor stack is not on the inventory object either: it is tracked by the item-stack net
-/// manager next to the container model, neither of which is located on this build.
+/// The offhand is slot [`HAND_OFFHAND`] of the hand container. The cursor stack stays null: it is not
+/// on the inventory object but tracked by the item-stack net manager next to the container model.
 pub(crate) fn h_inventory(_core: &'static Core, _params: &Value) -> Result<Value, RpcError> {
-    world()?;
+    live::require_world()?;
     let (accessor, entity) = context().ok_or_else(|| RpcError::anchor("inventory.context"))?;
     let player = player(accessor, entity).ok_or_else(|| RpcError::anchor("inventory.actor"))?;
     inventory(player, accessor, entity)
@@ -1114,7 +1085,7 @@ fn note_once(flag: &AtomicUsize, reason: &str) {
 /* ------------------------------------------------------------------------------------------------
  * Engine links: the virtual slots and fields the block-container and recipe readers use
  *
- * Each link is read out of one code shape of the game's own (`area-recipes-3` §4/§5), never written
+ * Each link is read out of one code shape of the game's own, never written
  * down: a shape that is absent or ambiguous leaves its link at 0 and the method that needs it answers
  * `-32001` naming it.
  * ---------------------------------------------------------------------------------------------- */
@@ -1215,11 +1186,6 @@ const CONTAINER_PATTERN: &str = "48 8B 80 ?? ?? ?? ?? 48 89 F9 FF 15 ?? ?? ?? ??
 const DURABILITY_PATTERN: &str =
     "48 8B 06 48 8B 80 ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 48 89 F1 FF 15 ?? ?? ?? ?? 48 89 C1 48 85 C0 48 89 D8 0F 84 ?? ?? ?? ?? F3 0F 2A 41 ??";
 
-/// `"41 C6 ?? 08"` → wildcard bytes.
-fn pattern(text: &str) -> Vec<Option<u8>> {
-    text.split_ascii_whitespace().map(|token| if token == "??" { None } else { u8::from_str_radix(token, 16).ok() }).collect()
-}
-
 /// Every place each pattern occurs in `.text` (at most 64), in one pass.
 pub(crate) fn all_sites(image: &Image, patterns: &[Vec<Option<u8>>]) -> Vec<Vec<usize>> {
     let mut found: Vec<Vec<usize>> = patterns.iter().map(|_| Vec::new()).collect();
@@ -1281,7 +1247,7 @@ fn resolve_links(image: &Image) {
         CONTAINER_PATTERN,
         DURABILITY_PATTERN,
     ];
-    let patterns: Vec<Vec<Option<u8>>> = texts.iter().map(|text| pattern(text)).collect();
+    let patterns: Vec<Vec<Option<u8>>> = texts.iter().map(|text| pe::parse_pattern(text)).collect();
     let sites = all_sites(image, &patterns);
     let unique = |index: usize| (sites[index].len() == 1).then(|| sites[index][0]);
     let store = |index: usize, value: Option<usize>| {
@@ -1390,7 +1356,7 @@ pub(crate) fn h_container_get(core: &'static Core, params: &Value) -> Result<Val
         Some(name) => Value::from(DIMENSIONS.iter().find(|(known, _)| *known == name).map(|(_, id)| *id).unwrap_or(0)),
         None => Value::Null,
     };
-    world()?;
+    live::require_world()?;
     for index in [L_GET_PLAYER, L_ACTOR_DIMENSION, L_CHUNK_AT, L_MIN_HEIGHT, L_BLOCK_ENTITY, L_GET_CONTAINER, L_ACTOR_LEVEL] {
         if link(index).is_none() {
             return Err(RpcError::anchor(LINK_NAMES[index]));
@@ -1735,12 +1701,12 @@ pub(crate) struct Recipe {
 
 impl Recipe {
     /// The ingredients that take an item (shaped recipes keep empty cells).
-    pub fn needed(&self) -> impl Iterator<Item = &(Ingredient, u16)> {
+    pub(crate) fn needed(&self) -> impl Iterator<Item = &(Ingredient, u16)> {
         self.ingredients.iter().filter(|(ingredient, _)| !matches!(ingredient, Ingredient::Empty))
     }
 
     /// True when the recipe fits the inventory's 2x2 grid.
-    pub fn fits_small(&self) -> bool {
+    pub(crate) fn fits_small(&self) -> bool {
         if self.shapeless {
             self.needed().count() <= 4
         } else {
@@ -1749,16 +1715,16 @@ impl Recipe {
     }
 
     /// The recipe's result as the wire spells a slot.
-    pub fn result(&self) -> Value {
+    pub(crate) fn result(&self) -> Value {
         self.results.first().copied().and_then(slot).unwrap_or(Value::Null)
     }
 
     /// The first result's identifier.
-    pub fn result_id(&self) -> Option<String> {
+    pub(crate) fn result_id(&self) -> Option<String> {
         self.result().get("item").and_then(Value::as_str).map(String::from)
     }
 
-    pub fn describe(&self) -> Value {
+    pub(crate) fn describe(&self) -> Value {
         json!({
             "id": self.id,
             "type": if self.shapeless { "shapeless" } else { "shaped" },
@@ -1942,7 +1908,7 @@ type Grid = [[Option<String>; 3]; 3];
 /// inventory's 2x2 grid can make. No match is `{result: null, recipe: null}`.
 pub(crate) fn h_craft_match(_core: &'static Core, params: &Value) -> Result<Value, RpcError> {
     let request = grid_shape(params)?;
-    world()?;
+    live::require_world()?;
     let table = params.get("table").and_then(Value::as_bool).unwrap_or(false);
     let recipes = recipes(Some(CRAFTING_TAG))?;
     let items = item_index(&recipes);
@@ -2150,15 +2116,6 @@ fn item_id(value: &Value) -> Result<Option<String>, RpcError> {
 /* ------------------------------------------------------------------------------------------------
  * Shared
  * ---------------------------------------------------------------------------------------------- */
-
-/// `-32002` unless a world this process hosts is loaded with a local player.
-fn world() -> Result<(), RpcError> {
-    if live::in_world() {
-        Ok(())
-    } else {
-        Err(RpcError::not_in_world())
-    }
-}
 
 /// A float for the wire, never a non-finite number.
 fn number(value: Option<f32>) -> Value {

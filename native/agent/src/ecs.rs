@@ -18,7 +18,7 @@ use crate::{anchors, pe};
 /// Offset of the component accessor inside an `EntityContext`.
 /// The player system reaches its accessor as `lea rbx,[rdx+0x30]`, where `rdx` is its second
 /// argument.
-pub const ACCESSOR: usize = 0x30;
+pub(crate) const ACCESSOR: usize = 0x30;
 
 /// `entt::sparse_set` fields the element walk reads: the sparse page-pointer vector (`begin`/`end`)
 /// and the payload page-pointer vector. Observed in the storage getter's own body (`+0x08`/`+0x10`
@@ -29,45 +29,45 @@ const PACKED_PAGES: usize = 0x50;
 
 /// The flat `u32` entity-id vector every storage keeps beside the page arrays (`begin`/`end`). The
 /// entity count is `(end - begin) / 4`, which is how view construction counts matches.
-const ENTITY_BEGIN: usize = 0x20;
-const ENTITY_END: usize = 0x28;
+pub(crate) const ENTITY_BEGIN: usize = 0x20;
+pub(crate) const ENTITY_END: usize = 0x28;
 
 /// `StateVectorComponent` element stride: three `Vec3` (position, previous, delta). Observed as
 /// `lea rax,[rcx+rcx*8]; shl eax,2` (×36) at the component's lookup site.
-pub const STATE_VECTOR_STRIDE: usize = 0x24;
+pub(crate) const STATE_VECTOR_STRIDE: usize = 0x24;
 /// Position inside a `StateVectorComponent` element (first of the three `Vec3`). For a player this is
 /// the eye (the feet plus the player's height offset); other actors keep their feet here.
-pub const STATE_POSITION: usize = 0x00;
+pub(crate) const STATE_POSITION: usize = 0x00;
 /// Per-tick movement inside a `StateVectorComponent` element (third `Vec3`).
-pub const STATE_DELTA: usize = 0x18;
+pub(crate) const STATE_DELTA: usize = 0x18;
 
 /// `AABBShapeComponent` element: the collision box (`min` `Vec3`, `max` `Vec3`) and its
 /// `[width, height]`, 0x20 bytes. The box's `min.y` is where the feet stand; every reading is
 /// cross-checked against the size and the state vector, so a moved layout answers `None`.
-pub const AABB_STRIDE: usize = 0x20;
+pub(crate) const AABB_STRIDE: usize = 0x20;
 const AABB_MIN: usize = 0x00;
 const AABB_MAX: usize = 0x0c;
 const AABB_SIZE: usize = 0x18;
 
 /// `ActorRotationComponent` element stride: two `Vec2` (rotation, previous rotation), observed as
 /// `shl ecx,4` at the component's lookup sites.
-pub const ROTATION_STRIDE: usize = 0x10;
+pub(crate) const ROTATION_STRIDE: usize = 0x10;
 /// Pitch inside an `ActorRotationComponent` element: the rotation-term pass accumulates into `+0x00`
 /// and clamps it to ±90 with the same instruction pair that wraps `+0x04` modulo 360.
-pub const ROTATION_PITCH: usize = 0x00;
+pub(crate) const ROTATION_PITCH: usize = 0x00;
 /// Yaw inside an `ActorRotationComponent` element: `+0x04`, wrapped with `fmodf(…, 360)` and ±180.
-pub const ROTATION_YAW: usize = 0x04;
+pub(crate) const ROTATION_YAW: usize = 0x04;
 /// The movement system runs once per entity group, so one client tick can reach it twice. The
 /// per-tick checks run at most once per this many milliseconds (a tick is 50 ms at 20 tps).
-pub const CLIENT_TICK_WINDOW_MS: u64 = 30;
+pub(crate) const CLIENT_TICK_WINDOW_MS: u64 = 30;
 
 /// `ActorUniqueIDComponent` element stride (one `u64`); `u64::MAX` is the "no live actor" value the
 /// game's own presence helper compares against.
-pub const UNIQUE_STRIDE: usize = 0x08;
+pub(crate) const UNIQUE_STRIDE: usize = 0x08;
 
 /// The local player's state for one simulation tick.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Sample {
+pub(crate) struct Sample {
     pub entity: u32,
     /// The state vector's position: the player's eye, where reach and aim are measured from.
     pub position: [f32; 3],
@@ -82,7 +82,7 @@ pub struct Sample {
 
 /// One tick's reading of the local player, plus the rotation element it was read from (the address a
 /// view change has to write).
-pub struct Reading {
+pub(crate) struct Reading {
     pub sample: Sample,
     rotation_element: Option<usize>,
 }
@@ -93,7 +93,7 @@ impl Reading {
     /// The game's camera copies into this component every frame, so a write is only useful from the
     /// tick the game is about to consume; the caller re-reads on the next tick to see whether it
     /// stuck (see [`crate::live`]).
-    pub fn write_look(&self, pitch: f32, yaw: f32) -> bool {
+    pub(crate) fn write_look(&self, pitch: f32, yaw: f32) -> bool {
         let Some(element) = self.rotation_element else {
             return false;
         };
@@ -109,7 +109,7 @@ impl Reading {
     }
 
     /// Reads the rotation back, for the confirmation on the following tick.
-    pub fn read_look(&self) -> Option<[f32; 2]> {
+    pub(crate) fn read_look(&self) -> Option<[f32; 2]> {
         read_look(self.rotation_element?)
     }
 }
@@ -119,7 +119,7 @@ impl Reading {
 /// # Safety
 /// The game's storage getter creates a storage when the registry has none. Call this only from the
 /// tick that owns the entity context ([`crate::hooks::player_system`]).
-pub fn storage(accessor: usize, hash: u32) -> Option<usize> {
+pub(crate) fn storage(accessor: usize, hash: u32) -> Option<usize> {
     let getter = anchors::getter()?;
     // SAFETY: the getter is the game's own generic `getStorage(registry, hash)`, called with the
     // same accessor and hash argument shape its own systems use (`rcx = accessor`, `edx = hash`).
@@ -156,7 +156,7 @@ fn sane(storage: usize) -> bool {
 }
 
 /// True when `entity` carries the component `storage` holds, for components with no payload.
-pub fn contains(storage: usize, entity: u32) -> bool {
+pub(crate) fn contains(storage: usize, entity: u32) -> bool {
     index_of(storage, entity).is_some()
 }
 
@@ -185,7 +185,7 @@ fn index_of(storage: usize, entity: u32) -> Option<u32> {
 }
 
 /// The element of `entity` in `storage`, following the game's own entity→element walk.
-pub fn element(storage: usize, entity: u32, stride: usize) -> Option<usize> {
+pub(crate) fn element(storage: usize, entity: u32, stride: usize) -> Option<usize> {
     let index = index_of(storage, entity)?;
     let packed_pages = pe::read::<usize>(storage + PACKED_PAGES)?;
     if packed_pages == 0 {
@@ -199,12 +199,12 @@ pub fn element(storage: usize, entity: u32, stride: usize) -> Option<usize> {
 }
 
 /// The local player storage as the tick sees it: the storage address, how many entities carry the
-/// flag, and the first id — the read `area-player` describes (`+0x20`/`+0x28` is the packed id
+/// flag, and the first id (`+0x20`/`+0x28` is the packed id
 /// vector, and a single-player client holds exactly one id there).
 ///
 /// # Safety
 /// As [`storage`]: only from the game's own tick.
-pub fn local_players(accessor: usize) -> Option<(usize, usize, u32)> {
+pub(crate) fn local_players(accessor: usize) -> Option<(usize, usize, u32)> {
     let local = storage(accessor, anchors::component_hash("LocalPlayerComponent"))?;
     let begin = pe::read::<usize>(local + ENTITY_BEGIN)?;
     let end = pe::read::<usize>(local + ENTITY_END)?;
@@ -220,7 +220,7 @@ pub fn local_players(accessor: usize) -> Option<(usize, usize, u32)> {
 ///
 /// # Safety
 /// As [`storage`]: only from the game's own tick.
-pub fn read(accessor: usize) -> Option<Reading> {
+pub(crate) fn read(accessor: usize) -> Option<Reading> {
     let local = storage(accessor, anchors::component_hash("LocalPlayerComponent"))?;
     let state_vector = storage(accessor, anchors::component_hash("StateVectorComponent"))?;
     let (entity, at) = local_entity(local, state_vector)?;
@@ -296,7 +296,7 @@ fn rotation_of(element: usize) -> Option<[f32; 2]> {
 }
 
 /// `[pitch, yaw]` of a rotation element, unvalidated.
-pub fn read_look(element: usize) -> Option<[f32; 2]> {
+pub(crate) fn read_look(element: usize) -> Option<[f32; 2]> {
     let pitch = pe::read::<f32>(element + ROTATION_PITCH)?;
     let yaw = pe::read::<f32>(element + ROTATION_YAW)?;
     (pitch.is_finite() && yaw.is_finite()).then_some([pitch, yaw])

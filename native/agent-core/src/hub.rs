@@ -196,8 +196,6 @@ pub struct Core {
     /// The stack address of the running drain's frame. A later entry on the same thread at this depth
     /// or above proves that frame is gone (a C++ exception the game caught unwound past it).
     drain_frame: AtomicUsize,
-    /// Drains refused because one was already running.
-    reentered: AtomicU64,
     attached: AtomicBool,
     frames: AtomicU64,
     ticks: AtomicU64,
@@ -217,11 +215,6 @@ const DRAIN_INTERVAL_US: u64 = 2_000;
 /// handler is bounded far below this (`tick.step` runs at most 600 ticks), so this only ever fires for a
 /// handler that faulted and left its frame without clearing the flag.
 const DRAIN_STALE_MS: u64 = 120_000;
-
-/// Milliseconds since the process started, for the drain's own timing.
-fn now_ms() -> u64 {
-    win::tick_ms()
-}
 
 /// Hook sites reported by `engine.status.hooks`.
 const SITES: usize = 24;
@@ -308,7 +301,6 @@ pub fn init(engine: &'static dyn Engine) -> &'static Core {
         drain_since: AtomicU64::new(0),
         drain_releases: AtomicU64::new(0),
         drain_frame: AtomicUsize::new(0),
-        reentered: AtomicU64::new(0),
         attached: AtomicBool::new(false),
         frames: AtomicU64::new(0),
         ticks: AtomicU64::new(0),
@@ -418,11 +410,11 @@ impl Core {
         // stack always sits at a higher address than any drain nested inside it.
         let marker = 0u8;
         let frame = core::hint::black_box(&marker) as *const u8 as usize;
-        // A drain that has been "running" for a minute is not running: its handler faulted, and the
+        // A drain that has been "running" for two minutes is not running: its handler faulted, and the
         // exception skipped the guard's `Drop` (an SEH unwind does not run Rust destructors), so this
         // flag would refuse every main-thread request from then on. Release it and fail the request it
-        // still holds; a handler that legitimately runs for a minute (`tick.step` is capped well under
-        // it) is the only thing this can cut short, and it says so in the log. The same thread entering
+        // still holds; a handler that legitimately runs for two minutes (`tick.step` is capped well
+        // under it) is the only thing this can cut short, and it says so in the log. The same thread entering
         // again at the held drain's depth or above is proof at once: the game threw a C++ exception
         // through the handler and caught it in its own frame, so the held drain no longer exists.
         let unwound = self.draining.load(Ordering::Acquire)
@@ -430,17 +422,16 @@ impl Core {
             && self.drain_frame.load(Ordering::Acquire) != 0
             && frame >= self.drain_frame.load(Ordering::Acquire)
             && self.release_drain("a drain whose frame the game unwound (an exception it caught above the handler)");
-        if unwound || self.stale_drain(now_ms()) {
+        if unwound || self.stale_drain(win::tick_ms()) {
             // Released: this drain takes the place of the one that never returned.
             self.draining.store(true, Ordering::Release);
         } else if self.draining.swap(true, Ordering::AcqRel) {
             // A handler may call game code that pumps the message loop again, which would run a drain
             // inside a drain: one at a time, every other entry is refused.
-            self.reentered.fetch_add(1, Ordering::Relaxed);
             return;
         }
         self.drain_thread.store(thread, Ordering::Release);
-        self.drain_since.store(now_ms(), Ordering::Release);
+        self.drain_since.store(win::tick_ms(), Ordering::Release);
         self.drain_frame.store(frame, Ordering::Release);
         let _guard = DrainGuard(self);
         if message_loop {

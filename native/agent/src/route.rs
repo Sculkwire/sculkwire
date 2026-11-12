@@ -381,7 +381,7 @@ fn binder_table(image: &Image) -> Option<(usize, usize)> {
         }
         target_type = Some(start);
     }
-    let slot = unique_data_slot(image, target_type?)?;
+    let slot = pe::unique_data_slot(image, target_type?)?;
     let table = slot - TARGET_TYPE_SLOT;
     if !(0..IMPL_SLOTS).all(|index| pe::read::<usize>(table + index * 8).is_some_and(pe::in_image_code)) {
         return None;
@@ -445,31 +445,4 @@ fn stores_fingerprint(from: usize, register: u8) -> bool {
     };
     stores().any(|(b, source, disp)| b == base && source == base && disp as usize == ROUTER_BOUND_THIS)
         && stores().any(|(b, _, disp)| b == base && disp as usize == ROUTER_FUNCTION_IMPL)
-}
-
-/// The address of the one qword in the image's data equal to `value`, when exactly one is.
-pub(crate) fn unique_data_slot(image: &Image, value: usize) -> Option<usize> {
-    let mut found: Option<usize> = None;
-    for section in image.sections() {
-        let name = section.name();
-        if name.starts_with(".text") || matches!(name, ".pdata" | ".rsrc" | ".reloc") {
-            continue;
-        }
-        let Some(bytes) = pe::bytes(section.va, section.len) else {
-            continue;
-        };
-        let mut offset = 0usize;
-        while offset + 8 <= bytes.len() {
-            // SAFETY: eight bytes inside a readable section; table slots are 8-byte aligned.
-            let word = unsafe { core::ptr::read_unaligned(bytes.as_ptr().add(offset) as *const u64) } as usize;
-            if word == value {
-                if found.is_some() {
-                    return None;
-                }
-                found = Some(section.va + offset);
-            }
-            offset += 8;
-        }
-    }
-    found
 }

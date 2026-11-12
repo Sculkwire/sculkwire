@@ -74,12 +74,12 @@
 //!
 //! # Timing
 //!
-//! A click is not one reading either way: the game handles a button edge at the cursor it already has
+//! A click is not one reading: the game handles a button edge at the cursor it already has
 //! and only then applies the reading's position, so a click's first [`ARM_SAMPLES`] readings carry the
 //! new position with the button up, and the press goes down after that (live, a press in the same
 //! reading as the move lit the target up and pressed nothing).
 //!
-//! A click cannot be one reading: a consumer compares the reading it holds with the previous one, so a
+//! Nor is a press: a consumer compares the reading it holds with the previous one, so a
 //! button that is down and up in the same sample is no press at all. A queued press is therefore held
 //! for [`BUTTON_HOLD_MS`] *and* until at least [`BUTTON_SAMPLES`] readings have reported it down, and
 //! released by a later reading — or by [`frame`], so a game that stops polling cannot leave a button
@@ -283,16 +283,6 @@ type ReleaseFn = unsafe extern "system" fn(usize) -> u32;
 /// `bool hasOverrunOccurred` in the fourth register (passed through as it came).
 type ReadingCallback = unsafe extern "system" fn(u64, usize, usize, usize);
 
-#[link(name = "user32", kind = "raw-dylib")]
-extern "system" {
-    /// The OS pointer, in screen pixels: where the game's own cursor is before the agent moves it, and
-    /// the space the runtime reports the absolute mouse position in.
-    fn GetCursorPos(point: *mut i32) -> win::Bool;
-    /// Moves the OS pointer, so the runtime publishes a mouse reading for the position the agent asked
-    /// for (see [`warp`]).
-    fn SetCursorPos(x: i32, y: i32) -> win::Bool;
-}
-
 /* ------------------------------------------------------------------------------------------------
  * State
  * ---------------------------------------------------------------------------------------------- */
@@ -447,8 +437,6 @@ static KEY_SAMPLES: AtomicU64 = AtomicU64::new(0);
 /// Why the last probe refused, for `engine.status` and the log: empty once a version is hooked.
 static PROBE_NOTE: SpinLock<&'static str> = SpinLock::new("");
 
-/// The client area's top-left in screen pixels: the engines pass it, every coordinate here is a client
-/// pixel and the runtime reports the absolute position in screen pixels.
 /// `tick_ms` of the game's last mouse reading through a hooked interface (0: none yet).
 static LAST_SAMPLE_MS: AtomicU64 = AtomicU64::new(0);
 /// The last queued click: its number and what became of it ([`CLICK_QUEUED`] … [`CLICK_DROPPED`]).
@@ -458,6 +446,8 @@ const CLICK_QUEUED: u32 = 1;
 const CLICK_PRESSED: u32 = 2;
 const CLICK_RELEASED: u32 = 3;
 const CLICK_DROPPED: u32 = 4;
+/// The client area's top-left in screen pixels: the engines pass it, every coordinate here is a client
+/// pixel and the runtime reports the absolute position in screen pixels.
 static ORIGIN_X: AtomicI32 = AtomicI32::new(0);
 static ORIGIN_Y: AtomicI32 = AtomicI32::new(0);
 
@@ -851,22 +841,6 @@ pub fn key(vk: u8, down: bool) -> bool {
         state.key_up(vk);
     }
     true
-}
-
-/// One key press: down now, up after [`KEY_HOLD_MS`].
-pub fn press_key(vk: u8) -> bool {
-    if !ready() {
-        return false;
-    }
-    let now = win::tick_ms();
-    let mut state = STATE.lock();
-    state.key_down(vk, now);
-    true
-}
-
-/// The keys the agent holds, for a caller that reports them.
-pub fn held_keys() -> usize {
-    STATE.lock().key_len
 }
 
 /// The state a caller can report: what is hooked, and what the readings have seen.
@@ -1937,7 +1911,7 @@ fn warp(x: i32, y: i32) {
     }
     // SAFETY: no state is involved; a refused warp (gamescope, a locked session) is ignored.
     unsafe {
-        SetCursorPos(ORIGIN_X.load(Ordering::Acquire) + x, ORIGIN_Y.load(Ordering::Acquire) + y);
+        win::SetCursorPos(ORIGIN_X.load(Ordering::Acquire) + x, ORIGIN_Y.load(Ordering::Acquire) + y);
     }
 }
 
@@ -1946,7 +1920,7 @@ fn warp(x: i32, y: i32) {
 fn pointer_client() -> Option<(i32, i32)> {
     let mut point = [0i32; 2];
     // SAFETY: `point` is a `POINT` (two `LONG`s).
-    let ok = unsafe { GetCursorPos(point.as_mut_ptr()) };
+    let ok = unsafe { win::GetCursorPos(point.as_mut_ptr()) };
     if ok == 0 {
         return None;
     }
