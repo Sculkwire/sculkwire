@@ -30,7 +30,7 @@ export function toDiagnostic(f: Finding): Diagnostic {
 
 export interface Pack {
   kind: PackKind;
-  /** Absolute directory the files are read from (for Regolith builds: the build output). */
+  /** Absolute directory the files are read from (Regolith projects with filters: rgl's last build output). */
   dir: string;
   /** Pack-relative paths, POSIX, sorted. */
   files: string[];
@@ -38,7 +38,7 @@ export interface Pack {
   info: PackInfo;
   /** Project-relative directory diagnostics are reported under (POSIX, "" for the root). */
   displayDir: string;
-  /** Absolute source directory when `dir` is a build output (Regolith); files absent there are generated. */
+  /** Absolute source directory when `dir` is rgl's build output (Regolith); files absent there are generated. */
   sourceDir?: string;
   /** manifest.json parsed, when it is a JSON object. */
   manifest?: Record<string, unknown>;
@@ -169,7 +169,7 @@ export class Context {
   }
 
   /**
-   * Report a diagnostic located in a pack file. For Regolith build output the path is the source path; when
+   * Report a diagnostic located in a pack file. For rgl's build output the path is the source path; when
    * the file was generated or changed by filters the message says so (positions then refer to the build).
    */
   async add(pack: Pack, rel: string, d: Omit<Finding, "file">): Promise<void> {

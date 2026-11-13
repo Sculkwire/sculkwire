@@ -8,7 +8,6 @@ import { type CliCommand, err, out } from "../core/cli.ts";
 import { ExitCode } from "../core/diagnostic.ts";
 import { errorMessage } from "../core/errors.ts";
 import { cacheDir } from "../core/paths.ts";
-import { findRgl } from "../core/regolith.ts";
 import { findInstalls } from "../gamefiles/install.ts";
 import { ensureFirewallRules, FIREWALL_RULE, type FirewallResult, firewallRulesPresent } from "../runtime/bds/firewall.ts";
 import { listInstalled } from "../runtime/bds/install.ts";
@@ -39,11 +38,6 @@ const FIXES = {
     get linux() {
       return `${linuxNodeInstall() ?? "your distribution's package manager"} if it ships Node.js 22.18 or newer, otherwise https://nodejs.org/en/download`;
     },
-  },
-  rgl: {
-    win32: "irm rgl.ink0rr.dev/install.ps1 | iex (installs %USERPROFILE%\\.rgl\\bin\\rgl.exe)",
-    darwin: "curl -fsSL rgl.ink0rr.dev/install.sh | sh (installs ~/.rgl/bin/rgl)",
-    linux: "curl -fsSL rgl.ink0rr.dev/install.sh | sh (installs ~/.rgl/bin/rgl, needs unzip)",
   },
   bds: {
     win32: "sculk bds install --accept-eula",
@@ -113,16 +107,6 @@ export async function runChecks(): Promise<Check[]> {
     fix: fixFor("bds"),
   });
 
-  // The validator's own lookup, so doctor reports the rgl that validate_pack and bds_check will run.
-  const rgl = findRgl();
-  checks.push({
-    name: "rgl",
-    level: "feature",
-    ok: rgl !== undefined,
-    detail: rgl ? `rgl ${rgl}` : "rgl not found in ~/.local/bin, ~/.rgl/bin or PATH, Regolith projects with filters cannot be built",
-    fix: fixFor("rgl"),
-  });
-
   const firewall = firewallCheck(await firewallRulesPresent());
   if (firewall) checks.push(firewall);
   return checks;
@@ -135,7 +119,7 @@ export function formatCheck(c: Check): string {
 
 const doctor: CliCommand = {
   name: "doctor",
-  summary: "Check the machine: Node, game client, BDS, rgl and, on Windows, the firewall rules",
+  summary: "Check the machine: Node, game client, BDS and, on Windows, the firewall rules",
   async run(args) {
     if (args.length) {
       err("usage: sculk doctor");

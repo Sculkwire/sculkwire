@@ -136,8 +136,8 @@ export interface IndexedPack {
   /** Text of small text files, for locating needles. */
   texts: Map<string, string>;
   /**
-   * Set when `pack.dir` is a Regolith build: maps a pack file and a range in the built text to the file the user
-   * edits (see `indexBuiltPack`). Without it a pack file is reported as `projectPath(pack, rel)`.
+   * Set when `pack.dir` is rgl's output for a Regolith project: maps a pack file and a range in the built text to
+   * the file the user edits (see `indexBuiltPack`). Without it a pack file is reported as `projectPath(pack, rel)`.
    */
   toSource?: (rel: string, range?: Range) => SourceLocation;
 }

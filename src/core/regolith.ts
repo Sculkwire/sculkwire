@@ -1,56 +1,15 @@
 /**
- * Regolith/rgl projects: when the chosen profile runs filters, build a copy of the project into a temp dir with
- * `rgl run` (export forced to `exact` paths inside the temp dir) so the validator sees what the game will load;
- * diagnostics are reported under the source pack paths. Without filters the source packs are validated as-is.
+ * Regolith/rgl projects. sculkwire never runs rgl: the build is the project's own business (its profile, its flags,
+ * its `rgl watch`). When the profile runs filters, the source packs hold the filter inputs and not what the game
+ * loads, so every tool reads what rgl last built instead: `.regolith/tmp/BP` and `.regolith/tmp/RP`, which rgl leaves
+ * behind after every `rgl run` and `rgl watch`, whatever the profile, the flags or the export target (`regolithOutput`).
+ * Without filters the source packs are used as they are.
  */
 import { existsSync } from "node:fs";
-import { cp, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
-import { join, posix, relative, resolve, sep, win32 } from "node:path";
+import { lstat, readFile, realpath } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { parse as parseJsonc } from "jsonc-parser";
 import { isPlainObject, type JsonObject } from "./json.ts";
-import { run, type RunOptions } from "./process.ts";
-import { findOnPath } from "./which.ts";
-
-export interface RegolithBuild {
-  profile: string;
-  rgl: string;
-  /** Temp dir to delete when done. */
-  workDir: string;
-  /** Built pack dirs keyed by the configured source dir (absolute). */
-  outputs: { source: string; built: string }[];
-}
-
-export interface RegolithFailure {
-  profile: string;
-  /** `unavailable`: no rgl; `unreadable`: config.json cannot be read; `failed`: `rgl run` failed. */
-  kind: "unavailable" | "unreadable" | "failed";
-  message: string;
-}
-
-
-const SKIP_TOP: Record<string, true> = { ".git": true, build: true, node_modules: true, dist: true };
-
-/**
- * Where rgl lives outside PATH, in order: `~/.local/bin`, then rgl's installer location `~/.rgl/bin`. Windows uses
- * `rgl.exe` under `%USERPROFILE%`.
- */
-export function rglCandidates(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, home: string): string[] {
-  const win = platform === "win32";
-  const p = win ? win32 : posix;
-  const exe = win ? "rgl.exe" : "rgl";
-  const homeDir = (win ? env.USERPROFILE : undefined) || home;
-  return [p.join(homeDir, ".local", "bin", exe), p.join(homeDir, ".rgl", "bin", exe)];
-}
-
-/**
- * The rgl to run: `explicit`, else the first of `rglCandidates` that exists, else rgl on PATH (on Windows with any
- * PATHEXT extension; a `.cmd` shim runs through cmd.exe).
- */
-export function findRgl(explicit?: string, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform, home: string = homedir()): string | undefined {
-  if (explicit) return explicit;
-  return rglCandidates(platform, env, home).find((f) => existsSync(f)) ?? findOnPath("rgl", env, platform);
-}
 
 async function readConfig(root: string): Promise<JsonObject | undefined> {
   try {
@@ -67,7 +26,7 @@ function profilesOf(config: JsonObject): JsonObject {
   return isPlainObject(profiles) ? profiles : {};
 }
 
-/** Profile to build (`default`, else the first) and whether it (transitively) runs any filter. */
+/** The profile that decides (`wanted`, else `default`, else the first) and whether it (transitively) runs any filter. */
 export async function regolithPlan(root: string, wanted?: string): Promise<{ profile: string; hasFilters: boolean } | undefined> {
   const config = await readConfig(root);
   if (!config || typeof config.regolith !== "object") return undefined;
@@ -137,62 +96,58 @@ export async function regolithExportFolders(root: string): Promise<RegolithExpor
   return out;
 }
 
+/** What rgl last built in a project. */
+export interface RegolithOutput {
+  /** The built pack dirs (real paths) keyed by the configured source dir (absolute). */
+  outputs: { source: string; built: string }[];
+  /** The project's data folder (`regolith.dataPath`, absolute), which the filters see as `.regolith/tmp/data`. */
+  dataDir: string;
+  /**
+   * When rgl last ran. rgl links `.regolith/tmp/BP` and `RP` to the export folder again on every run, so the link's
+   * own time is the run's; absent when rgl keeps real folders there (`--compat`, or a `none` export).
+   */
+  builtAt?: Date;
+}
+
+/** What a tool says when a profile runs filters and `regolithOutput` finds nothing. */
+export const RGL_NOT_BUILT =
+  "rgl has not built this project (.regolith/tmp holds no pack with a manifest.json): run `rgl run`, or keep " +
+  "`rgl watch` running, first. sculkwire does not run rgl";
+
 /**
- * Copy the project to a temp dir and build `profile` with rgl into `<tmp>/out/{BP,RP}`. `projectRoot` may be relative:
- * it is resolved first, because the copy links back to the project's `node_modules` and a relative link target would
- * point the link at itself.
+ * The packs rgl last built for the project: `.regolith/tmp/BP` and `.regolith/tmp/RP`, each when it holds a
+ * manifest.json. rgl leaves them after every `rgl run` and `rgl watch`, for any profile, flag and export target: a
+ * link to the export folder (the filters ran in place there), or a real folder with `--compat` or a `none` export.
+ * Undefined when rgl has not built the project. Nothing is written and rgl is never run.
+ *
+ * rgl copies the source packs there before the filters run, so while a run is under way, and after one that failed,
+ * the folders hold a manifest but not the finished build: that cannot be told from here.
  */
-export async function buildRegolith(projectRoot: string, profile: string, rglPath?: string): Promise<RegolithBuild | RegolithFailure> {
+export async function regolithOutput(projectRoot: string): Promise<RegolithOutput | undefined> {
   const root = resolve(projectRoot);
-  const rgl = findRgl(rglPath);
-  if (!rgl) return { profile, kind: "unavailable", message: "rgl not found (~/.local/bin, ~/.rgl/bin or PATH)" };
   const config = await readConfig(root);
-  if (!config) return { profile, kind: "unreadable", message: "config.json is not readable" };
-  const workDir = await mkdtemp(join(tmpdir(), "sculk-rgl-"));
-  const work = join(workDir, "project");
-  const out = join(workDir, "out");
-  await cp(root, work, {
-    recursive: true,
-    verbatimSymlinks: true,
-    filter: (src) => {
-      const rel = relative(root, src);
-      if (!rel) return true;
-      const parts = rel.split(sep);
-      if (parts.length === 1 && SKIP_TOP[parts[0] as string]) return false;
-      return !(parts[0] === ".regolith" && parts[1] === "tmp");
-    },
-  });
-  // Filters (esbuild, rolldown, typegen) may need the project's dependencies: link instead of copying.
-  if (existsSync(join(root, "node_modules"))) {
-    await symlink(join(root, "node_modules"), join(work, "node_modules"), process.platform === "win32" ? "junction" : "dir");
-  }
-  const profiles = profilesOf(config);
-  const p = (profiles[profile] && typeof profiles[profile] === "object" ? profiles[profile] : { filters: [] }) as JsonObject;
-  profiles[profile] = { ...p, export: { target: "exact", bpPath: join(out, "BP"), rpPath: join(out, "RP") } };
-  (config.regolith as JsonObject).profiles = profiles;
-  await writeFile(join(work, "config.json"), JSON.stringify(config, null, 2));
-  const rglOptions: RunOptions = { cwd: work, env: { ...process.env, NO_COLOR: "1" }, timeoutMs: 900_000, killSignal: "SIGTERM" };
-  let r = await run(rgl, ["run", profile], rglOptions);
-  if (r.code !== 0 && /\bget\b|not installed|install/i.test(r.stdout + r.stderr)) {
-    await run(rgl, ["get"], rglOptions);
-    r = await run(rgl, ["run", profile], rglOptions);
-  }
-  if (r.code !== 0) {
-    await rm(workDir, { recursive: true, force: true });
-    // rgl colours its log even with NO_COLOR, and the message is read as plain text.
-    const output = (r.stdout + r.stderr).replace(/\x1b\[[0-9;]*m/g, "").trim();
-    const tail = output.slice(-2000);
-    return { profile, kind: "failed", message: `rgl run ${profile} failed: ${tail.length < output.length ? tail.slice(tail.indexOf("\n") + 1) : tail}` };
-  }
+  if (!config) return undefined;
   const packs = (config.packs && typeof config.packs === "object" ? config.packs : {}) as JsonObject;
   const outputs: { source: string; built: string }[] = [];
-  for (const [key, def] of [
-    ["behaviorPack", "./packs/BP"],
-    ["resourcePack", "./packs/RP"],
+  let builtAt: Date | undefined;
+  for (const [key, def, name] of [
+    ["behaviorPack", "./packs/BP", "BP"],
+    ["resourcePack", "./packs/RP", "RP"],
   ] as const) {
+    const dir = join(root, ".regolith", "tmp", name);
+    if (!existsSync(join(dir, "manifest.json"))) continue;
     const src = typeof packs[key] === "string" ? (packs[key] as string) : def;
-    const built = join(out, key === "behaviorPack" ? "BP" : "RP");
-    if (existsSync(join(built, "manifest.json"))) outputs.push({ source: join(root, src), built });
+    try {
+      const built = await realpath(dir);
+      const link = await lstat(dir);
+      outputs.push({ source: join(root, src), built });
+      if (link.isSymbolicLink() && (!builtAt || link.mtime > builtAt)) builtAt = link.mtime;
+    } catch {
+      // rgl removes the folder and links it again at the start of every run: a pack gone in between is not built.
+    }
   }
-  return { profile, rgl, workDir, outputs };
+  if (!outputs.length) return undefined;
+  const regolith = isPlainObject(config.regolith) ? config.regolith : {};
+  const dataDir = resolve(root, typeof regolith.dataPath === "string" ? regolith.dataPath : "./data");
+  return { outputs, dataDir, ...(builtAt ? { builtAt } : {}) };
 }

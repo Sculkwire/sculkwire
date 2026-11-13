@@ -1,13 +1,12 @@
 /**
- * A project on BDS: its packs as BDS loads them (a Regolith project whose profile runs filters is built with rgl
- * first: the source packs hold filter inputs, not what the game loads), and a disposable instance with them attached.
+ * A project on BDS: its packs as BDS loads them (for a Regolith project whose profile runs filters, what rgl last
+ * built: the source packs hold filter inputs, not what the game loads), and a disposable instance with them attached.
  */
-import { rm } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import { compareDiagnostics, type Diagnostic } from "../../core/diagnostic.ts";
 import { PrerequisiteError } from "../../core/errors.ts";
 import { discoverProject, type PackInfo } from "../../core/project.ts";
-import { buildRegolith, regolithPlan } from "../../core/regolith.ts";
+import { RGL_NOT_BUILT, regolithOutput, regolithPlan } from "../../core/regolith.ts";
 import type { Channel } from "../../core/version.ts";
 import { indexPack, projectPath, type IndexedPack } from "../gamelog/logparse.ts";
 import { indexBuiltPack } from "./built.ts";
@@ -15,23 +14,23 @@ import { resolveBds, type BdsInstall } from "./install.ts";
 import { createInstance, disposeInstance, keepInstance, newInstanceId, type BdsInstance } from "./instance.ts";
 import { ensureTemplate } from "./template.ts";
 
-/** The Regolith build the loadable packs come from. */
+/** rgl's output the loadable packs come from. It belongs to the user: nothing here writes or deletes it. */
 export interface PackBuild {
   profile: string;
-  /** rgl's temp dir (build output and project copy); delete when done. */
-  workDir: string;
-  /** Source pack of each built pack dir (absolute built dir → source pack). */
+  /** Source pack of each built pack dir (real path of rgl's output dir → source pack). */
   sources: Map<string, PackInfo>;
+  /** The project's data folder (`regolith.dataPath`, absolute): the filters saw it as `.regolith/tmp/data`. */
+  dataDir: string;
 }
 
 export interface ProjectPacks {
   root: string;
-  /** Packs to load: the built dirs after a Regolith build (`relDir` stays the source pack's), else the source dirs. */
+  /** Packs to load: rgl's output dirs for a filtered Regolith profile (`relDir` stays the source pack's), else the source dirs. */
   loadable: PackInfo[];
   /** Diagnostics for packs BDS cannot load (skin packs, world templates, packs without uuid/version). */
   skipped: Diagnostic[];
   build?: PackBuild;
-  /** Set when the Regolith build failed; `loadable` is empty then and no server should start. */
+  /** Set when rgl has not built a filtered profile (`regolith.not-built`); `loadable` is empty then and no server should start. */
   failure?: Diagnostic;
 }
 
@@ -42,10 +41,8 @@ export interface BdsRunOptions {
   acceptEula?: boolean;
   /** level.dat experiments; default `["gametest"]` (Beta APIs). */
   experiments?: string[];
-  /** Keep the instance directory (and a Regolith build dir) for inspection. */
+  /** Keep the instance directory for inspection. */
   keep?: boolean;
-  /** rgl binary for Regolith builds; default: found on `~/.local/bin`, `~/.rgl/bin` or PATH. */
-  rglPath?: string;
   log?: (line: string) => void;
 }
 
@@ -63,11 +60,11 @@ function isLoadable(pack: PackInfo): boolean {
 }
 
 /**
- * The project's packs as BDS should load them. A Regolith project whose profile runs filters is built with rgl
- * (`rglPath` overrides the lookup); the server then loads the built packs. A build failure, or a source pack the
- * build left out, gives `failure` instead of a silent fallback to the unbuilt source packs.
+ * The project's packs as BDS should load them. For a Regolith project whose profile runs filters the server loads
+ * what rgl last built (`regolithOutput`); sculkwire does not run rgl. No output, or a source pack rgl's output has no
+ * loadable pack for, gives `failure` instead of a silent fallback to the unbuilt source packs.
  */
-export async function projectPacks(path: string, opts: { rglPath?: string; log?: (line: string) => void } = {}): Promise<ProjectPacks> {
+export async function projectPacks(path: string, opts: { log?: (line: string) => void } = {}): Promise<ProjectPacks> {
   const root = resolve(path);
   const layout = await discoverProject(root);
   const loadable: PackInfo[] = [];
@@ -99,21 +96,32 @@ export async function projectPacks(path: string, opts: { rglPath?: string; log?:
     skipped,
     failure: {
       severity: "error",
-      code: "regolith.build-failed",
-      message: `${message}; BDS was not started, because the source packs of a filtered profile are not what the game loads`,
+      code: "regolith.not-built",
+      message,
       source: "bds",
       file: config,
     },
   });
-  opts.log?.(`Regolith profile ${plan.profile} runs filters: building with rgl first`);
-  const build = await buildRegolith(root, plan.profile, opts.rglPath);
-  if (!("outputs" in build)) return failure(build.message);
-  const builtDirs = new Map(build.outputs.map((o) => [resolve(o.source), o.built]));
+  const output = await regolithOutput(root);
+  if (!output) return failure(RGL_NOT_BUILT);
+  const builtDirs = new Map(output.outputs.map((o) => [resolve(o.source), o.built]));
   const packs: PackInfo[] = [];
   const sources = new Map<string, PackInfo>();
   const unbuilt: string[] = [];
+  const configured = [layout.regolith.behaviorPack, layout.regolith.resourcePack].filter((d) => d !== undefined).map((d) => resolve(d));
   for (const pack of loadable) {
     const dir = builtDirs.get(resolve(pack.dir));
+    if (!dir && !configured.includes(resolve(pack.dir))) {
+      // Not one of the packs config.json names: rgl does not build it, so it is no part of what the game loads.
+      skipped.push({
+        severity: "warning",
+        code: "bds.pack-not-loaded",
+        message: `${pack.kind} pack is not one of the packs config.json names, so rgl does not build it and it is not loaded into BDS`,
+        source: "bds",
+        file: projectPath(pack, "manifest.json"),
+      });
+      continue;
+    }
     const [info] = dir ? (await discoverProject(dir)).packs : [];
     if (!dir || !info || !isLoadable(info)) {
       unbuilt.push(pack.relDir || ".");
@@ -124,11 +132,15 @@ export async function projectPacks(path: string, opts: { rglPath?: string; log?:
     sources.set(builtPack.dir, pack);
   }
   if (unbuilt.length) {
-    await rm(build.workDir, { recursive: true, force: true });
-    return failure(`rgl run ${plan.profile} did not build a loadable pack (manifest with header uuid/version) for ${unbuilt.join(", ")}`);
+    return failure(
+      `rgl's last output (.regolith/tmp) has no loadable pack (manifest with header uuid/version) for ${unbuilt.join(", ")}: ` +
+        "run `rgl run`, or keep `rgl watch` running, first. sculkwire does not run rgl",
+    );
   }
-  opts.log?.(`Regolith: built ${packs.length} pack(s) with ${build.rgl} into ${join(build.workDir, "out")}`);
-  return { root, loadable: packs, skipped, build: { profile: plan.profile, workDir: build.workDir, sources } };
+  if (!packs.length) return failure(RGL_NOT_BUILT);
+  const when = output.builtAt ? `, built ${output.builtAt.toISOString()}` : "";
+  opts.log?.(`Regolith profile ${plan.profile} runs filters: loading what rgl last built (${packs.map((p) => p.dir).join(", ")}${when})`);
+  return { root, loadable: packs, skipped, build: { profile: plan.profile, sources, dataDir: output.dataDir } };
 }
 
 /**
@@ -140,7 +152,7 @@ export function indexProject(project: Pick<ProjectPacks, "root" | "build">, pack
     packs.map((l) => {
       const source = project.build?.sources.get(l.pack.dir);
       return source && project.build
-        ? indexBuiltPack(l.pack, source, project.root, join(project.build.workDir, "project"), l.folder)
+        ? indexBuiltPack(l.pack, source, project.root, project.build.dataDir, l.folder)
         : indexPack(l.pack, l.folder);
     }),
   );
@@ -165,10 +177,6 @@ export async function prepareInstance(
   return { project, instance, baseline: template.baseline, indexed };
 }
 
-export async function disposeBuild(project: ProjectPacks, keep: boolean | undefined): Promise<void> {
-  if (project.build && !keep) await rm(project.build.workDir, { recursive: true, force: true });
-}
-
 /** A kept instance after its run: the folder it ended in, and a warning when it could not leave its slot. */
 export interface KeptRun {
   instanceDir: string;
@@ -176,22 +184,17 @@ export interface KeptRun {
 }
 
 /**
- * After the server has stopped: remove the instance (when there is one) and the Regolith build, unless `keep`. A kept
- * instance moves out of its slot (`keepInstance`); the result says where it is.
+ * After the server has stopped: remove the instance, unless `keep`. A kept instance moves out of its slot
+ * (`keepInstance`); the result says where it is. The packs it linked (the project's, or rgl's output) stay as they are.
  */
-export async function disposeRun(project: ProjectPacks, instance: BdsInstance | undefined, keep: boolean | undefined): Promise<KeptRun | undefined> {
-  try {
-    if (!instance) return undefined;
-    if (!keep) {
-      await disposeInstance(instance);
-      return undefined;
-    }
-    const kept = await keepInstance(instance);
-    const diagnostics: Diagnostic[] = kept.note ? [{ severity: "warning", code: "bds.instance-kept-in-slot", message: kept.note, source: "bds" }] : [];
-    return { instanceDir: kept.dir, diagnostics };
-  } finally {
-    await disposeBuild(project, keep);
+export async function disposeRun(instance: BdsInstance, keep: boolean | undefined): Promise<KeptRun | undefined> {
+  if (!keep) {
+    await disposeInstance(instance);
+    return undefined;
   }
+  const kept = await keepInstance(instance);
+  const diagnostics: Diagnostic[] = kept.note ? [{ severity: "warning", code: "bds.instance-kept-in-slot", message: kept.note, source: "bds" }] : [];
+  return { instanceDir: kept.dir, diagnostics };
 }
 
 /** `result` with the kept instance's folder and warnings added. */
@@ -201,7 +204,7 @@ export function withKept<T extends { diagnostics: Diagnostic[]; instanceDir?: st
 }
 
 /**
- * Prepare an instance for `project`, run `body` on it, then dispose of the instance and the build unless `keep`. With
+ * Prepare an instance for `project`, run `body` on it, then dispose of the instance unless `keep`. With
  * `keep`, the result's `instanceDir` is where the kept instance ended up.
  */
 export async function withInstance<T extends { diagnostics: Diagnostic[]; instanceDir?: string }>(
@@ -209,19 +212,13 @@ export async function withInstance<T extends { diagnostics: Diagnostic[]; instan
   opts: BdsRunOptions & { packMode?: "copy" | "symlink"; properties?: Record<string, string> },
   body: (run: PreparedRun) => Promise<T>,
 ): Promise<T> {
-  let run: PreparedRun;
-  try {
-    run = await prepareInstance(project, opts);
-  } catch (err) {
-    await disposeBuild(project, opts.keep);
-    throw err;
-  }
+  const run = await prepareInstance(project, opts);
   let result: T;
   let kept: KeptRun | undefined;
   try {
     result = await body(run);
   } finally {
-    kept = await disposeRun(project, run.instance, opts.keep);
+    kept = await disposeRun(run.instance, opts.keep);
   }
   return withKept(result, kept);
 }

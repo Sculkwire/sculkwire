@@ -1,18 +1,19 @@
 /**
- * Regolith-built packs on BDS: the server loads the build output (temp dir), but a Diagnostic should name the file
- * the user edits. `indexBuiltPack` indexes the built pack (paths and text as the server sees them) and attaches
- * `toSource`, which maps a built file and a range in its text back to the project:
+ * Regolith-built packs on BDS: the server loads what rgl last built (the folders `.regolith/tmp/BP` and `RP` lead
+ * to), but a Diagnostic should name the file the user edits. `indexBuiltPack` indexes the built pack (paths and text
+ * as the server sees them) and attaches `toSource`, which maps a built file and a range in its text back to the project:
  * 1. a source map next to or inside a built file (`//# sourceMappingURL=`) leads to the original, e.g. the
  *    TypeScript under `data/scripts`;
  * 2. a file that also exists in the source pack is reported there; its range is kept when the texts are equal, or
  *    moved to the one source line with the same text when a filter changed the file;
- * 3. a file only the build has (bundled JS without a source map) points at the build output, and the message says
- *    so, because no project file can be computed.
+ * 3. a file only the build has (bundled JS without a source map) points at rgl's output, and the message says so,
+ *    because no project file can be computed.
  */
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { SourceMap, type SourceMapPayload } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Position, Range } from "../../core/diagnostic.ts";
 import type { PackInfo } from "../../core/project.ts";
 import { indexPack, projectPath, type IndexedPack, type SourceLocation } from "../gamelog/logparse.ts";
@@ -41,25 +42,49 @@ async function loadSourceMap(builtFile: string, text: string): Promise<SourceMap
   }
 }
 
+/** `path` relative to `dir` when it lies inside it, else undefined. */
+function inside(dir: string, path: string): string | undefined {
+  const rel = relative(dir, path);
+  return rel && !rel.startsWith("..") && !isAbsolute(rel) ? rel.split(sep).join("/") : undefined;
+}
+
 /**
- * Project-relative POSIX path of a source map `sources` entry. Filters run inside rgl's temp copy of the project,
- * so the entry is resolved against the built file and the work copy first; failing that, the longest trailing part
- * of the path that names a project file wins (`../../../data/scripts/main.ts` → `data/scripts/main.ts`).
+ * Project-relative POSIX path of a source map `sources` entry. rgl runs the filters in `<project>/.regolith/tmp`,
+ * where the pack is `BP` or `RP` and the project's data folder (`regolith.dataPath`) is `data`, so a relative entry
+ * is resolved from where the filter saw the built file, then from the built file itself. A path below
+ * `.regolith/tmp` maps to the source pack (`BP/...`), the data folder (`data/...`) or the project folder of the same
+ * name; any other path inside the project is taken as it is. Failing that, the longest trailing part of the path
+ * that names a project file wins (`../../../data/scripts/main.ts` → `data/scripts/main.ts`).
  */
-function projectFileOf(source: string, projectRoot: string, workProject?: string): string | undefined {
-  const cleaned = source.replace(/^(?:webpack|file|rolldown|vite):\/{0,3}/, "").replace(/\\/g, "/");
-  if (workProject && isAbsolute(cleaned)) {
-    const rel = relative(workProject, cleaned);
-    if (rel && !rel.startsWith("..") && !isAbsolute(rel) && existsSync(join(projectRoot, rel))) return rel.split(sep).join("/");
+function projectFileOf(entry: string, at: { projectRoot: string; dataDir: string; source: PackInfo; tmpName: string; tmpFile: string; builtFile: string }): string | undefined {
+  let raw = entry;
+  if (entry.startsWith("file://")) {
+    try {
+      raw = fileURLToPath(entry);
+    } catch {
+      raw = entry.slice("file://".length);
+    }
   }
-  if (isAbsolute(cleaned)) {
-    const rel = relative(projectRoot, cleaned);
-    if (rel && !rel.startsWith("..") && !isAbsolute(rel) && existsSync(cleaned)) return rel.split(sep).join("/");
+  const cleaned = raw.replace(/^(?:webpack|rolldown|vite):\/{0,3}/, "").replace(/\\/g, "/");
+  const tmpRoot = join(at.projectRoot, ".regolith", "tmp");
+  const candidates = isAbsolute(cleaned) ? [cleaned] : [resolve(dirname(at.tmpFile), cleaned), resolve(dirname(at.builtFile), cleaned)];
+  for (const path of candidates) {
+    const inTmp = inside(tmpRoot, path);
+    if (inTmp !== undefined) {
+      const [head, ...rest] = inTmp.split("/");
+      if (head === at.tmpName && rest.length && existsSync(join(at.source.dir, ...rest))) return projectPath(at.source, rest.join("/"));
+      const inData = head === "data" && rest.length ? inside(at.projectRoot, join(at.dataDir, ...rest)) : undefined;
+      if (inData !== undefined && existsSync(join(at.projectRoot, inData))) return inData;
+      if (existsSync(join(at.projectRoot, inTmp))) return inTmp;
+      continue;
+    }
+    const inProject = inside(at.projectRoot, path);
+    if (inProject !== undefined && existsSync(path)) return inProject;
   }
   const parts = cleaned.split("/").filter((p) => p && p !== "." && p !== "..");
   for (let i = 0; i < parts.length; i++) {
     const rel = parts.slice(i).join("/");
-    if (existsSync(join(projectRoot, rel))) return rel;
+    if (existsSync(join(at.projectRoot, rel))) return rel;
   }
   return undefined;
 }
@@ -84,13 +109,14 @@ function sameLine(builtText: string, sourceText: string, range: Range): Range | 
 }
 
 /**
- * Index a built pack (`built.dir` is the build output, `built.relDir` the source pack's) and attach `toSource`.
- * `workProject` is rgl's copy of the project the build ran in, used to resolve absolute source map paths.
+ * Index a built pack (`built.dir` is rgl's output, `built.relDir` the source pack's) and attach `toSource`.
+ * `projectRoot` is the project rgl built, whose `.regolith/tmp` the filters ran in, and `dataDir` its data folder.
  */
-export async function indexBuiltPack(built: PackInfo, source: PackInfo, projectRoot: string, workProject?: string, folder?: string): Promise<IndexedPack> {
+export async function indexBuiltPack(built: PackInfo, source: PackInfo, projectRoot: string, dataDir: string, folder?: string): Promise<IndexedPack> {
   const indexed = await indexPack(built, folder);
   const src = await indexPack(source);
   const sourceFiles = new Set(src.files);
+  const tmpName = built.kind === "resource" ? "RP" : "BP";
   const maps = new Map<string, SourceMap>();
   for (const [rel, text] of indexed.texts) {
     if (!/\.(js|mjs)$/i.test(rel)) continue;
@@ -101,7 +127,8 @@ export async function indexBuiltPack(built: PackInfo, source: PackInfo, projectR
     const map = range ? maps.get(rel) : undefined;
     if (map && range) {
       const start = origin(map, range.start);
-      const file = start ? projectFileOf(start.fileName, projectRoot, workProject) : undefined;
+      const at = { projectRoot, dataDir, source, tmpName, tmpFile: join(projectRoot, ".regolith", "tmp", tmpName, rel), builtFile: join(built.dir, rel) };
+      const file = start ? projectFileOf(start.fileName, at) : undefined;
       if (start && file) {
         const end = origin(map, range.end);
         return { file, range: { start: start.position, end: end && end.fileName === start.fileName ? end.position : start.position } };
@@ -119,7 +146,7 @@ export async function indexBuiltPack(built: PackInfo, source: PackInfo, projectR
     }
     const out: SourceLocation = {
       file: join(built.dir, rel),
-      note: `${rel} is Regolith build output with no source map back to a project file, so the location is in the build output`,
+      note: `${rel} is rgl output with no source map back to a project file, so the location is in rgl's output`,
     };
     if (range) out.range = range;
     return out;

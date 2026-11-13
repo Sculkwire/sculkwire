@@ -94,7 +94,7 @@ jobs:
           ./install.sh --yes --channel main --repo "$GITHUB_WORKSPACE" < /dev/null
           version=$(node -p "require('./package.json').version")
           test "$("$SCULKWIRE_BIN_DIR/sculk" --version)" = "$version"
-          # doctor exits 1 when a required check fails; optional ones (game, BDS, rgl) only print warnings.
+          # doctor exits 1 when a required check fails; optional ones (game, BDS) only print warnings.
           set +e
           "$SCULKWIRE_BIN_DIR/sculk" doctor > doctor.txt
           code=$?
@@ -128,7 +128,7 @@ jobs:
           $launcher = Join-Path $env:SCULKWIRE_DATA "bin\sculk.cmd"
           $out = cmd /c $launcher --version
           if ($LASTEXITCODE -ne 0 -or "$out".Trim() -ne $version) { throw "cmd /c $launcher --version printed '$out', expected $version" }
-          # doctor exits 1 when a required check fails; optional ones (game, BDS, rgl) only print warnings.
+          # doctor exits 1 when a required check fails; optional ones (game, BDS) only print warnings.
           cmd /c $launcher doctor > doctor.txt
           $code = $LASTEXITCODE
           Get-Content doctor.txt

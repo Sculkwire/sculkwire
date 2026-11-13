@@ -18,8 +18,10 @@ const USAGE = `Usage: sculk validate <path> [options]
                          daily; \`sculk knowledge update\` checks now)
   --game-version <v>     exact target game version, e.g. 1.26.60
   --checks <a,b>         subset of ${CHECKS.join(",")}
-  --regolith <m>         auto | build | source (Regolith projects; default auto)
-  --profile <name>       Regolith profile to build
+  --regolith <m>         Regolith projects: auto = rgl's last build output in .regolith/tmp when the profile
+                         runs filters (default), build = always rgl's last build output, source = the source
+                         packs. sculkwire does not run rgl: run \`rgl run\` first after editing the sources
+  --profile <name>       Regolith profile whose filters decide auto (default: default)
   --assets-optional      missing texture/sound files are warnings
 
 Exit codes: 0 ok, 1 findings at or above --fail-on, 2 usage or prerequisite error.`;
@@ -101,6 +103,7 @@ async function run(args: string[]): Promise<number> {
   }
   err(`validating ${path}...`);
   const result = isFile ? await validateText(path, undefined, opts) : await validateProject(path, opts);
+  if ("regolith" in result && result.regolith?.built && result.regolith.message) err(result.regolith.message);
   process.stdout.write(render(result, format));
   return result.ok ? ExitCode.ok : ExitCode.findings;
 }

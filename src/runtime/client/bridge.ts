@@ -204,14 +204,15 @@ export async function readRegistry(kind: DataKind, sources: RegistrySources): Pr
 
 export interface BridgeStartOptions {
   /**
-   * Add-on project or pack directory whose packs are activated in the test world (and mapped in diagnostics). A
-   * Regolith project whose profile runs filters is built with rgl and its built packs are deployed.
+   * Add-on project or pack directory whose packs are activated in the test world (and mapped in diagnostics). For a
+   * Regolith project whose profile runs filters, the packs are what rgl last built (`.regolith/tmp`): sculkwire never
+   * runs rgl.
    */
   project?: string;
   /**
    * Copy the project's packs into development_*_packs (default true), also over the project's `sculkwire_*` folder an
-   * earlier launch left. Off: a pack is only used when a folder already serves its uuid. An rgl export of an unbuilt
-   * pack is reused; a fresh Regolith build is always deployed.
+   * earlier launch left. Off: a pack is only used when a folder already serves its uuid. What rgl built is deployed
+   * with either value: in place when rgl exported it into these dev packs, copied otherwise.
    */
   deploy?: boolean;
   /**
@@ -1237,8 +1238,8 @@ export class ClientBridge {
   }
 
   /**
-   * Redeploy the project (rgl build for Regolith projects with filters, else a fresh copy of each pack sculkwire
-   * deployed), then `/reload` (scripts + functions) or `/reload all` (documented as a rejoin with all packs; the retail
+   * Redeploy the project (a fresh copy of each pack sculkwire deployed; a folder rgl exported to is used as it is),
+   * then `/reload` (scripts + functions) or `/reload all` (documented as a rejoin with all packs; the retail
    * client answers it like `/reload` from /connect and stays in the world). Returns the copied folders
    * and the problems the reload logged.
    *

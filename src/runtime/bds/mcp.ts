@@ -42,8 +42,9 @@ export function register(server: McpServer): void {
       description:
         "Load the project's behavior/resource packs into a disposable Bedrock Dedicated Server (Linux or Windows x64), wait for " +
         "`Server started`, let it settle, stop it, and return content-log/console errors (incl. script errors with " +
-        "file:line) as diagnostics mapped to pack files. A Regolith project whose profile runs filters is built with rgl " +
-        "first and BDS loads the built packs (diagnostics point at the source files; status build-failed when rgl fails). " +
+        "file:line) as diagnostics mapped to pack files. sculkwire does not run rgl: a Regolith project whose profile runs " +
+        "filters is loaded from what rgl last built (.regolith/tmp), so run `rgl run` (or keep `rgl watch` running) first; " +
+        "diagnostics point at the files you edit. Without rgl's output the status is not-built and no server starts. " +
         "Downloads BDS on first use.",
       inputSchema: {
         path: z.string().describe("Project or pack directory"),
@@ -81,8 +82,9 @@ export function register(server: McpServer): void {
       description:
         "Run the project's GameTests headlessly on a disposable BDS (test_config.json automation, or `gametest runset` " +
         "in command mode) and return per-test results, failure diagnostics anchored at the test's register() call, and " +
-        "an exit code (1 when any test failed or none ran). A Regolith project whose profile runs filters is built with " +
-        "rgl first; a failed build is a diagnostic and no server starts.",
+        "an exit code (1 when any test failed or none ran). sculkwire does not run rgl: a Regolith project whose profile " +
+        "runs filters is loaded from what rgl last built (.regolith/tmp), so run `rgl run` (or keep `rgl watch` running) " +
+        "first; without its output the result is a regolith.not-built diagnostic and no server starts.",
       inputSchema: {
         path: z.string().describe("Project or pack directory"),
         tags: z.array(z.string()).optional().describe('GameTest tags (default ["suite:all"])'),
@@ -110,7 +112,7 @@ export function register(server: McpServer): void {
       try {
         const r = await runGameTests(path, { tags, mode, timeoutMs, channel: ch, acceptEula: eula });
         const failures = r.results.filter((t) => t.result !== "passed").map((t) => `  ${t.name}: ${t.result} ${t.error}`);
-        const head = describeGameTest(r) ?? `GameTest not run, Regolith build failed:\n${diagText(r.diagnostics)}`;
+        const head = describeGameTest(r) ?? `GameTest not run, rgl has not built the Regolith project:\n${diagText(r.diagnostics)}`;
         const text = [head, ...failures].join("\n");
         return ok(text, r);
       } catch (err) {
@@ -125,8 +127,10 @@ export function register(server: McpServer): void {
       title: "Start a BDS session",
       description:
         "Start a long-lived BDS with the project's packs attached (symlinked, so edits + bds_session_command `reload` " +
-        "apply; a Regolith project with filters is built with rgl first and rebuilt on `reload`) and the script debugger " +
-        "attached. Returns the session id used by the other bds_session_* tools.",
+        "apply) and the script debugger attached. sculkwire does not run rgl: a Regolith project whose profile runs " +
+        "filters is loaded from what rgl last built (.regolith/tmp), so run `rgl run` (or keep `rgl watch` running, which " +
+        "updates the loaded packs in place for `reload`) first; without its output no server starts. " +
+        "Returns the session id used by the other bds_session_* tools.",
       inputSchema: {
         path: z.string().describe("Project or pack directory"),
         channel,

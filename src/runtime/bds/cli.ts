@@ -106,7 +106,7 @@ export const commands: CliCommand[] = [
         const { exitCode, ...result } = r;
         if (values.json) out(JSON.stringify({ ...result, summary: summarize(r.diagnostics) }, null, 2));
         else for (const d of r.diagnostics) out(formatDiagnostic(d));
-        log(r.status === "build-failed" ? describeCheck(r) : `${describeCheck(r)}; log ${r.rawLogPath}${keptText(r)}`);
+        log(r.status === "not-built" ? describeCheck(r) : `${describeCheck(r)}; log ${r.rawLogPath}${keptText(r)}`);
         return exitCode;
       }),
   },
@@ -143,7 +143,7 @@ export const commands: CliCommand[] = [
           for (const d of r.diagnostics) out(formatDiagnostic(d));
         }
         const head = describeGameTest(r, [`${r.durationMs} ms`]);
-        log(head ? `${head}; log ${r.rawLogPath}${keptText(r)}` : "GameTest not run: the Regolith build failed");
+        log(head ? `${head}; log ${r.rawLogPath}${keptText(r)}` : "GameTest not run: rgl has not built the Regolith project");
         return r.exitCode;
       }),
   },

@@ -1,15 +1,15 @@
 /**
  * Headless pack validator: every diagnostic has a project-relative file, a 1-based range and a stable code.
- *   validateProject(root, opts)        all packs under a directory (Regolith projects built with rgl)
+ *   validateProject(root, opts)        all packs under a directory (Regolith projects: what rgl last built)
  *   validateText(path, text?, opts)    one file, optionally with unsaved content, in its project context
  */
 import { existsSync } from "node:fs";
-import { readFile, rm, stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { atLeast, compareDiagnostics, type Diagnostic, type DiagnosticSummary, type Severity, summarize } from "../core/diagnostic.ts";
 import { isPlainObject } from "../core/json.ts";
 import { discoverProject, type PackInfo } from "../core/project.ts";
-import { buildRegolith, regolithPlan } from "../core/regolith.ts";
+import { RGL_NOT_BUILT, regolithOutput, regolithPlan } from "../core/regolith.ts";
 import type { Channel } from "../core/version.ts";
 import { classifyFile, JSON_EXT, versionTuple } from "./classify.ts";
 import { Context, type Finding, loadPack, type Pack, toDiagnostic, toPosix } from "./context.ts";
@@ -59,10 +59,13 @@ export interface ValidateOptions {
   assetsOptional?: boolean;
   /** Command names for .mcfunction checks (defaults to the samples' command list). */
   commands?: string[];
-  /** Regolith projects: `auto` builds with rgl when the profile has filters (default), `build` always, `source` never. */
+  /**
+   * Regolith projects: `auto` validates rgl's last build output in `.regolith/tmp` when the profile runs filters
+   * (default), `build` always, `source` validates the source packs. sculkwire never runs rgl.
+   */
   regolith?: "auto" | "build" | "source";
+  /** The Regolith profile whose filters decide `auto` (default: `default`, else the first). */
   regolithProfile?: string;
-  rglPath?: string;
   tscPath?: string;
   /** Unsaved contents by absolute path (used by validateText). */
   overlay?: Map<string, string>;
@@ -123,7 +126,8 @@ export interface ValidationResult {
   schemaSources: Record<string, string>;
   vanilla?: { root: string; version?: string };
   rockide?: RockideSource;
-  regolith?: { profile: string; built: boolean; message?: string };
+  /** `built`: rgl's last output was validated; `builtAt` (ISO time) is when rgl last ran, when known. */
+  regolith?: { profile: string; built: boolean; builtAt?: string; message?: string };
 }
 
 /**
@@ -251,95 +255,103 @@ export async function validateProject(rootArg: string, callOpts: ValidateOptions
 
   const layout = await discoverProject(root);
   let regolith: ValidationResult["regolith"];
-  let rglFailed = false;
-  let workDir: string | undefined;
+  let notBuilt: { severity: Severity; message: string } | undefined;
   const packs: Pack[] = [];
   const builtSources = new Map<string, string>();
   if (layout.regolith) {
     const plan = await regolithPlan(root, opts.regolithProfile);
     const mode = opts.regolith ?? "auto";
     if (plan && (mode === "build" || (mode === "auto" && plan.hasFilters))) {
-      const build = await buildRegolith(root, plan.profile, opts.rglPath);
-      if ("outputs" in build) {
-        workDir = build.workDir;
-        for (const o of build.outputs) builtSources.set(resolve(o.source), o.built);
-        regolith = { profile: plan.profile, built: true };
+      const output = await regolithOutput(root);
+      if (output) {
+        for (const o of output.outputs) builtSources.set(resolve(o.source), o.built);
+        const when = output.builtAt ? ` from ${output.builtAt.toISOString()}` : "";
+        regolith = {
+          profile: plan.profile,
+          built: true,
+          ...(output.builtAt ? { builtAt: output.builtAt.toISOString() } : {}),
+          message: `validated rgl's last build output in .regolith/tmp${when}; if the sources changed since, run \`rgl run\` first`,
+        };
+        // rgl's output may hold one of the two packs `config.json` names and not the other (a run under way).
+        const configured = [layout.regolith.behaviorPack, layout.regolith.resourcePack].filter((d) => d !== undefined).map((d) => resolve(d));
+        const unbuilt = layout.packs.filter((p) => configured.includes(resolve(p.dir)) && !builtSources.has(resolve(p.dir))).map((p) => p.relDir || ".");
+        if (unbuilt.length) {
+          notBuilt = {
+            severity: mode === "build" ? "error" : "warning",
+            message:
+              `rgl's last build in .regolith/tmp has no pack for ${unbuilt.join(", ")}: run \`rgl run\`, or keep \`rgl watch\` running, first. ` +
+              "Validated that source pack instead; it holds the filter inputs, not what the game loads. sculkwire does not run rgl",
+          };
+        }
       } else {
-        rglFailed = build.kind === "failed";
-        // Without a build the source packs are validated; say so unless rgl itself failed.
-        const fallback = rglFailed ? "" : "; validated the source packs instead";
-        regolith = { profile: plan.profile, built: false, message: `${build.message}${fallback}` };
+        // The caller who asked for the build output gets an error; `auto` falls back to the sources with a warning.
+        const message = `${RGL_NOT_BUILT}. Validated the source packs instead; they hold the filter inputs, not what the game loads`;
+        notBuilt = { severity: mode === "build" ? "error" : "warning", message };
+        regolith = { profile: plan.profile, built: false, message };
       }
     } else if (plan) {
-      regolith = { profile: plan.profile, built: false, message: plan.hasFilters ? "build skipped (regolith: source)" : "profile has no filters; validated the source packs" };
+      const message = plan.hasFilters ? "validated the source packs, not rgl's build output (regolith: source)" : "profile has no filters; validated the source packs";
+      notBuilt = { severity: "info", message };
+      regolith = { profile: plan.profile, built: false, message };
     }
   }
-  try {
-    for (const info of layout.packs) {
-      const built = builtSources.get(resolve(info.dir));
-      packs.push(built ? await loadPack(info, root, { dir: built, displayDir: info.relDir, sourceDir: info.dir }) : await loadPack(info, root));
-    }
-    const ctx = new Context(root, packs, opts.overlay);
-    if (regolith && !regolith.built && regolith.message && layout.regolith) {
-      ctx.push({
-        severity: rglFailed ? "error" : "info",
-        code: rglFailed ? "regolith.build-failed" : "regolith.not-built",
-        message: regolith.message,
-        file: toPosix(relative(root, layout.regolith.configPath)),
-      });
-    }
-    await readManifests(ctx);
-
-    const env: CheckEnv = { root, ctx, packs, channel, opts, schemaOpts: {}, schemaSources: {} };
-    if (vanilla) env.vanilla = vanilla;
-    if (gameVersion) env.gameVersion = gameVersion;
-    const engineDir = opts.engineSchemasDir ?? samplesRoot;
-    if (engineDir) env.schemaOpts.engineSchemasDir = engineDir;
-    let rockide: RockideSource | undefined;
-    if (checks.includes("schema")) {
-      rockide = opts.rockideSchemasDir ? { root: resolve(opts.rockideSchemasDir) } : await opts.resolveRockide?.();
-      if (rockide?.root) env.schemaOpts.rockideSchemasDir = rockide.root;
-      if (vanilla) env.calibration = await calibration(vanilla.identity, env.schemaOpts, () => vanillaFiles(vanilla.root));
-    }
-
-    const run = checks.map((c) => CHECK_RUNS[c]);
-    let filesChecked = 0;
-    for (const pack of packs) {
-      for (const rel of pack.files) {
-        filesChecked++;
-        if (!JSON_EXT.test(rel)) continue;
-        const doc = await ctx.json(pack, rel);
-        if (!doc) continue;
-        for (const check of run) await check.file?.(env, pack, rel, doc);
-      }
-    }
-    for (const check of run) await check.project?.(env);
-
-    const diagnostics = ctx.diagnostics.sort(compareDiagnostics);
-    const { ok, summary } = verdict(diagnostics, opts.failOn);
-    const target: ValidationResult["target"] = { channel };
-    if (version) target.version = version;
-    const out: ValidationResult = {
-      root,
-      target,
-      ok,
-      packs: packs.map((p) => {
-        const { dir: _dir, ...rest } = p.info;
-        return { ...rest, files: p.files.length };
-      }),
-      filesChecked,
-      checks,
-      diagnostics,
-      summary,
-      schemaSources: env.schemaSources,
-    };
-    if (vanilla) out.vanilla = vanilla.version ? { root: vanilla.root, version: vanilla.version } : { root: vanilla.root };
-    if (rockide) out.rockide = rockide;
-    if (regolith) out.regolith = regolith;
-    return out;
-  } finally {
-    if (workDir) await rm(workDir, { recursive: true, force: true });
+  for (const info of layout.packs) {
+    const built = builtSources.get(resolve(info.dir));
+    packs.push(built ? await loadPack(info, root, { dir: built, displayDir: info.relDir, sourceDir: info.dir }) : await loadPack(info, root));
   }
+  const ctx = new Context(root, packs, opts.overlay);
+  if (notBuilt && layout.regolith) {
+    ctx.push({ severity: notBuilt.severity, code: "regolith.not-built", message: notBuilt.message, file: toPosix(relative(root, layout.regolith.configPath)) });
+  }
+  await readManifests(ctx);
+
+  const env: CheckEnv = { root, ctx, packs, channel, opts, schemaOpts: {}, schemaSources: {} };
+  if (vanilla) env.vanilla = vanilla;
+  if (gameVersion) env.gameVersion = gameVersion;
+  const engineDir = opts.engineSchemasDir ?? samplesRoot;
+  if (engineDir) env.schemaOpts.engineSchemasDir = engineDir;
+  let rockide: RockideSource | undefined;
+  if (checks.includes("schema")) {
+    rockide = opts.rockideSchemasDir ? { root: resolve(opts.rockideSchemasDir) } : await opts.resolveRockide?.();
+    if (rockide?.root) env.schemaOpts.rockideSchemasDir = rockide.root;
+    if (vanilla) env.calibration = await calibration(vanilla.identity, env.schemaOpts, () => vanillaFiles(vanilla.root));
+  }
+
+  const run = checks.map((c) => CHECK_RUNS[c]);
+  let filesChecked = 0;
+  for (const pack of packs) {
+    for (const rel of pack.files) {
+      filesChecked++;
+      if (!JSON_EXT.test(rel)) continue;
+      const doc = await ctx.json(pack, rel);
+      if (!doc) continue;
+      for (const check of run) await check.file?.(env, pack, rel, doc);
+    }
+  }
+  for (const check of run) await check.project?.(env);
+
+  const diagnostics = ctx.diagnostics.sort(compareDiagnostics);
+  const { ok, summary } = verdict(diagnostics, opts.failOn);
+  const target: ValidationResult["target"] = { channel };
+  if (version) target.version = version;
+  const out: ValidationResult = {
+    root,
+    target,
+    ok,
+    packs: packs.map((p) => {
+      const { dir: _dir, ...rest } = p.info;
+      return { ...rest, files: p.files.length };
+    }),
+    filesChecked,
+    checks,
+    diagnostics,
+    summary,
+    schemaSources: env.schemaSources,
+  };
+  if (vanilla) out.vanilla = vanilla.version ? { root: vanilla.root, version: vanilla.version } : { root: vanilla.root };
+  if (rockide) out.rockide = rockide;
+  if (regolith) out.regolith = regolith;
+  return out;
 }
 
 /** Nearest ancestor holding manifest.json. */

@@ -39,7 +39,14 @@ const output = {
     })
     .optional()
     .describe("rockide/schemas release used (newest GitHub release, checked daily), or a note why none was"),
-  regolith: z.object({ profile: z.string(), built: z.boolean(), message: z.string().optional() }).optional(),
+  regolith: z
+    .object({
+      profile: z.string(),
+      built: z.boolean().describe("rgl's last build output in .regolith/tmp was validated"),
+      builtAt: z.string().optional().describe("when rgl last ran (ISO time), when known"),
+      message: z.string().optional(),
+    })
+    .optional(),
 };
 
 const common = {
@@ -94,6 +101,8 @@ function summaryText(r: ValidationResult, shown: number): string {
     .slice(0, Math.min(10, shown))
     .map(formatDiagnostic);
   const notes = r.rockide?.note ? [`note: rockide/schemas ${r.rockide.note}`] : [];
+  // The agent must see that rgl's last build was checked, not the sources it may just have edited.
+  if (r.regolith?.built && r.regolith.message) notes.push(`note: ${r.regolith.message}`);
   return [head, ...notes, ...top, ...(r.diagnostics.length > top.length ? [`... ${r.diagnostics.length - top.length} more in structuredContent`] : [])].join("\n");
 }
 
@@ -103,13 +112,14 @@ export function register(server: McpServer): void {
     {
       title: "Validate add-on packs",
       description:
-        "Validate every behavior/resource pack under a directory (add-on folder, single pack, or Regolith project, which is built with rgl when its profile runs filters). " +
+        "Validate every behavior/resource pack under a directory (add-on folder, single pack, or Regolith project). " +
+        "sculkwire does not run rgl: when the Regolith profile runs filters it validates what rgl last built in .regolith/tmp, so run `rgl run` (or keep `rgl watch` running) after editing the sources. " +
         "Checks: JSON syntax as the game reads it, schemas chosen by format_version, manifest, cross-file references, lang, mcfunction, TypeScript. " +
         "Every diagnostic has file + 1-based range + stable code; fix errors by file and line, then re-run.",
       inputSchema: {
         path: z.string().describe("project, add-on or pack directory"),
         checks: z.array(z.enum(CHECKS)).optional().describe(`subset of ${CHECKS.join(", ")} (default all)`),
-        regolith: z.enum(["auto", "build", "source"]).optional().describe("Regolith projects: auto builds when filters exist"),
+        regolith: z.enum(["auto", "build", "source"]).optional().describe("Regolith projects: auto = rgl's last build output when the profile runs filters (default), build = always rgl's last build output, source = the source packs"),
         ...common,
       },
       outputSchema: output,

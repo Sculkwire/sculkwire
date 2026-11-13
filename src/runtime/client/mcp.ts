@@ -206,8 +206,11 @@ export function register(server: McpServer): void {
         "result says so); `desktop` uses the launcher's normal window (on Windows the same as `window`). On Linux the " +
         "agent's input stays inside gamescope; on Windows it uses the system keyboard and mouse while the game window is " +
         "in the foreground and stops when the user switches away. Only " +
-        "the chosen install's game is managed, so a game the user plays from another launcher is left alone. A Regolith " +
-        "project whose profile runs filters is built with rgl first and the built packs are deployed. The result lists " +
+        "the chosen install's game is managed, so a game the user plays from another launcher is left alone. sculkwire " +
+        "never runs rgl: for a Regolith project whose profile runs filters, run `rgl run` (or keep `rgl watch` running) " +
+        "first. The game then gets what rgl last built (.regolith/tmp): the folder rgl exported into development_*_packs " +
+        "is used as it is, and a build exported elsewhere is copied in. When rgl has not built the project the launch " +
+        "fails and says so. The result lists " +
         "each deployed pack folder and its absolute path. Returns once the world is loaded, in 1-2 minutes (the call " +
         "blocks for the whole wait). If the world " +
         "join races Microsoft sign-in and the game stops on \"You need to authenticate to Microsoft services\", it " +
@@ -217,8 +220,8 @@ export function register(server: McpServer): void {
         "keepOnTimeout is set: then the result is not ready, manualSteps says how to enter the world, and game_status " +
         "turns ready once it is in.",
       inputSchema: {
-        project: z.string().optional().describe("Add-on project or pack directory to activate in the world. A Regolith project whose profile runs filters is built with rgl and its built packs are deployed"),
-        deploy: z.boolean().optional().describe("Copy the project's packs into development_*_packs, also over the project's sculkwire_* folder an earlier launch left. Default true. Packs rgl already exported are reused, but a fresh rgl build is always deployed. Off: only folders that already serve a pack's uuid are used"),
+        project: z.string().optional().describe("Add-on project or pack directory to activate in the world. For a Regolith project whose profile runs filters, the packs are what rgl last built (.regolith/tmp); sculkwire does not run rgl, so run `rgl run` first"),
+        deploy: z.boolean().optional().describe("Copy the project's packs into development_*_packs, also over the project's sculkwire_* folder an earlier launch left. Default true. A folder rgl exported to is used as it is. Off: only folders that already serve a pack's uuid are used (what rgl built is still deployed)"),
         display: z
           .enum(["window", "headless", "desktop"])
           .optional()
@@ -384,7 +387,9 @@ export function register(server: McpServer): void {
     {
       title: "Reload scripts or packs",
       description:
-        "Copy the project's current packs into the game again (building Regolith projects with rgl first), then run " +
+        "Copy the project's current packs into the game again (sculkwire does not run rgl: for a Regolith project whose " +
+        "profile runs filters, run `rgl run` or keep `rgl watch` running before reloading; the folder rgl exported to is " +
+        "used as it is, a build exported elsewhere is copied again), then run " +
         "`/reload` (scripts and functions; it re-reads known .mcfunction files but does not register a new one) or " +
         "`/reload all`, which the game documents as rejoining the world to reload every pack (new .mcfunction files, new " +
         "or changed blocks, items, entities and other JSON). The retail client 1.26.63 answers " +

@@ -2,9 +2,10 @@
  * BDS load-check: boot a disposable server with the project's packs, wait for `Server started.`, let it settle,
  * stop it, and turn console + content log output into Diagnostics mapped to pack files.
  *
- * A Regolith project whose profile runs filters is built with rgl first (the same `regolithPlan` + `buildRegolith`
- * the validator and the client bridge use), and the server loads the built packs: the source packs hold filter
- * inputs, not what the game loads. A failed build is an error Diagnostic and no server starts.
+ * For a Regolith project whose profile runs filters the server loads what rgl last built (`.regolith/tmp`, the same
+ * `regolithPlan` + `regolithOutput` the validator and the client bridge use): the source packs hold filter inputs,
+ * not what the game loads. sculkwire does not run rgl; without its output the result is an error Diagnostic
+ * (`regolith.not-built`) and no server starts.
  */
 import type { Diagnostic } from "../../core/diagnostic.ts";
 import { compareDiagnostics, exitCodeFor, summarize } from "../../core/diagnostic.ts";
@@ -23,13 +24,13 @@ export interface CheckOptions extends BdsRunOptions {
 
 export interface CheckResult {
   diagnostics: Diagnostic[];
-  /** Absent when no server ran (`build-failed`). */
+  /** Absent when no server ran (`not-built`). */
   serverVersion?: string;
   durationMs: number;
   /** Console + content log of the run, kept after the instance is removed; absent when no server ran. */
   rawLogPath?: string;
-  /** `build-failed`: the Regolith build failed, so BDS did not start. */
-  status: "started" | "exited" | "timeout" | "build-failed";
+  /** `not-built`: rgl has not built the Regolith project, so BDS did not start. */
+  status: "started" | "exited" | "timeout" | "not-built";
   /** Where the kept instance folder is, when `keep` was set. */
   instanceDir?: string;
   exitCode: number;
@@ -38,8 +39,8 @@ export interface CheckResult {
 /** The one-line summary of a check, as both front ends print it. */
 export function describeCheck(r: CheckResult): string {
   const summary = summarize(r.diagnostics);
-  return r.status === "build-failed"
-    ? `Regolith build failed, BDS not started: ${summary.errors} error(s)`
+  return r.status === "not-built"
+    ? `rgl has not built the Regolith project, BDS not started: ${summary.errors} error(s)`
     : `BDS ${r.serverVersion} ${r.status}: ${summary.errors} error(s), ${summary.warnings} warning(s) in ${r.durationMs} ms`;
 }
 
@@ -58,7 +59,7 @@ export async function bdsCheck(path: string, opts: CheckOptions = {}): Promise<C
   const project = await projectPacks(path, opts);
   if (project.failure) {
     const diagnostics = [...project.skipped, project.failure].sort(compareDiagnostics);
-    return { diagnostics, durationMs: Date.now() - t0, status: "build-failed", exitCode: exitCodeFor(diagnostics) };
+    return { diagnostics, durationMs: Date.now() - t0, status: "not-built", exitCode: exitCodeFor(diagnostics) };
   }
   return withInstance(project, opts, async (prepared) => {
     const { instance, indexed } = prepared;

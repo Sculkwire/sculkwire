@@ -139,10 +139,10 @@ export interface GameTestOptions extends BdsRunOptions {
 
 export interface GameTestRunResult extends GameTestSummary {
   mode: "automation" | "command";
-  /** Absent when no server ran (the Regolith build failed). */
+  /** Absent when no server ran (rgl has not built the Regolith project). */
   serverVersion?: string;
   durationMs: number;
-  /** Load errors (console/content log), failed tests and a failed Regolith build as Diagnostics. */
+  /** Load errors (console/content log), failed tests and a Regolith project rgl has not built as Diagnostics. */
   diagnostics: Diagnostic[];
   /** Absent when no server ran. */
   rawLogPath?: string;
@@ -290,7 +290,7 @@ async function runOnServer(prepared: PreparedRun, opts: GameTestOptions, t0: num
 
 /**
  * `GameTest 1/2 passed, 1 failed (BDS 1.26.63.1, automation, …extra)`: the summary both front ends print.
- * Undefined when no server ran (the Regolith build failed).
+ * Undefined when no server ran (rgl has not built the Regolith project).
  */
 export function describeGameTest(r: GameTestRunResult, extra: readonly string[] = []): string | undefined {
   if (!r.serverVersion) return undefined;

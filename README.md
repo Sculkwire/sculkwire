@@ -132,7 +132,7 @@ Details are in [Install and Update](docs/install.md#updates).
 
 | Feature | Requirement |
 |---|---|
-| Knowledge and validation | Node.js 22.18 or newer. rgl for Regolith projects |
+| Knowledge and validation | Node.js 22.18 or newer |
 | Test server | Windows or Linux x64. You accept the [Minecraft EULA](https://www.minecraft.net/eula) |
 | Game client | Minecraft Bedrock for PC (GDK). Linux also needs gamescope and xdotool. See [Game Client Setup](docs/client.md) |
 | In-game agent (optional) | The game running. sculkwire downloads the helper, or builds it if you have Rust. See [In-Game Agent](docs/engine.md) |

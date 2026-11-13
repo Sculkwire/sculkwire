@@ -3,28 +3,28 @@
  * stdin commands with collected output, cursor-based logs, and a script debugger attached at level load
  * (`script-debugger-auto-attach=listen` on a private port; the console `script debugger listen` command drops
  * inbound connections on BDS 1.26.63.1, so the auto-attach listener is the reliable inbound path).
- * A Regolith project whose profile runs filters is built with rgl first and the world links the build output;
- * `reload` builds again into the same dirs, so edits to the sources apply.
+ * For a Regolith project whose profile runs filters the world links what rgl last built; `rgl watch` rewrites those
+ * folders in place, so a `reload` loads the edited sources. sculkwire does not run rgl.
  */
-import { cp, rm } from "node:fs/promises";
+import { rm, symlink } from "node:fs/promises";
+import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { formatDiagnostic, type Diagnostic } from "../../core/diagnostic.ts";
 import { errorMessage } from "../../core/errors.ts";
 import { summarizeProfile, type ProfileSummary } from "../debugger/profile.ts";
 import { DebuggerSession, connectTo } from "../debugger/session.ts";
 import { entriesToDiagnostics, mergeEntries, parseConsole, type IndexedPack } from "../gamelog/logparse.ts";
-import { freeTcpPort, type BdsInstance } from "./instance.ts";
-import { disposeBuild, disposeRun, indexProject, prepareInstance, projectPacks, withKept, type BdsRunOptions, type KeptRun, type ProjectPacks } from "./project.ts";
+import { dirLinkType, freeTcpPort, type BdsInstance } from "./instance.ts";
+import { disposeRun, indexProject, prepareInstance, projectPacks, withKept, type BdsRunOptions, type KeptRun, type ProjectPacks } from "./project.ts";
 import { finishRun, runLabel, serverVersionOf } from "./run.ts";
 import { BdsServer, START_TIMEOUT_MS, type ConsoleLine } from "./server.ts";
 
 export interface BdsSession {
   id: string;
   projectRoot: string;
-  /** The packs the world loads, with the Regolith build they come from. */
+  /** The packs the world loads, with rgl's output they come from for a filtered Regolith profile. */
   project: ProjectPacks;
   packMode: "copy" | "symlink";
-  rglPath?: string;
   instance: BdsInstance;
   server: BdsServer;
   indexed: IndexedPack[];
@@ -105,17 +105,13 @@ export async function startSession(path: string, opts: StartOptions = {}): Promi
       }
     : {};
   const packMode = opts.packMode ?? "symlink";
-  const { instance, baseline, indexed } = await prepareInstance(project, { ...opts, packMode, properties }).catch(async (err: unknown) => {
-    await disposeBuild(project, opts.keep);
-    throw err;
-  });
+  const { instance, baseline, indexed } = await prepareInstance(project, { ...opts, packMode, properties });
   const server = new BdsServer(instance.dir);
   const session: BdsSession = {
     id: instance.id,
     projectRoot: project.root,
     project,
     packMode,
-    ...(opts.rglPath ? { rglPath: opts.rglPath } : {}),
     instance,
     server,
     indexed,
@@ -143,7 +139,7 @@ export async function startSession(path: string, opts: StartOptions = {}): Promi
     attaching.abort();
     sessions.delete(session.id);
     await server.stop(5000);
-    await disposeRun(project, instance, opts.keep);
+    await disposeRun(instance, opts.keep);
     throw new Error(`BDS session did not start: ${errorMessage(err)}\n${server.tail()}`);
   }
   await attach;
@@ -172,7 +168,7 @@ const RELOAD_RE = /^\/?reload(\s+all)?\s*$/;
  * Run a command. Console (stdin) by default; output = console lines until it goes quiet. `via: "debugger"`
  * runs it through the script debugger as `minecraftCommand` (output arrives as `[Scripting]` console lines).
  * `reload` (functions + scripts) and `reload all` (also rejoins the world and reloads all packs) on the console
- * rebuild a Regolith session first, so the reload loads the edited sources.
+ * first make a Regolith session's world follow rgl's current output (`followRegolithOutput`).
  */
 export async function sessionCommand(
   id: string,
@@ -188,7 +184,7 @@ export async function sessionCommand(
   }
   const reload = RELOAD_RE.exec(command);
   if (reload) {
-    await rebuild(s);
+    await followRegolithOutput(s);
     return { lines: await s.server.command(reload[1] ? "reload all" : "reload", { quietMs: 800, maxMs: 15_000 }), via: "console" };
   }
   return { lines: await s.server.command(command, opts), via: "console" };
@@ -212,25 +208,28 @@ export function sessionLogs(id: string, since = 0, limit = 500): LogsResult {
 }
 
 /**
- * Build a Regolith session's project again and replace the build output its world links to (symlink mode only; a
- * copied world stays frozen). Throws with the build Diagnostic when rgl fails; the world keeps the previous build.
+ * Before a `reload` of a Regolith session (symlink mode only; a copied world stays frozen): look up what rgl last
+ * built again. `rgl watch` rewrites its output folders in place, so the world's links usually stay; when an output
+ * folder moved (another profile ran), the world's link for that pack is pointed at the new one. Only the links in
+ * the world change, never rgl's output. Throws with the `regolith.not-built` Diagnostic when the output is gone;
+ * the session then stays as it was.
  */
-async function rebuild(s: BdsSession): Promise<void> {
+export async function followRegolithOutput(s: Pick<BdsSession, "projectRoot" | "project" | "packMode" | "instance" | "indexed">): Promise<void> {
   const build = s.project.build;
   if (!build || s.packMode !== "symlink") return;
-  const fresh = await projectPacks(s.projectRoot, s.rglPath ? { rglPath: s.rglPath } : {});
-  if (fresh.failure) throw new Error(`reload not run, the previous build stays loaded: ${formatDiagnostic(fresh.failure)}`);
-  try {
-    const freshBySource = new Map(fresh.loadable.map((p) => [fresh.build?.sources.get(p.dir)?.dir ?? p.dir, p.dir]));
-    for (const [builtDir, source] of build.sources) {
-      const next = freshBySource.get(source.dir);
-      if (!next) continue;
-      await rm(builtDir, { recursive: true, force: true });
-      await cp(next, builtDir, { recursive: true });
-    }
-  } finally {
-    await disposeBuild(fresh, false);
+  const fresh = await projectPacks(s.projectRoot);
+  if (fresh.failure) throw new Error(`reload not run, the session keeps the packs it loaded: ${formatDiagnostic(fresh.failure)}`);
+  const freshBySource = new Map(fresh.loadable.map((p) => [fresh.build?.sources.get(p.dir)?.dir ?? p.dir, p]));
+  for (const loaded of s.instance.packs) {
+    const source = build.sources.get(loaded.pack.dir);
+    const next = source ? freshBySource.get(source.dir) : undefined;
+    if (!next || next.dir === loaded.pack.dir) continue;
+    // The world entry is a link: removing it leaves the folder it pointed at alone.
+    await rm(loaded.worldPath, { force: true });
+    await symlink(resolve(next.dir), loaded.worldPath, dirLinkType(process.platform));
+    loaded.pack = next;
   }
+  s.project = fresh;
   s.indexed = await indexProject(s.project, s.instance.packs);
 }
 
@@ -277,7 +276,7 @@ export async function stopSession(id: string): Promise<StopResult> {
     const { diagnostics, rawLogPath } = await finishRun(s, s.server);
     result = { exitCode, rawLogPath, diagnostics };
   } finally {
-    kept = await disposeRun(s.project, s.instance, s.keep);
+    kept = await disposeRun(s.instance, s.keep);
   }
   return withKept(result, kept);
 }
