@@ -112,7 +112,8 @@ export interface RegolithOutput {
 /** What a tool says when a profile runs filters and `regolithOutput` finds nothing. */
 export const RGL_NOT_BUILT =
   "rgl has not built this project (.regolith/tmp holds no pack with a manifest.json): run `rgl run`, or keep " +
-  "`rgl watch` running, first. sculkwire does not run rgl";
+  "`rgl watch` running, first; for a project built with Regolith itself, which moves its build out of .regolith/tmp, " +
+  "pass the folder it exported to instead. sculkwire does not run rgl";
 
 /**
  * The packs rgl last built for the project: `.regolith/tmp/BP` and `.regolith/tmp/RP`, each when it holds a
