@@ -2,6 +2,15 @@
 
 Release notes for sculkwire. Each `## vX.Y.Z` section becomes the GitHub release text when its tag is pushed.
 
+## v0.1.7
+
+- The player no longer stays on the death screen. `player_act` has a `respawn` action, which presses RESPAWN by its control name through the in-game agent when the screen lists it, else clicks the green RESPAWN button where a screenshot shows it (never a fixed spot), and never presses "Game menu"; any `player_act` call that starts while the player is dead respawns first and says so in `respawned`. A `play` run that dies respawns, logs and counts the death, and goes on with the goal, up to `maxDeaths` times (default 3; `maxDeaths: 0` stops at the first death as before). It stops with `died` only after that or when RESPAWN does not bring the player back.
+- `game_status` reports `dead` while the death screen is up or the helper streams health 0.
+- `game_stop` in a dev world respawns a dead player before Save & Quit.
+- On Linux `game_launch` runs the game in the background (`headless`) by default, so it never takes your screen, keyboard or focus; pass `display: "window"` to watch it. Windows keeps its own window as the default.
+- `display: "window"` on Linux no longer shows a black bar under the picture or makes the window jitter: inside gamescope the game now runs in its own fullscreen mode (`gfx_fullscreen`, put back by `game_stop`), which fills gamescope's frame and not your monitor. Windowed, Wine gave the game a title bar, so the picture was that much short.
+- A launch that failed after opening its listeners no longer keeps ports 19150 and 19151 taken until the MCP server exits: the next launch and `game_stop` close them.
+
 ## v0.1.6
 
 - `validate_pack` no longer reports false schema errors (`unknown property "minecraft:geometry"` on a block, `"minecraft:icon"` on an item) with rockide/schemas 0.2, which sculkwire picks up on its own. Rockide 0.2 picks the schema for a `format_version` by version range instead of a list of versions; sculkwire now reads those ranges the way rockide's own build does, so a file gets the schema of its `format_version` again, a version newer than every schema still falls back to the newest one with a `schema.format-version-fallback` warning, and `pack_fix_versions` still suggests `format_version`s.

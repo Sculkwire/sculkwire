@@ -9,7 +9,7 @@
  */
 import { realClock, type Clock } from "../clock.ts";
 import type { PlayerController } from "../player.ts";
-import type { ActionResult, EntityInfo, Loadout, PlayerAction, PlayerState } from "../types.ts";
+import type { ActionResult, EntityInfo, Loadout, PlayerAction, PlayerState, RespawnOutcome } from "../types.ts";
 import { errorMessage } from "../../../core/errors.ts";
 import { runTaskStep } from "../tasks/steps.ts";
 import type { TaskEnv, TaskFailure, TaskStep, TaskStepResult } from "../tasks/types.ts";
@@ -31,6 +31,8 @@ export interface PlayAction {
   allow?: string[];
   /** The fights' shield stance (`fight`'s `stance`); default the goal's standing order, else `auto`. */
   stance?: Stance;
+  /** Deaths the run respawns from (default `PLAY_DEFAULT_MAX_DEATHS`); the next death stops it. 0: stop at the first. */
+  maxDeaths?: number;
 }
 
 /** One entity death the helper recorded (`deaths` query). */
@@ -55,6 +57,8 @@ export interface PlayEnvironment {
   paused?(): boolean;
   /** The task steps' environment (`liveTaskEnv`), built on the first task step. */
   tasks?(): Promise<TaskEnv>;
+  /** Press RESPAWN after a death (the bridge's `respawn`). Without it the first death ends the run. */
+  respawn?(): Promise<RespawnOutcome>;
   /** The loop's waits between decisions (default the real clock; tests pass a fake one). */
   clock?: Clock;
 }
@@ -62,6 +66,7 @@ export interface PlayEnvironment {
 export const PLAY_DEFAULT_DURATION_MS = 30_000;
 export const PLAY_MAX_DURATION_MS = 300_000;
 export const PLAY_DEFAULT_STEP_MS = 250;
+export const PLAY_DEFAULT_MAX_DEATHS = 3;
 /** After a failed flee, the player fights back this long before trying to run again. */
 const CORNERED_HOLD_MS = 4000;
 /** The goal check must hold on this many decisions in a row (entity lists can miss a mob for one read). */
@@ -251,7 +256,11 @@ function taskOf(step: PlanStep & TaskStep): TaskStep {
   return rest;
 }
 
-/** Run the plan until every step's check holds, the player dies, time runs out, or a step fails. */
+/**
+ * Run the plan until every step's check holds, time runs out, or a step fails. A death presses RESPAWN (`env.respawn`)
+ * and the plan goes on from the step it was on, up to `maxDeaths` times; the next death, or a respawn that fails, stops
+ * the run with `died`.
+ */
 export async function play(
   spec: PlayAction,
   env: PlayEnvironment,
@@ -260,6 +269,7 @@ export async function play(
   const durationMs = Math.min(spec.durationMs ?? PLAY_DEFAULT_DURATION_MS, PLAY_MAX_DURATION_MS);
   const stepMs = spec.stepMs ?? PLAY_DEFAULT_STEP_MS;
   const allowed = allowedTactics(spec.allow);
+  const maxDeaths = spec.maxDeaths ?? PLAY_DEFAULT_MAX_DEATHS;
   const c = env.controller;
   const clock = env.clock ?? realClock;
   const started = Date.now();
@@ -429,9 +439,34 @@ export async function play(
         lastHealth = me.health;
         if (me.health <= 0) {
           deaths++;
-          stoppedBy = "died";
-          message = "the player died";
-          break;
+          const doing = running?.step.action ?? (task ? `task step ${stepLabel(planSteps[idx] as PlanStep)}` : "nothing");
+          const at = `${round((tickStarted - started) / 1000)} s`;
+          if (deaths > maxDeaths || !env.respawn) {
+            stoppedBy = "died";
+            message = deaths > 1 ? `the player died ${deaths} times; play respawns at most ${maxDeaths} time(s) (maxDeaths)` : "the player died";
+            logEvent(stats, `${at} died during ${doing}: stopped`);
+            break;
+          }
+          await stopTask("the player died");
+          await finish("the player died");
+          await c.releaseAll();
+          const revived = await env.respawn();
+          // `alive`: the health reading was a moment ahead of the game, which shows the player alive.
+          if (!revived.respawned && revived.via !== "alive") {
+            stoppedBy = "died";
+            message = `the player died and did not respawn: ${revived.detail}`;
+            logEvent(stats, `${at} died during ${doing}, and RESPAWN did not bring the player back: ${revived.detail}`);
+            break;
+          }
+          logEvent(stats, `${at} died during ${doing}: ${revived.detail}; death ${deaths} of at most ${maxDeaths}, the goal goes on`);
+          // A new life from the spawn point: no health trend, no recovery flee, no cornered fight, the step's targets looked for again.
+          lastHealth = undefined;
+          recovering = false;
+          cornerUntil = 0;
+          doneStreak = 0;
+          targetsSeen = false;
+          targetsGoneSince = undefined;
+          continue;
         }
       }
       if (env.loadout && tickStarted - loadoutAt >= LOADOUT_EVERY_MS) {

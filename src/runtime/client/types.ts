@@ -90,6 +90,18 @@ export interface PlayerWorld {
   query?(kind: string, params?: Record<string, unknown>): Promise<unknown>;
   /** The helper's player hurts after game tick `since` (the `hurts` query), for a world that has no `query`. */
   hurts?(since: number): Promise<HurtLog>;
+  /** Press RESPAWN when the player is dead (the bridge's `respawn`). */
+  respawn?(): Promise<RespawnOutcome>;
+}
+
+/**
+ * What a respawn did. `via`: `press` (RESPAWN by its control name through the in-game agent), `click` (at its place on
+ * the death screen), `alive` (the player was not dead: nothing pressed), `none` (RESPAWN could not be pressed).
+ */
+export interface RespawnOutcome {
+  respawned: boolean;
+  via: "press" | "click" | "alive" | "none";
+  detail: string;
 }
 
 /** The helper's player hurt records (`hurts` query): who hurt the player and how. */
@@ -122,7 +134,8 @@ export type PlayerAction =
   | ({ action: "fight" } & FightArgs)
   | ({ action: "flee" } & FleeArgs)
   | ({ action: "eat" } & EatArgs)
-  | ({ action: "use_on" } & UseOnArgs);
+  | ({ action: "use_on" } & UseOnArgs)
+  | { action: "respawn" };
 
 export interface ActionResult {
   action: PlayerAction["action"];

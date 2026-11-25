@@ -350,7 +350,7 @@ If the world join races Microsoft sign-in (the game stops on "You need to authen
 |---|---|
 | `project` | Your add-on or pack folder |
 | `deploy` | Copy the project's packs into `development_*_packs` (default true). Copies go to folders named `sculkwire_<project folder>_<pack folder>`, so projects with the same `packs/BP` layout do not overwrite each other; such a folder left by an earlier launch is copied over with the current packs, and `game_stop` removes the folders this launch copied. With `false`, a pack is only used when a folder already serves its uuid; what rgl built for a Regolith project is deployed either way. Each deployed uuid ends up in one folder of the project, see [One Folder per Pack UUID](client.md#one-folder-per-pack-uuid) |
-| `display` | `window` (Linux: a visible gamescope window; Windows: the game's own window), `headless` (Linux: no window, muted) or `desktop` (the launcher's own window; on Windows the same as `window`). The default is `window` on Windows. On Linux it is `window` when gamescope can run the install and there is a desktop, `headless` with no desktop, and `desktop` otherwise. A mode that cannot run falls back with a note: to `desktop` on Linux, to `window` for `headless` on Windows |
+| `display` | `window` (Linux: a visible gamescope window; Windows: the game's own window), `headless` (Linux: no window, muted) or `desktop` (the launcher's own window; on Windows the same as `window`). The default is `window` on Windows. On Linux it is `headless` when gamescope can run the install, so the game runs in the background and never takes the user's screen, keyboard or focus; pass `window` only when the user wants to watch. Without gamescope it is `desktop`. A mode that cannot run falls back with a note: to `desktop` on Linux, to `window` for `headless` on Windows |
 | `mute` | Silence the game's audio (default on in `headless` mode only). Linux: a silent PipeWire or PulseAudio sink. Windows: the game's audio sessions, unmuted again by `game_stop`; without an audio device or session the result has a note instead |
 | `world` | Test world name, prefixed with `sculkwire-` (default `bridge`, replaced on each launch). Leave it out unless a second world is really needed |
 | `keep` | Continue in the existing test world as it is instead of replacing it (default false). It is created when missing, and is never removed automatically. `game_stop` ends the game without Save & Quit and the game writes chunks on its own schedule: measured on 1.26.60, a scoreboard objective added 5 s before the stop was kept, a block placed 5 s before it was lost, and one placed 75 s before it was kept |
@@ -389,6 +389,8 @@ Shows whether the game is running (`running`, `ready`), the display `mode`, the 
 `ready` also needs the helper pack to answer on an attached script debugger session: it turns false when the debugger session closes or while a reload restarts the helper, and true again once the helper prints ready on a session. After a `game_reload` the bridge could not recover (see `game_reload`), `manualSteps` names what to do.
 
 When sculkwire cannot type `/connect` itself (desktop mode), `manualSteps` asks the user to type it. That step shows only while no `/connect` client is attached: it goes once one attaches (`connect.method` is then `chat`) and comes back if the game drops the socket, e.g. on a rejoin.
+
+While the game runs, `dead` says whether the player is dead: the death screen is up (`ui.screen` with the in-game agent attached, else the engine log's `death.death_screen`), or the helper's player state from the last 2 s shows health 0 or less. [player_act](#player_act) respawns the player (the `respawn` action, or before any other action).
 
 No inputs.
 
@@ -700,9 +702,10 @@ There are two input routes. The keyboard route sends held keys, mouse buttons an
 | `flee` | Sprints away `from` an entity id or type (default every hostile mob within 24 blocks) until every threat is `distance` blocks away (default 12) |
 | `eat` | Eats the best food in the hotbar for the current food level, or the food in `slot`, and confirms it from the food level or the stack. Fails when the food bar is full |
 | `use_on` | Hits each entity of a `target` type (or one entity id) once with the held item: thrown or shot like `shoot` when it is a projectile, a melee hit otherwise |
+| `respawn` | Presses RESPAWN on the death screen: by its control name through the in-game agent when the screen lists it (`ui.controls`, `ui.press`; a greyed-out RESPAWN is waited for), else a click on the green RESPAWN button where a screenshot shows it (`ui.click`, or the background mouse on Linux `window`/`headless`). Its place moves with the frame size and GUI scale (measured at 70% to 72% of the height at 1280x720, 1414x882 and 1920x1080, with "Game menu" a few percent lower), so it is never clicked at a fixed spot; with no green button on the screen nothing is clicked. On 1.26.60 the death screen is an OreUI page whose controls the agent cannot list, so RESPAWN is clicked; the death shows through the helper's health 0. It never presses "Game menu" and sends no key. Done once the player's health is above 0; gives up after 15 s with the reason. A player who is not dead is left alone (ok, "nothing to respawn") |
 | `play` | Pursues a `goal` on its own, choosing among the skills every 250 ms (see below) |
 
-Each action returns whether it succeeded, a short message, how long it took and the input route that carried it out (`input`), followed by the player's final state (`state`). A call that starts `play` also returns `job` and `status: "running"`.
+Each action returns whether it succeeded, a short message, how long it took and the input route that carried it out (`input`), followed by the player's final state (`state`). A call that starts `play` also returns `job` and `status: "running"`. A call that starts while the player is dead (the death screen is up, or the helper streamed health 0; `dead` in [game_status](#game_status)) presses RESPAWN first, as the `respawn` action does, and says how in `respawned`; when RESPAWN does not bring the player back the call fails with the reason and runs no action. While a `play` job runs, the job respawns by itself instead.
 
 These are the inputs of each action. `action` names the action and is always required.
 
@@ -724,6 +727,7 @@ These are the inputs of each action. `action` names the action and is always req
 | `flee` | `from`, an entity id or type (default every hostile mob within 24 blocks). `distance` 2 to 64 (default 12). `timeoutMs` 500 to 300000 (default 8000) |
 | `eat` | `slot` 1 to 9 (default the best food for the current food level). `timeoutMs` 500 to 30000 (default 3100) |
 | `use_on` | `target`, an entity id or type (required). `all` (default true for a type). `radius` 1 to 64 (default 24). `timeoutMs` 500 to 300000 (default 60000) |
+| `respawn` | None |
 | `play` | See [play](#play) |
 
 #### Pathfinding
@@ -835,7 +839,7 @@ A task step decides every choice by fixed rules; no model is asked. An item name
 
 Of several recipes the inventory can make, the first in the game's own order (priority, then id) is used, and the actions say which. A refused screen move is repaired by the first that applies of another slot, fetching the missing item from a container near, another station of the same type, or giving up.
 
-The run stops when the last step is done (`goal_done`), when the player dies, when `durationMs` runs out, or on an error: a failed step, or the simulation being paused.
+The run stops when the last step is done (`goal_done`), when `durationMs` runs out, or on an error: a failed step, or the simulation being paused. A death does not end it: the loop lets go of everything, presses RESPAWN as the `respawn` action does, logs the death and goes on with the step it was on (a task step starts again; the kill step looks for its targets again from where the player respawned). After `maxDeaths` respawns (3 by default) the next death stops the run with `stoppedBy: "died"`, as does a respawn that fails (its reason is in the message). `maxDeaths: 0` stops at the first death. The deaths are counted in the stats.
 
 A part of the goal the grammar did not understand (a `free` step) does not idle to the time limit. The steps before it run as usual. On it, the player still defends itself (fights, flees, eats), and once there has been nothing to do for 5 s (only `idle`, no hostile within 16 blocks) the run stops with `stoppedBy: "goal_unknown"`. The message quotes the part ("did not understand \"dance a little\"", after "did 1 step(s) (go to 1 1), then" when steps ran before it) and lists the forms `play` understands with one example each: kill ("kill 3 zombies"), reach ("go to 10 64 -20"), hit every ("hit every cow once with the held item"), craft ("craft an iron sword"), smelt ("smelt the raw iron"), trade ("trade for an emerald"), fetch ("get the diamonds out of the chest"), equip ("equip the shield"), go to ("go to the gold block"), survive ("survive for 30 seconds"). The step's plan entry is `failed`. A goal that says to survive, defend or wait is a `survive` step and runs to its time; a duration alone ("dance for 30 seconds") is not understood.
 
@@ -846,6 +850,7 @@ A part of the goal the grammar did not understand (a `free` step) does not idle 
 | `stepMs` | 250 | Time between tactic decisions, 100 to 1000 |
 | `allow` | all | Tactics `play` may use, from `fight`, `flee`, `eat`, `goto`, `use_on`, `idle`. `idle` is always allowed |
 | `stance` | the goal's order, else `auto` | The fights' shield stance, as `fight`'s `stance` (`auto`, `kite`, `guard`) |
+| `maxDeaths` | 3 | Deaths the run respawns from and goes on, 0 to 20; the next death stops it with `died`. 0 stops at the first death |
 
 `play` runs as a background job, because a run lasts longer than most MCP clients let one call run. It must be the last action in the list. The call returns at once with the job id in `job` and `status: "running"`, and [player_job](#player_job) follows it. Only one play job runs at a time. Starting another stops the first, and every other `player_act` call is refused until the job ends or `player_job` stops it. Play jobs also stop on `game_stop`, on `game_launch` and when the MCP server shuts down.
 

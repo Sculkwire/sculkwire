@@ -764,6 +764,11 @@ export class PlayerController {
         return eat(this, action, signal);
       case "use_on":
         return useOn(this, action, signal);
+      case "respawn": {
+        if (!this.world.respawn) return result(false, "respawn needs the running game's death screen, which this world cannot reach");
+        const r = await this.world.respawn();
+        return result(r.respawned || r.via === "alive", r.detail);
+      }
     }
   }
 

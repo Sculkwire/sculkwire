@@ -22,7 +22,7 @@ While the agent is attached, the bridge's own input takes its route where it can
 | `player_act`, `player_job`, `sculk bench` | Yes, while the game window is in the foreground | Yes, in window or off-screen mode |
 | `mute` | Yes (the game's audio sessions) | Yes (a silent PipeWire or PulseAudio sink) |
 | Off-screen (`headless`) mode | No | Yes |
-| Watch the game while the agent works | Yes | Yes, in window mode (default) |
+| Watch the game while the agent works | Yes | Yes, in window mode (ask for `display: "window"`) |
 | In-game agent (`engine_*`, `game_input_lock`, `game_settings`, `world_settings`, `game_ui`, `player_inventory`, `container`, `craft`, `interact`, `screen`) | Yes, in the game's own process | Yes, through the install's Wine or Proton prefix. See [In-Game Agent](engine.md) |
 
 The one real difference is where the agent's input goes:
@@ -38,11 +38,11 @@ Pass `display` to `game_launch`, or `--display` to `sculk game check`.
 
 | Mode | Linux | Windows |
 |---|---|---|
-| `window` (default) | A gamescope window on your desktop, so you can watch the agent. Sound on | The game's own window. Sound on |
-| `headless` | Nothing on screen: the game runs off-screen in gamescope. Muted | Not available: the game runs in its own window and the launch result says why. Muted |
+| `window` | A gamescope window on your desktop, so you can watch the agent. Sound on | The game's own window (default). Sound on |
+| `headless` (Linux default) | Nothing on screen: the game runs off-screen in gamescope, so it never takes your screen, keyboard or focus. Muted | Not available: the game runs in its own window and the launch result says why. Muted |
 | `desktop` | The launcher's own game window, no screenshots or input | The same as `window` |
 
-On Linux, `window` and `headless` run the game inside [gamescope](https://github.com/ValveSoftware/gamescope) at 1280 by 720 and 60 fps unless `game_launch` gets `width`, `height` or `fps`. They need a Wine or Proton install with a launch command and `gamescope` on the `PATH`. Without them, or without a desktop for `window`, the game runs in `desktop` mode and the launch result says why. With a desktop the default is `window`, without one `headless`.
+On Linux, `window` and `headless` run the game inside [gamescope](https://github.com/ValveSoftware/gamescope) at 1280 by 720 and 60 fps unless `game_launch` gets `width`, `height` or `fps`. They need a Wine or Proton install with a launch command and `gamescope` on the `PATH`. Without them, or without a desktop for `window`, the game runs in `desktop` mode and the launch result says why. The default is `headless`: the game runs in the background, and `window` shows it only when you ask for it. `game_screenshot` shows what the game shows in either mode.
 
 On Windows the game sizes its own window, so `width`, `height` and `fps` do nothing. Screenshots capture the window's client area with `PrintWindow`, which works while the window is covered. When the game hands back an empty frame (one colour), the client area is copied from the screen instead, which needs the game window in the foreground; otherwise the screenshot fails and says so. Clicks use the same client area in physical pixels, so a pixel in the screenshot is the pixel clicked.
 

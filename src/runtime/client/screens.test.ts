@@ -13,6 +13,8 @@ import {
   NO_SCREENS,
   playTab,
   recoverJoin,
+  respawn,
+  RESPAWN_TIMEOUT_MS,
   screensFromUi,
   screensInLog,
   type RecoveryIO,
@@ -802,5 +804,176 @@ describe("Save & Quit before a stop", () => {
     const game = new FakeGame({ start: "start" });
     const result = await leaveWorld(game.io(), { screens: screensInLog(game.history()) });
     expect(result).toMatchObject({ left: true, presses: 0 });
+  });
+});
+
+describe("respawn on the death screen", () => {
+  const FRAME = { width: 1280, height: 668 };
+  /** RESPAWN and "Game menu" as fractions of the height: where one window had them, and another a bit lower. */
+  const HIGH = { respawn: [0.64, 0.68], menu: [0.71, 0.75] } as const;
+  const LOW = { respawn: [0.69, 0.75], menu: [0.765, 0.83] } as const;
+  type Layout = typeof HIGH | typeof LOW;
+
+  /** A death screen: dark red-tinted world, the green RESPAWN with its white label, the grey "Game menu" under it. */
+  function deathScreen(size: { width: number; height: number }, layout: Layout): Buffer {
+    const image = frame(size.width, size.height, 0);
+    fill(image, { x: 0, y: 0, width: size.width, height: size.height }, [70, 40, 45]);
+    const button = (span: readonly [number, number], colour: readonly [number, number, number]) =>
+      fill(image, { x: size.width / 2 - 0.22 * size.height, y: span[0] * size.height, width: 0.44 * size.height, height: (span[1] - span[0]) * size.height }, colour);
+    button(layout.respawn, [42, 100, 28]);
+    fill(image, { x: size.width / 2 - 0.06 * size.height, y: (layout.respawn[0] + 0.015) * size.height, width: 0.12 * size.height, height: 0.025 * size.height }, [255, 255, 255]);
+    button(layout.menu, [208, 209, 212]);
+    return png(image);
+  }
+  const RESPAWN_BUTTON: UiControl = { name: "button.respawn_button", type: "button", rect: [540, 425, 200, 40], text: "Respawn", enabled: true };
+  const GAME_MENU: UiControl = { name: "button.main_menu_button", type: "button", rect: [540, 475, 200, 40], text: "Game menu", enabled: true };
+
+  /**
+   * A game showing the death screen over the HUD. RESPAWN (pressed by name, or clicked on its button) brings the HUD
+   * back with full health, unless `ignores`; "Game menu" leaves for the start screen.
+   */
+  function deathGame(
+    opts: { ui?: boolean; controls?: UiControl[]; enabledAtMs?: number; mouse?: boolean; ignores?: boolean; screen?: "death" | "hud"; health?: number; layout?: Layout; blank?: boolean } = {},
+  ) {
+    const layout = opts.layout ?? HIGH;
+    let clock = 0;
+    let screen = opts.screen === "hud" ? "hud_screen" : "death_screen";
+    let health = opts.health ?? 0;
+    const inputs: string[] = [];
+    const onRespawn = (y: number) => y > layout.respawn[0] && y < layout.respawn[1];
+    const onMenu = (y: number) => y > layout.menu[0] && y < layout.menu[1];
+    const revive = () => {
+      if (opts.ignores) return;
+      screen = "hud_screen";
+      health = 20;
+    };
+    const ui: UiRecovery = {
+      screen: async () => ({ name: screen, stack: screen === "death_screen" ? ["hud_screen", "death_screen"] : [screen], modal: false }),
+      controls: async () => (screen === "death_screen" ? (opts.controls ?? [{ ...RESPAWN_BUTTON, enabled: clock >= (opts.enabledAtMs ?? 0) }, GAME_MENU]) : []),
+      press: async (name) => {
+        inputs.push(`ui:press ${name}`);
+        if (name === RESPAWN_BUTTON.name) revive();
+        if (name === GAME_MENU.name) screen = "start_screen";
+      },
+      key: async (key) => void inputs.push(`ui:key ${key}`),
+      click: async (x, y) => {
+        inputs.push(`ui:click ${x},${y}`);
+        if (screen === "death_screen" && onRespawn(y / FRAME.height)) revive();
+        else if (screen === "death_screen" && onMenu(y / FRAME.height)) screen = "start_screen";
+      },
+    };
+    const io: RecoveryIO = {
+      readLog: async () => "",
+      key: async (keys) => void inputs.push(`key ${keys}`),
+      ...(opts.mouse
+        ? {
+            click: async (x: number, y: number) => {
+              inputs.push(`click ${x.toFixed(3)},${y.toFixed(3)}`);
+              if (onRespawn(y)) revive();
+              else if (onMenu(y)) screen = "start_screen";
+            },
+          }
+        : {}),
+      ...(opts.ui ? { ui: () => ui } : {}),
+      screenshot: async (label) => ({
+        path: `${label}.png`,
+        png: opts.blank || screen !== "death_screen" ? png(frame(FRAME.width, FRAME.height, 40)) : deathScreen(FRAME, layout),
+      }),
+      alive: async () => true,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      now: () => clock,
+    };
+    /** Whether every click so far landed on RESPAWN (as fractions of the frame), never on "Game menu". */
+    const clickedRespawn = () =>
+      inputs
+        .filter((i) => i.includes("click"))
+        .every((i) => {
+          const y = Number(i.split(",")[1]);
+          return onRespawn(i.startsWith("ui:") ? y / FRAME.height : y);
+        });
+    return { io, inputs, health: () => health, clock: () => clock, screen: () => screen, clickedRespawn };
+  }
+
+  it("knows the death screen from the agent's name and from the engine log", () => {
+    expect(kindOfScreenName("death_screen")).toBe("death");
+    const s = screensInLog([at("12:00:00:000", "GUI", "Created 'hud.hud_screen' screen in 1ms"), at("12:00:05:000", "GUI", "Created 'death.death_screen' screen in 1ms")].join("\n"));
+    expect(currentScreen(s)).toBe("death");
+    expect(currentScreen(screensInLog(at("12:00:09:000", "GUI", "Destroyed 'death_screen' screen"), s))).toBe("world");
+  });
+
+  it("presses RESPAWN by its control name, waiting while it is greyed out, never Game menu", async () => {
+    const game = deathGame({ ui: true, enabledAtMs: 2000 });
+    const r = await respawn(game.io, { health: game.health });
+    expect(r).toMatchObject({ wasDead: true, respawned: true, via: "press", presses: 1 });
+    expect(game.inputs).toEqual(["ui:press button.respawn_button"]);
+    expect(game.clock()).toBeGreaterThanOrEqual(2000);
+    expect(r.steps[0]).toMatch(/not enabled yet/);
+  });
+
+  it("clicks RESPAWN where the screenshot shows it, through the agent when the screen lists no RESPAWN control", async () => {
+    const game = deathGame({ ui: true, controls: [GAME_MENU] });
+    const r = await respawn(game.io, { health: game.health });
+    expect(r).toMatchObject({ respawned: true, via: "click" });
+    expect(game.inputs).toHaveLength(1);
+    expect(game.inputs[0]).toMatch(/^ui:click 640,/);
+    expect(game.clickedRespawn()).toBe(true);
+  });
+
+  it("finds RESPAWN wherever the frame puts it, never clicking Game menu at RESPAWN's place in another window", async () => {
+    for (const layout of [HIGH, LOW]) {
+      const game = deathGame({ mouse: true, layout });
+      const r = await respawn(game.io, { health: game.health });
+      expect(r).toMatchObject({ wasDead: true, respawned: true, via: "click" });
+      expect(game.clickedRespawn()).toBe(true);
+      expect(game.screen()).toBe("hud_screen");
+    }
+  });
+
+  it("never clicks blind: no RESPAWN on the screen means no click, and the reason after the time limit", async () => {
+    const game = deathGame({ mouse: true, blank: true });
+    const r = await respawn(game.io, { health: game.health });
+    expect(r).toMatchObject({ respawned: false, presses: 0 });
+    expect(r.steps[0]).toMatch(/RESPAWN is not on the screen/);
+    expect(game.inputs).toEqual([]);
+  });
+
+  it("clicks with the background mouse when the log still reads the world but health 0 says the player died", async () => {
+    // The engine log does not always name the death screen: the HUD it last created is all it knows.
+    const game = deathGame({ mouse: true });
+    const screens = screensInLog(at("12:00:00:000", "GUI", "Created 'hud.hud_screen' screen in 1ms"));
+    expect(currentScreen(screens)).toBe("world");
+    const r = await respawn(game.io, { health: game.health, screens });
+    expect(r).toMatchObject({ wasDead: true, respawned: true, via: "click" });
+    expect(game.inputs).toHaveLength(1);
+    expect(game.clickedRespawn()).toBe(true);
+  });
+
+  it("gives up after its time limit with a reason, never pressing Game menu or a key", async () => {
+    const game = deathGame({ ui: true, ignores: true });
+    const r = await respawn(game.io, { health: game.health });
+    expect(r.respawned).toBe(false);
+    expect(r.reason).toContain(`did not respawn within ${RESPAWN_TIMEOUT_MS / 1000} s`);
+    expect(game.clock()).toBeLessThanOrEqual(RESPAWN_TIMEOUT_MS + 1000);
+    // By name twice, then at RESPAWN's place.
+    expect(game.inputs.slice(0, 3)).toEqual(["ui:press button.respawn_button", "ui:press button.respawn_button", expect.stringMatching(/^ui:click /)]);
+    expect(game.inputs.filter((i) => i.includes("main_menu") || i.includes("key"))).toEqual([]);
+    expect(game.screen()).toBe("death_screen");
+  });
+
+  it("says why when nothing can press RESPAWN, and leaves a living player alone", async () => {
+    const stuck = deathGame();
+    expect(await respawn(stuck.io, { health: stuck.health })).toMatchObject({ respawned: false, reason: expect.stringMatching(/no in-game agent UI and no background mouse/) });
+    const alive = deathGame({ ui: true, screen: "hud", health: 20 });
+    expect(await respawn(alive.io, { health: alive.health })).toMatchObject({ wasDead: false, respawned: false, presses: 0 });
+    expect(alive.inputs).toEqual([]);
+  });
+
+  it("does not try Save & Quit over the death screen", async () => {
+    const game = deathGame({ ui: true });
+    const r = await leaveWorld(game.io);
+    expect(r).toMatchObject({ left: false, reason: expect.stringMatching(/respawn first/) });
+    expect(game.inputs).toEqual([]);
   });
 });

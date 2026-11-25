@@ -3,6 +3,7 @@
  * `start` on an install sculkwire launches: `stop` during the wait ends it with "the game stopped".
  * The launcher is replaced so no game process is looked up, started or stopped.
  */
+import { createServer, type AddressInfo } from "node:net";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -73,6 +74,33 @@ describe("client bridge start", () => {
     delete process.env.SCULKWIRE_DATA;
     delete process.env.SCULKWIRE_CONFIG;
     await rm(dir, { recursive: true, force: true });
+  });
+
+  it("frees the debugger port when the start fails after opening it, so the next launch can take it", async () => {
+    const freePort = async (): Promise<number> => {
+      const s = createServer();
+      await new Promise<void>((r) => s.listen(0, "127.0.0.1", r));
+      const { port } = s.address() as AddressInfo;
+      await new Promise((r) => s.close(r));
+      return port;
+    };
+    const debuggerPort = await freePort();
+    const taken = createServer();
+    await new Promise<void>((r) => taken.listen(0, "127.0.0.1", r));
+    const connectPort = (taken.address() as AddressInfo).port;
+    const bridge = new ClientBridge();
+    try {
+      await expect(bridge.start({ mode: "desktop", debuggerPort, connectPort })).rejects.toThrow(/EADDRINUSE/);
+      const again = createServer();
+      await new Promise<void>((resolve, reject) => {
+        again.once("error", reject);
+        again.listen(debuggerPort, "127.0.0.1", resolve);
+      });
+      await new Promise((r) => again.close(r));
+    } finally {
+      await new Promise((r) => taken.close(r));
+      await bridge.stop();
+    }
   });
 
   it("ends the background wait for the world when the session stops", async () => {

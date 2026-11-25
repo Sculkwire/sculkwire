@@ -35,6 +35,11 @@ export type ScreenKind =
   | "world"
   | "pause"
   | "chat"
+  /**
+   * The death screen ("You died!", the cause, RESPAWN over "Game menu"): vanilla `ui/death_screen.json`, namespace
+   * `death`, screen `death_screen`, so the log creates `death.death_screen` and `ui.screen` names `death_screen`.
+   */
+  | "death"
   /** Any other screen. */
   | "other";
 
@@ -83,6 +88,7 @@ export function kindOfScreenName(name: string): ScreenKind {
   if (bare === "hud_screen") return "world";
   if (bare === "pause_screen") return "pause";
   if (bare === "chat_screen") return "chat";
+  if (bare === "death_screen") return "death";
   if (bare.includes("disconnect")) return "disconnect";
   return "other";
 }
@@ -242,6 +248,49 @@ export function localWorldTiles(image: Pixels): number[] {
   return out;
 }
 
+/** The death screen's RESPAWN button green (about 42,100,28; lighter when hovered), never "Game menu"'s grey. */
+function respawnGreen(image: Pixels, x: number, y: number): boolean {
+  const at = (Math.round(y) * image.width + Math.round(x)) * image.channels;
+  const r = image.data[at] ?? 0;
+  const g = image.data[at + 1] ?? 0;
+  const b = image.data[at + 2] ?? 0;
+  return g >= 70 && g >= 1.8 * r && g >= 2.5 * b;
+}
+
+/**
+ * Where RESPAWN is on a death screen screenshot, as fractions of the frame, or undefined when no such button shows.
+ * Its place depends on the frame's size and the GUI scale (it sat at 66% of the height in one window and 72% in
+ * another, where 73% was already "Game menu"), so it is found by its colour instead of clicked at a fixed spot: a
+ * green band centred on the frame, below the death message, as wide as a button and as tall as one. Rows are sampled
+ * left and right of the centre (in units of the height, which the GUI scales with) so the label's white letters do
+ * not break the band.
+ */
+export function findRespawnButton(image: Pixels): { x: number; y: number } | undefined {
+  const cx = image.width / 2;
+  const h = image.height;
+  const offsets = [0.1, 0.14, 0.18].flatMap((o) => [cx - o * h, cx + o * h]).filter((x) => x >= 0 && x < image.width);
+  const isBand = (y: number) => offsets.filter((x) => respawnGreen(image, x, y)).length >= Math.min(4, offsets.length);
+  let top = -1;
+  for (let y = Math.floor(0.4 * h); y < Math.floor(0.97 * h); y++) {
+    if (isBand(y)) {
+      if (top < 0) top = y;
+      continue;
+    }
+    if (top < 0) continue;
+    const tall = y - top;
+    const mid = top + Math.floor(tall / 2);
+    top = -1;
+    if (tall < 0.025 * h || tall > 0.12 * h) continue;
+    let left = Math.round(cx - 0.1 * h);
+    let right = Math.round(cx + 0.1 * h);
+    while (left > 0 && respawnGreen(image, left - 1, mid + 2)) left--;
+    while (right < image.width - 1 && respawnGreen(image, right + 1, mid + 2)) right++;
+    if (right - left < 0.3 * h || Math.abs(left + right - 2 * cx) > 0.03 * image.width) continue;
+    return { x: 0.5, y: mid / h };
+  }
+  return undefined;
+}
+
 /**
  * The agent's own UI driving (`ui.*`), which the recovery uses when the in-game agent is attached: the screen comes
  * from the game instead of the log, and presses and keys land without the game window being in the foreground.
@@ -325,6 +374,8 @@ const SETTLE_MS: Record<ScreenKind, number> = {
   // A click in the first ~3 s after the pause menu opens lands on Resume Game (measured live).
   pause: 4000,
   chat: 1000,
+  // The death screen greys RESPAWN out for a moment after it opens.
+  death: 1000,
   loading: 0,
   world: 2000,
 };
@@ -745,6 +796,8 @@ export async function leaveWorld(io: RecoveryIO, opts: LeaveOptions = {}): Promi
     }
     const kind = currentScreen(screens);
     if (!screens.inWorld && (kind === "start" || kind === "play" || kind === "disconnect")) return done(true);
+    // Escape does not reach the pause menu from the death screen, and its other button is "Game menu".
+    if (kind === "death") return done(false, "the player is dead (the death screen is up): respawn first, then Save & Quit");
     if (io.now() > deadline) return done(false, `the game did not leave the world within ${Math.round(timeoutMs / 1000)} s (last screen: ${kind})`);
     if (screens.changes !== seenChanges) {
       seenChanges = screens.changes;
@@ -778,5 +831,171 @@ export async function leaveWorld(io: RecoveryIO, opts: LeaveOptions = {}): Promi
       if (kind === "pause" && ++failedQuits >= 2) return done(false, `Save & Quit could not be pressed: ${errorMessage(e)}`);
     }
     pressed = { at: io.now(), patienceMs: press.patienceMs ?? PATIENCE_MS };
+  }
+}
+
+/** How long `respawn` tries by default. */
+export const RESPAWN_TIMEOUT_MS = 15_000;
+/** After pressing RESPAWN, how long to wait for the death screen to go before pressing again. */
+const RESPAWN_PATIENCE_MS = 3000;
+/** The RESPAWN control by its name (`respawn_button`, as `death_screen.json` names it) or its label. */
+const RESPAWN_CONTROL = /respawn/i;
+/** Never pressed: the death screen's other button, "Game menu" (`main_menu_button`), leads out to the menus. */
+const NOT_RESPAWN = /menu|quit/i;
+
+export interface RespawnOptions {
+  /** The player's health as the helper last streamed it, undefined when no fresh reading is known. */
+  health(): number | undefined;
+  /** Give up after this long (default `RESPAWN_TIMEOUT_MS`). */
+  timeoutMs?: number;
+  /** State of the reads before the walk started. */
+  screens?: ScreenState;
+  join?: JoinState;
+}
+
+export interface RespawnResult {
+  /** The player was dead when the walk started: the death screen was up, or the helper streamed health 0. */
+  wasDead: boolean;
+  /** The death screen is gone and the player is alive again. */
+  respawned: boolean;
+  /** How RESPAWN was pressed last: by its control name through the agent, a click at its place, or never. */
+  via: "press" | "click" | "none";
+  /** What was pressed, in order. */
+  steps: string[];
+  presses: number;
+  screens: ScreenState;
+  join: JoinState;
+  /** Why the player is still dead. */
+  reason?: string;
+}
+
+/** The death screen's RESPAWN control, never "Game menu". */
+function respawnControl(controls: readonly UiControl[]): UiControl | undefined {
+  // Name and label together, so a control labelled RESPAWN but named like a menu button is still never pressed.
+  return controls.find((c) => RESPAWN_CONTROL.test(`${c.name} ${c.text ?? ""}`) && !NOT_RESPAWN.test(`${c.name} ${c.text ?? ""}`));
+}
+
+/**
+ * Press RESPAWN like a player when the player died: the death screen (`death.death_screen`, from `ui.screen` or the
+ * engine log) is up, or the helper streamed health 0 while no screen name is known. Through the in-game agent RESPAWN is
+ * pressed by its control name (`ui.controls`/`ui.press`); a RESPAWN still greyed out is waited for; when the screen lists
+ * no RESPAWN control, or a press by name did not take, RESPAWN is clicked where a screenshot shows it (`findRespawnButton`, through
+ * `ui.click` or the background mouse). "Game menu" is never pressed and no key is sent (Return may press the focused
+ * button, which can be "Game menu"). Done once the death screen is gone and the helper streams health above 0 (or the
+ * HUD is on top after a press); gives up after `timeoutMs`. A player that is not dead is left alone (`wasDead` false).
+ */
+export async function respawn(io: RecoveryIO, opts: RespawnOptions): Promise<RespawnResult> {
+  const timeoutMs = opts.timeoutMs ?? RESPAWN_TIMEOUT_MS;
+  const deadline = io.now() + timeoutMs;
+  let screens = opts.screens ?? NO_SCREENS;
+  let join = opts.join ?? NO_JOIN_YET;
+  const steps: string[] = [];
+  let presses = 0;
+  let via: RespawnResult["via"] = "none";
+  let wasDead = false;
+  let uiFailures = 0;
+  let uiDown = false;
+  let seenChanges = -1;
+  let since = io.now();
+  let pressed: number | undefined;
+  /** Presses by name that did not take: the next press is a click at RESPAWN's place. */
+  let namedTries = 0;
+  let waitingForEnabled = false;
+  /** The last screenshot showed no RESPAWN (said once until it shows). */
+  let notShown = false;
+  let frame: { width: number; height: number } | undefined;
+  const uiRoute = (): UiRecovery | undefined => (uiDown ? undefined : io.ui?.(io.sleep));
+  const touches = touchRoute(io, uiRoute, () => frame);
+  const done = (respawned: boolean, reason?: string): RespawnResult => ({ wasDead, respawned, via, steps, presses, screens, join, ...(reason ? { reason } : {}) });
+
+  for (;;) {
+    if (!(await io.alive())) return done(false, "the game stopped before the player respawned");
+    const text = await io.readLog();
+    if (text) {
+      screens = screensInLog(text, screens);
+      join = joinStateInLog(text, join);
+    }
+    const ui = uiRoute();
+    if (ui) {
+      const screen = await ui.screen().catch(() => undefined);
+      if (screen) {
+        screens = screensFromUi(screen, screens);
+        uiFailures = 0;
+      } else if (++uiFailures >= 2) {
+        uiDown = true;
+        steps.push("the agent's UI stopped answering: back to the log and the background mouse");
+      }
+    }
+    const kind = currentScreen(screens);
+    const health = opts.health();
+    const deathShown = kind === "death";
+    if (!wasDead) {
+      if (!deathShown && !(health !== undefined && health <= 0)) return done(false);
+      wasDead = true;
+    } else if (!deathShown && (health !== undefined ? health > 0 : kind === "world" && presses > 0)) {
+      return done(true);
+    }
+    if (io.now() > deadline) {
+      return done(false, `the player did not respawn within ${Math.round(timeoutMs / 1000)} s (last screen: ${kind}, health ${health ?? "unknown"})`);
+    }
+    if (screens.changes !== seenChanges) {
+      seenChanges = screens.changes;
+      since = io.now();
+      pressed = undefined;
+    }
+    // Health 0 alone is acted on only while no screen name says otherwise: a HUD still on top may be a moment ahead of
+    // the death screen, and on a pause or chat screen RESPAWN's place is another button.
+    // Without the agent's UI the screen comes from the engine log, which never names the death screen: there it still
+    // reads `world`, so health 0 is the death screen.
+    const deadInWorld = kind === "world" && !ui && health !== undefined && health <= 0;
+    const actable = deathShown || kind === "unknown" || kind === "other" || deadInWorld;
+    const waiting = !actable || io.now() - since < SETTLE_MS.death || (pressed !== undefined && io.now() - pressed < RESPAWN_PATIENCE_MS);
+    if (waiting) {
+      await io.sleep(300);
+      continue;
+    }
+    let press: Press | undefined;
+    let how: RespawnResult["via"] = "click";
+    if (ui) {
+      const control = respawnControl(await ui.controls().catch(() => [] as UiControl[]));
+      if (control && !control.enabled) {
+        if (!waitingForEnabled) steps.push(`${kind}: RESPAWN (${control.name}) is not enabled yet: waiting`);
+        waitingForEnabled = true;
+        await io.sleep(300);
+        continue;
+      }
+      waitingForEnabled = false;
+      if (control && namedTries < 2) {
+        namedTries++;
+        how = "press";
+        press = { label: `press RESPAWN (${control.name})`, run: () => ui.press(control.name) };
+      }
+    }
+    if (!press) {
+      if (!touches.canClick()) return done(false, "RESPAWN cannot be pressed: no in-game agent UI and no background mouse reach this game");
+      // RESPAWN's place depends on the frame's size and GUI scale: find it in a screenshot, and never click blind (a
+      // fixed spot can be "Game menu", which leaves the world). The screenshot also gives `ui.click` its frame.
+      const shot = await io.screenshot("death").catch(() => undefined);
+      const image = shot ? decodePng(shot.png) : undefined;
+      const at = image ? findRespawnButton(image) : undefined;
+      if (!at) {
+        if (!notShown) steps.push(`${kind}: RESPAWN is not on the screen${shot ? "" : " (no screenshot)"}: waiting`);
+        notShown = true;
+        await io.sleep(300);
+        continue;
+      }
+      notShown = false;
+      if (image) frame = { width: image.width, height: image.height };
+      press = touches.click("RESPAWN", at);
+    }
+    steps.push(`${kind}: ${press.label}`);
+    try {
+      await press.run();
+      presses++;
+      via = how;
+    } catch (e) {
+      steps.push(`${kind}: ${press.label} failed: ${errorMessage(e)}`);
+    }
+    pressed = io.now();
   }
 }

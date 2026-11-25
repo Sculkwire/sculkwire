@@ -14,7 +14,7 @@ import { inputProvider, withInputLock } from "./inputprovider.ts";
 import { engine } from "../engine/engine.ts";
 import type { EngineResult } from "../engine/failure.ts";
 import type { EntityInfo, Loadout, PlayerAction } from "./types.ts";
-import { play, PLAY_DEFAULT_DURATION_MS, PLAY_DEFAULT_STEP_MS, PLAY_MAX_DURATION_MS, type Death, type PlayAction, type PlayResult } from "./skills/play.ts";
+import { play, PLAY_DEFAULT_DURATION_MS, PLAY_DEFAULT_MAX_DEATHS, PLAY_DEFAULT_STEP_MS, PLAY_MAX_DURATION_MS, type Death, type PlayAction, type PlayResult } from "./skills/play.ts";
 import { TACTICS } from "./skills/tactics.ts";
 import { STANCES } from "./skills/pack.ts";
 import type { FightStats } from "./skills/types.ts";
@@ -64,6 +64,7 @@ const statusSchema = {
   prunedWorlds: z.array(z.string()).optional(),
   worldNote: z.string().optional(),
   worldMode: z.enum(["fresh", "kept", "copied", "user"]).optional(),
+  dead: z.boolean().optional().describe("game_status: the player is dead (the death screen is up, or the helper streamed health 0); player_act respawns it"),
   worldBackup: z.string().optional(),
   defaultWorld: z.object({ levelId: z.string(), name: z.string() }).optional(),
 };
@@ -122,6 +123,7 @@ function statusText(s: BridgeStatus): string {
     `/connect clients ${s.connect.clients}`,
   ];
   for (const step of s.manualSteps) parts.push(`manual: ${step}`);
+  if (s.dead) parts.push("the player is dead: player_act respawns it (action respawn, or any action)");
   if (s.packs.length) {
     const packs = s.packs.map((p) => {
       const where = p.folder ? `${p.folder}${p.path ? ` at ${p.path}` : ""}` : "not deployed";
@@ -213,10 +215,11 @@ export function register(server: McpServer): void {
         "weather frozen. In the user's dev world sculkwire backs up level.dat, the pack lists and the icon first (worldBackup), " +
         "merges the packs into its pack lists (other packs stay), turns cheats on when they are off (the world then awards " +
         "no achievements) and says so in worldNote; experiments only with betaApis, the difficulty only when given; the game " +
-        "must be closed for that. Attaches the script debugger automatically. Display modes: `window` (the default) is a visible " +
-        "gamescope window on Linux and the game's own window on Windows, where screenshots, input and /connect work; " +
-        "`headless` runs without a window and muted on Linux (Windows has no gamescope, so it runs the window and the " +
-        "result says so); `desktop` uses the launcher's normal window (on Windows the same as `window`). On Linux the " +
+        "must be closed for that. Attaches the script debugger automatically. Display modes: on Linux `headless` (the " +
+        "default) runs the game in the background, without a window and muted, so it never takes the user's screen; " +
+        "`window` is a visible gamescope window, only when the user wants to watch. On Windows `window` (the default) is " +
+        "the game's own window and `headless` runs the window too (the result says so). Screenshots, input and /connect " +
+        "work in both. `desktop` uses the launcher's normal window (on Windows the same as `window`). On Linux the " +
         "agent's input stays inside gamescope; on Windows it uses the system keyboard and mouse while the game window is " +
         "in the foreground and stops when the user switches away. Only " +
         "the chosen install's game is managed, so a game the user plays from another launcher is left alone. sculkwire " +
@@ -238,7 +241,7 @@ export function register(server: McpServer): void {
         display: z
           .enum(["window", "headless", "desktop"])
           .optional()
-          .describe("window: a visible gamescope window on Linux, the game's own window on Windows (default). headless: no window and muted on Linux; Windows runs the window instead. desktop: the launcher's own window (on Windows the same as window)"),
+          .describe("headless (Linux default): no window and muted, the game runs in the background; Windows runs the window instead. window: a visible gamescope window on Linux, only when the user wants to watch; the game's own window on Windows (default there). desktop: the launcher's own window (on Windows the same as window)"),
         mute: z.boolean().optional().describe("Silence the game's audio (Linux: a silent sink; Windows: the game's audio sessions, unmuted again by game_stop). Defaults to on in headless mode only"),
         world: z
           .string()
@@ -310,14 +313,15 @@ export function register(server: McpServer): void {
       title: "Client bridge status",
       description:
         "Whether the client runs, which world and packs are active (worldMode: fresh, kept, copied or user), which channels " +
-        "(debugger, /connect) are attached, and the user's saved default dev world (defaultWorld).",
+        "(debugger, /connect) are attached, the user's saved default dev world (defaultWorld), and whether the player is " +
+        "dead (dead: the death screen is up or the helper streamed health 0; player_act respawns it).",
       inputSchema: {},
       outputSchema: statusSchema,
     },
     async () => {
       const install = bridge.install ?? (await findInstall().catch(() => undefined));
       const defaultWorld = install ? await readDevWorld(install) : undefined;
-      const s = { ...bridge.status(), ...(defaultWorld ? { defaultWorld } : {}) };
+      const s = { ...bridge.status(), ...(defaultWorld ? { defaultWorld } : {}), ...(bridge.running ? { dead: await bridge.dead() } : {}) };
       return ok(statusText(s), s);
     },
   );
@@ -834,6 +838,7 @@ export function register(server: McpServer): void {
       radius: z.number().min(1).max(64).optional().describe("Default 24"),
       timeoutMs: z.number().int().min(500).max(300_000).optional(),
     }),
+    z.object({ action: z.literal("respawn") }),
     z.object({
       action: z.literal("play"),
       goal: z
@@ -851,6 +856,13 @@ export function register(server: McpServer): void {
         .optional()
         .describe(`Tactics play may use, from ${TACTICS.join(", ")}. Default all. idle is always allowed`),
       stance: z.enum(STANCES).optional().describe("The fights' shield stance, as fight's stance (default the goal's standing order, else auto)"),
+      maxDeaths: z
+        .number()
+        .int()
+        .min(0)
+        .max(20)
+        .optional()
+        .describe(`Deaths play respawns from and goes on with the goal (default ${PLAY_DEFAULT_MAX_DEATHS}); the next death stops it with died. 0: stop at the first death`),
     }),
   ]);
 
@@ -872,7 +884,9 @@ export function register(server: McpServer): void {
         "jumps in place for critical hits, backs off from a creeper about to blow, then takes the next hostile; its result " +
         "counts kills by type, swings, hits, misses, critical hits, hits taken, damage taken, hits blocked and the time), " +
         "flee (sprints away from threats), eat (best food in the hotbar) and use_on (hits each entity of a type once with " +
-        "the held item). " +
+        "the held item), respawn (presses RESPAWN on the death screen: by its control name through the in-game agent, " +
+        "else a click at its place; never Game menu). A call that starts while the player is dead respawns first and " +
+        "says so in `respawned`; it fails when RESPAWN does not bring the player back. " +
         "Pass several actions to run them in order in one call; it " +
         "stops at the first failure unless continueOnError. Returns each action's result and the player's final state. " +
         "Input goes as keyboard and mouse: on Linux into gamescope's own display (xdotool), on Windows through the " +
@@ -906,7 +920,9 @@ export function register(server: McpServer): void {
         "Follow it with player_job (status, wait, stop), which returns the current plan step while it runs and, once it " +
         "ends, the stop reason, the plan (per step: kind, done or not, message, task actions and inventory change), " +
         "kills, hits, misses, critical hits, " +
-        "hits taken, damage taken, hits blocked and a trace of every tactic. `play` must be the last action. Only one play job runs at a time, a new one " +
+        "hits taken, damage taken, hits blocked, deaths and a trace of every tactic. A death mid-goal respawns and the goal goes on " +
+        "(the death is logged and counted), up to maxDeaths times (default 3); the next death, or a respawn that fails, " +
+        "stops the run with died. `play` must be the last action. Only one play job runs at a time, a new one " +
         "stops the old one, and other actions are refused while one runs. The keyboard route needs game_launch with " +
         "display window or headless on Linux, or any display on Windows; with the in-game agent attached, the engine " +
         "route also drives a Linux desktop-mode game (input auto or engine; keyboard is refused there).",
@@ -944,6 +960,7 @@ export function register(server: McpServer): void {
         ),
         state: playerStateSchema,
         job: z.string().optional().describe("Id of the play job this call started"),
+        respawned: z.string().optional().describe("The player was dead when the call started: how RESPAWN was pressed before the actions"),
         status: z.literal("running").optional(),
       },
     },
@@ -964,6 +981,16 @@ export function register(server: McpServer): void {
         const controller = bridge.playerController();
         const route = await controller.selectInput(input ?? "auto");
         const lines: string[] = [`input: ${route}`];
+        // A player left on the death screen respawns before anything else runs (a running play job respawns by itself).
+        let respawned: string | undefined;
+        if (!running && (await bridge.dead())) {
+          const revived = await bridge.respawn();
+          if (!revived.respawned && revived.via !== "alive") throw new Error(`the player is dead and did not respawn: ${revived.detail}`);
+          if (revived.respawned) {
+            respawned = revived.detail;
+            lines.push(`the player was dead: ${revived.detail}`);
+          }
+        }
         if (controller.inputNote) lines.push(controller.inputNote);
         if (route === "keyboard" && provider?.keyboardNote) lines.push(provider.keyboardNote);
         // The provider's input lock is held while these actions or the play job run, on the engine route only.
@@ -996,6 +1023,7 @@ export function register(server: McpServer): void {
               deaths: async (since: number) => (await bridge.query("deaths", { since })) as { tick: number; deaths: Death[] },
               paused: () => provider?.pausedReason() !== undefined,
               tasks: () => liveTaskEnv({ controller }),
+              respawn: () => bridge.respawn(),
             };
             job = await playJobs.start(spec.goal, ({ signal, onStep, onPlan }) =>
               withInputLock(locking, () => play(spec, pauseOnTakeover(env, locking?.input.takeover ?? gate, signal), { signal, onStep, onPlan })),
@@ -1009,7 +1037,7 @@ export function register(server: McpServer): void {
         }
         const state = await bridge.playerState(500);
         lines.push(`at ${state.location.x}, ${state.location.y}, ${state.location.z}, facing yaw ${state.rotation.y.toFixed(0)} pitch ${state.rotation.x.toFixed(0)}`);
-        return ok(lines.join("\n"), { results, state, ...(job ? { job: job.id, status: "running" } : {}) });
+        return ok(lines.join("\n"), { results, state, ...(job ? { job: job.id, status: "running" } : {}), ...(respawned ? { respawned } : {}) });
       } catch (err) {
         return fail(err);
       }

@@ -199,14 +199,14 @@ export async function gamescopeBlocker(install: ClientInstall, platform: NodeJS.
 }
 
 /**
- * Windows: `window` (the game's own window). Elsewhere: window mode when gamescope works and there is a desktop to
- * show it on, headless without one, else desktop.
+ * Windows: `window` (the game's own window; input through the in-game agent works with it covered). Elsewhere:
+ * headless when gamescope works, so the game never takes the user's screen, keyboard or focus; `window` only when
+ * asked for. Desktop when gamescope cannot run the install.
  */
 export async function defaultMode(install: ClientInstall, platform: NodeJS.Platform = process.platform): Promise<LaunchMode> {
   if (platform === "win32") return "window";
   if (await gamescopeBlocker(install, platform)) return "desktop";
-  const env = sessionEnv();
-  return env.WAYLAND_DISPLAY || env.DISPLAY ? "window" : "headless";
+  return "headless";
 }
 
 /** The mode a Windows launch runs in: the game's own window, also for `headless`, which needs gamescope. */

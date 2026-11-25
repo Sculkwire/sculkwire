@@ -45,6 +45,7 @@ import {
   DEFAULT_FRAME,
   defaultMode,
   gamePids,
+  gamescopeBlocker,
   hasInput,
   isAlive,
   launch,
@@ -67,7 +68,7 @@ import { restoreGameSettings } from "../engine/settings.ts";
 import { Staleness, streamEntities, streamEntity, TickClock, type StreamedEntities } from "./entitystream.ts";
 import { horizontalDistance } from "./geometry.ts";
 import { PlayerController } from "./player.ts";
-import type { EntityInfo, Impact, Loadout, PlayerState, PlayerWorld } from "./types.ts";
+import type { EntityInfo, Impact, Loadout, PlayerState, PlayerWorld, RespawnOutcome } from "./types.ts";
 import { inputProvider } from "./inputprovider.ts";
 import { HELPER_MARK, isReplyTo, parseReply, queryCommand } from "./helperprotocol.ts";
 import { pngSize, readShot } from "./png.ts";
@@ -83,6 +84,8 @@ import {
   leaveWorld,
   NO_SCREENS,
   recoverJoin,
+  respawn,
+  RESPAWN_TIMEOUT_MS,
   screensFromUi,
   screensInLog,
   type RecoveryIO,
@@ -100,6 +103,8 @@ export const BRIDGE_DEBUGGER_PORT = 19151;
 const MOTION_FRESH_MS = 250;
 /** The helper's fields (crosshair target, held item, game tick) ride along with provider motion while this fresh. */
 const HELPER_FOR_MOTION_MS = 1000;
+/** A streamed health reading this fresh says whether the player is dead; an older one is not trusted for it. */
+const DEATH_HEALTH_FRESH_MS = 2000;
 /** How long `start` waits for the game process and then for the world (each), unless told otherwise. */
 export const WORLD_WAIT_MS = 180_000;
 /** The longest wait `game_launch` takes (seconds). */
@@ -311,6 +316,8 @@ export interface BridgeStatus {
   worldBackup?: string;
   /** The user's saved default dev world for this game user (game_status reads it; absent when none is saved). */
   defaultWorld?: DevWorld;
+  /** game_status only: the player is dead (the death screen is up, or the helper streamed health 0). */
+  dead?: boolean;
 }
 
 /** How long `reload` waits at each step (ms); tests shorten them. */
@@ -562,6 +569,11 @@ export class ClientBridge {
       // The game exited (crash) without game_stop: clean that launch up (listeners, options, deployed packs) first.
       await this.stop();
     }
+    // Listeners a start that failed half-way left open: a new listener would otherwise replace them unclosed, and the
+    // ports would stay taken for the life of the process (game_stop could no longer reach them).
+    this.closeDebugger();
+    await this.#connect?.stop();
+    this.#connect = undefined;
     const abort = new AbortController();
     this.#startAbort = abort;
     const { signal } = abort;
@@ -613,12 +625,13 @@ export class ClientBridge {
       this.#indexed = await indexProjectPacks(project, install.sharedComMojang);
     }
 
-    const debuggerPort = await this.listenDebugger(opts.debuggerPort ?? BRIDGE_DEBUGGER_PORT);
-    this.#connect = new ConnectServer({ port: opts.connectPort ?? DEFAULT_CONNECT_PORT });
-    await this.#connect.start();
-    await setOptions(optionsFiles(install), bridgeOptions(debuggerPort));
-
     try {
+      const debuggerPort = await this.listenDebugger(opts.debuggerPort ?? BRIDGE_DEBUGGER_PORT);
+      this.#connect = new ConnectServer({ port: opts.connectPort ?? DEFAULT_CONNECT_PORT });
+      await this.#connect.start();
+      // Inside gamescope the game runs fullscreen in gamescope's own output, which never reaches the user's screen.
+      const inGamescope = process.platform === "linux" && mode !== "desktop" && (await gamescopeBlocker(install)) === undefined;
+      await setOptions(optionsFiles(install), bridgeOptions(debuggerPort, { fullscreen: inGamescope }));
       if (userWorld) {
         const entered = await enterUserWorld(install, {
           world: userWorld.world,
@@ -658,10 +671,15 @@ export class ClientBridge {
       await this.stop();
       throw e;
     }
-    this.#prunedWorlds = await pruneWorlds(install, { except: this.world.levelId });
-    this.#logCursor = await contentEnd(install.logsDir);
-    this.#printCursor = this.#printSeq;
-    this.#joinCursor = await debugLogEnd(install.logsDir);
+    try {
+      this.#prunedWorlds = await pruneWorlds(install, { except: this.world.levelId });
+      this.#logCursor = await contentEnd(install.logsDir);
+      this.#printCursor = this.#printSeq;
+      this.#joinCursor = await debugLogEnd(install.logsDir);
+    } catch (e) {
+      await this.stop();
+      throw e;
+    }
     this.#joinState = NO_JOIN_YET;
     try {
       this.launchState = await launch(install, {
@@ -952,6 +970,11 @@ export class ClientBridge {
     }
     if (!this.#canWalkMenus()) return { saved: false, detail: "no input route reaches the game's menus (no in-game agent attached, no background input)" };
     await this.#controller?.releaseAll().catch(() => undefined);
+    // The pause menu does not open over the death screen: respawn first, as a player would.
+    if (await this.dead()) {
+      const revived = await this.respawn();
+      if (!revived.respawned) return { saved: false, detail: `the player is dead and did not respawn: ${revived.detail}` };
+    }
     try {
       const result = await leaveWorld(this.#recoveryIO(state), { screens: this.#screens, join: this.#joinState, timeoutMs: LEAVE_TIMEOUT_MS });
       this.#screens = result.screens;
@@ -961,6 +984,55 @@ export class ClientBridge {
     } catch (e) {
       return { saved: false, detail: errorMessage(e) };
     }
+  }
+
+  /**
+   * Whether the player is dead: the death screen is up (`ui.screen` when the in-game agent is attached, else the engine
+   * log), or the helper's player state from the last `DEATH_HEALTH_FRESH_MS` shows health 0 or less.
+   */
+  async dead(): Promise<boolean> {
+    if (!this.running) return false;
+    await this.#readJoinLog();
+    const screen = await agentUi((ms) => sleep(ms))
+      ?.screen()
+      .catch(() => undefined);
+    if (screen) this.#screens = screensFromUi(screen, this.#screens);
+    if (currentScreen(this.#screens) === "death") return true;
+    const health = this.#freshHealth();
+    return health !== undefined && health <= 0;
+  }
+
+  /** The player's health from a streamed state at most `DEATH_HEALTH_FRESH_MS` old, else undefined. */
+  #freshHealth(): number | undefined {
+    const s = this.#playerSample();
+    return s && Date.now() - s.at <= DEATH_HEALTH_FRESH_MS ? s.state.health : undefined;
+  }
+
+  /**
+   * Press RESPAWN when the player is dead (`respawn` in screens.ts): by its control name through the in-game agent's UI,
+   * else a click at its place on the death screen, then the wait for the player to be alive again, for up to
+   * `timeoutMs`. `via` `alive` when the player was not dead (nothing pressed); `respawned` false with the reason in
+   * `detail` when RESPAWN could not bring the player back.
+   */
+  async respawn(timeoutMs = RESPAWN_TIMEOUT_MS): Promise<RespawnOutcome> {
+    const state = this.launchState;
+    if (!state || !this.running) throw new Error("the game is not running");
+    // The helper's health is what tells the player is alive again: keep its state stream running.
+    if (this.#streamEvery === undefined) await this.#streamState(2).catch(() => undefined);
+    // A stream that just started has no sample yet: without one a death shown only by health would read as alive.
+    for (let waited = 0; this.#freshHealth() === undefined && waited < DEATH_HEALTH_FRESH_MS; waited += 100) await sleep(100);
+    if (!(await this.dead())) return { respawned: false, via: "alive", detail: "the player is alive: nothing to respawn" };
+    if (!this.#canWalkMenus()) {
+      return { respawned: false, via: "none", detail: "the player is dead, and no input route reaches the death screen (no in-game agent attached, no background input): press RESPAWN in the game" };
+    }
+    await this.#controller?.releaseAll().catch(() => undefined);
+    const result = await respawn(this.#recoveryIO(state), { health: () => this.#freshHealth(), screens: this.#screens, join: this.#joinState, timeoutMs });
+    this.#screens = result.screens;
+    this.#joinState = result.join;
+    const how = result.steps.join(" → ");
+    if (!result.wasDead) return { respawned: false, via: "alive", detail: "the player is alive: nothing to respawn" };
+    if (result.respawned) return { respawned: true, via: result.via, detail: `respawned (${how})` };
+    return { respawned: false, via: result.via, detail: `${result.reason ?? "unknown"}${how ? ` (pressed: ${how})` : ""}` };
   }
 
   /**
@@ -1292,6 +1364,7 @@ export class ClientBridge {
         return others[0] ?? null;
       },
       impacts: async (since) => (await this.query("impacts", { since })) as { tick: number; impacts: Impact[] },
+      respawn: () => this.respawn(),
       query: (kind, params) => this.query(kind, params),
       entities: async (radius) => {
         const me = this.#latestState?.state.location;

@@ -60,8 +60,12 @@ export function removeOptions(text: string, keys: readonly string[]): string {
   );
 }
 
-/** Keys the bridge needs: debugger auto-attach to our listener, /connect allowed without encryption, content log file on. */
-export function bridgeOptions(debuggerPort: number): Record<string, string> {
+/**
+ * Keys the bridge needs: debugger auto-attach to our listener, /connect allowed without encryption, content log file on.
+ * `fullscreen` (a game inside gamescope): the game fills gamescope's whole output. Windowed, Wine gives the game's
+ * window a caption, so the picture is a caption's height short and a black bar shows under it.
+ */
+export function bridgeOptions(debuggerPort: number, opts: { fullscreen?: boolean } = {}): Record<string, string> {
   return {
     script_debugger_auto_attach: "1",
     script_debugger_attach_mode: "1",
@@ -72,6 +76,7 @@ export function bridgeOptions(debuggerPort: number): Record<string, string> {
     websockets_enabled: "1",
     websocket_encryption: "0",
     content_log_file: "1",
+    ...(opts.fullscreen ? { gfx_fullscreen: "1" } : {}),
   };
 }
 
