@@ -97,6 +97,19 @@ describe("client bridge start", () => {
     expect(r).toMatchObject({ stopped: true, message: expect.stringMatching(/left alone/) });
   });
 
+  it("stops the game a launch record names while that game still runs, also from a process that launched nothing", async () => {
+    // A restarted MCP server or `sculk game stop`: the launcher (pid 0) is gone, the recorded game 4242 runs.
+    stateFile = true;
+    state.gamePid = 4242;
+    runningPids = [4242];
+    try {
+      await new ClientBridge().stop();
+      expect(stopGame).toHaveBeenCalledOnce();
+    } finally {
+      delete state.gamePid;
+    }
+  });
+
   it("leaves the user's game alone when a stale launch state names a game that is gone", async () => {
     // A crash left the state of sculkwire's launch (pid 0, game 1111 gone); the user's own game 4242 runs now.
     launched = {};

@@ -1318,7 +1318,11 @@ export class ClientBridge {
       if (signal.aborted) throw e;
       throw new WaitTimeout(errorMessage(e));
     }
-    if (this.launchState) this.launchState.gamePid = gamePid;
+    if (this.launchState) {
+      this.launchState.gamePid = gamePid;
+      // A later process (sculk game stop, a restarted MCP server) stops the game only when its record names it.
+      await writeLaunchState(this.launchState).catch(() => undefined);
+    }
     const atFirstLook = await untilStopped(this.#waitForWorld(timeoutMs, since, signal, foreground), signal);
     // Windows mutes the game's audio sessions, which exist once it plays sound: by now it surely opened its device.
     if (this.launchState?.muteRequested && process.platform === "win32") {
