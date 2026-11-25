@@ -2,6 +2,10 @@
 
 Release notes for sculkwire. Each `## vX.Y.Z` section becomes the GitHub release text when its tag is pushed.
 
+## v0.1.13
+
+- `game_stop` (and `sculk game stop`) never stops a game sculkwire did not launch. A stop in a process that launched nothing, with no launch state recorded (for example after the MCP server that attached to your game was restarted), used to run the install's stop command on whatever game was running, closing your own game without Save & Quit. It now leaves the game alone and only restores the options sculkwire changed.
+
 ## v0.1.12
 
 - A command given an option without its value (`sculk game worlds --use`) or an unknown option prints the reason and exits 2 instead of a stack trace. This holds for every `sculk` command.

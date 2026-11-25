@@ -169,7 +169,7 @@ const stop: CliCommand = {
   summary: "Stop the client and restore the options.txt keys sculkwire changed (a game sculkwire attached to keeps running: it only detaches)",
   async run() {
     const r = await bridge.stop();
-    out(r.stopped ? `${r.detached ? r.message : "stopped"}${r.stopNote ? `; ${r.stopNote}` : ""}` : `not stopped: ${r.message}`);
+    out(r.stopped ? `${r.message}${r.stopNote ? `; ${r.stopNote}` : ""}` : `not stopped: ${r.message}`);
     return r.stopped ? ExitCode.ok : ExitCode.usage;
   },
 };
