@@ -53,6 +53,20 @@ describe("GameMute", () => {
     await mute.stop({ restore: false });
   });
 
+  it("moves nothing off the silent sink while the game's pids are unknown, so a lingering game stream stays silent", async () => {
+    const pactl = withStreams();
+    let pids = [GAME];
+    const mute = new GameMute(pactl.run, async () => pids);
+    await mute.sweep();
+    expect(pactl.sinkOf(7)).toBe(MUTE_SINK);
+    // The game process is gone (mid-stop) while PipeWire still lists its stream.
+    pids = [];
+    await mute.sweep();
+    expect(pactl.sinkOf(7)).toBe(MUTE_SINK);
+    expect(pactl.sinkOf(9)).toBe(MUTE_SINK);
+    await mute.stop({ restore: false });
+  });
+
   it("uses the sink the launch loaded, and does not unload it", async () => {
     const pactl = withStreams();
     pactl.sinks.push({ index: "5", name: MUTE_SINK, module: 30 });

@@ -180,8 +180,12 @@ export class GameMute {
     for (const input of inputs) {
       if (input.pid === undefined) continue;
       if (!pids.has(input.pid)) {
-        // Not the game's: off the silent sink, onto the output it would have played on without sculkwire.
-        if (input.sink === muted.index) await this.#pactl(["move-sink-input", String(input.id), "@DEFAULT_SINK@"]).catch(() => undefined);
+        // Not the game's: off the silent sink, onto the output it would have played on without sculkwire. Only while
+        // the game's pids are known: before the game is found, or after its process is gone while its streams linger,
+        // the set is empty and every stream would look foreign, the game's own included.
+        if (pids.size > 0 && !this.#stopped && input.sink === muted.index) {
+          await this.#pactl(["move-sink-input", String(input.id), "@DEFAULT_SINK@"]).catch(() => undefined);
+        }
         continue;
       }
       if (input.sink === muted.index) continue;

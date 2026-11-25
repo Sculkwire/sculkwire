@@ -2,6 +2,11 @@
 
 Release notes for sculkwire. Each `## vX.Y.Z` section becomes the GitHub release text when its tag is pushed.
 
+## v0.1.11
+
+- A muted game's own audio can no longer reach the speakers while the game is being found at start or has just exited during `game_stop`: the watcher moves a stream off the silent sink only while it knows the game's processes (v0.1.10 could take a lingering stream of the stopped game for another app's and move it to the default output).
+- `docs/client.md`: attaching on Windows is marked as not yet run against a real Windows game.
+
 ## v0.1.10
 
 - Your own Minecraft keeps its sound while sculkwire runs a muted game in the background. PipeWire remembers one output per application name, and both games are named Minecraft, so a Minecraft you started from another install while a headless game ran went to the silent sink. sculkwire now moves a stream of any other process it finds on the silent sink to the default output, within 2 s (checked live: the retail game started while the muted dev game ran was silent for under 2 s, then played on the default output).
