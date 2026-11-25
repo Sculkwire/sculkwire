@@ -142,6 +142,9 @@ const AUTO_ENTER_ATTEMPTS = 3;
 const AUTO_ENTER_TIMEOUT_MS = 90_000;
 /** On an install the user starts, attach the in-game agent once the start screen shows, or this long after the process came up. */
 const AUTO_ATTACH_AFTER_MS = 30_000;
+/** A walk-in attach that failed (a game still loading answers no agent call) is tried again this often, this many times. */
+const ATTACH_FOR_ENTRY_RETRY_MS = 10_000;
+const ATTACH_FOR_ENTRY_TRIES = 9;
 /** How often the bridge looks at a game it attached to while the channels are not all up. */
 const ATTACH_POLL_MS = 2_000;
 /** How long `start` waits for an attached game to dial the debugger after the agent sent the command. */
@@ -255,6 +258,9 @@ interface AutoEnter {
   /** When the game process was found. */
   since: number;
   attachTried: boolean;
+  /** Attach attempts that failed, and when the next may run: a game still loading answers no agent call yet. */
+  attachFailures: number;
+  attachRetryAt: number;
   attempts: number;
   /** When the last walk ended. */
   lastAt: number;
@@ -1418,7 +1424,7 @@ export class ClientBridge {
   async #waitForWorld(timeoutMs: number, since: number, signal: AbortSignal, foreground = false): Promise<boolean> {
     const printed = (mark: string) => this.#prints.some((p) => p.seq > since && p.message.includes(mark));
     let deadline = Date.now() + timeoutMs;
-    const auto: AutoEnter = { since: Date.now(), attachTried: false, attempts: 0, lastAt: 0 };
+    const auto: AutoEnter = { since: Date.now(), attachTried: false, attachFailures: 0, attachRetryAt: 0, attempts: 0, lastAt: 0 };
     for (let first = true; ; first = false) {
       signal.throwIfAborted();
       if (printed(HELPER_MARK.ready) && printed(HELPER_MARK.spawned)) return first;
@@ -1487,7 +1493,7 @@ export class ClientBridge {
    * world. Fails open: the user is told to open the world themselves.
    */
   async #attachForEntry(auto: AutoEnter): Promise<void> {
-    if (this.install?.launch || auto.attachTried || engine.attached) return;
+    if (this.install?.launch || auto.attachTried || engine.attached || Date.now() < auto.attachRetryAt) return;
     auto.attachTried = true;
     const provider = inputProvider();
     const name = this.world?.name ?? "the test world";
@@ -1495,6 +1501,13 @@ export class ClientBridge {
     try {
       await provider.attach();
     } catch (e) {
+      // A game still loading in the background runs no frame for half a minute or more, so the agent's first
+      // answer times out: the agent stays loaded and a later try connects to it. Only then is the step the user's.
+      if (++auto.attachFailures < ATTACH_FOR_ENTRY_TRIES) {
+        auto.attachTried = false;
+        auto.attachRetryAt = Date.now() + ATTACH_FOR_ENTRY_RETRY_MS;
+        return;
+      }
       await this.#handOver(`${OPEN_YOURSELF}: sculkwire could not attach its in-game agent (${errorMessage(e)}). In the game choose Play, then "${name}"`);
       return;
     }

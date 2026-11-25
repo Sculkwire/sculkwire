@@ -72,6 +72,9 @@ static FOCUS_GIVEN_NOW: AtomicBool = AtomicBool::new(false);
 static FOCUS_GIVEN: AtomicU32 = AtomicU32::new(0);
 /// Cursor clips and mouse captures skipped while the game's window was in the background.
 static CURSOR_KEPT: AtomicU32 = AtomicU32::new(0);
+/// The game's window procedure last saw an activation (and no deactivation since): false until the
+/// first one after the hook, so a window the desktop never focused is told once that it is active.
+static GAME_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// One bit per connection that holds the game's focus for its whole life (`input.lock {focus: true}`).
 static FOCUS_HOLD: AtomicU32 = AtomicU32::new(0);
 
@@ -310,6 +313,7 @@ unsafe extern "system" fn wndproc(window: win::Hwnd, message: u32, wparam: win::
         }
     } else if message == win::WM_SETFOCUS || (message == win::WM_ACTIVATE && (key & 0xFFFF) != 0) || (message == win::WM_ACTIVATEAPP && key != 0) {
         FOCUS_DROPPED.store(false, Ordering::Release);
+        GAME_ACTIVE.store(true, Ordering::Release);
         // Window focus messages are not a dependable signal under a compositor: a loss at launch is
         // never followed by a gain. The focus rule follows the engine's own handlers instead.
     } else {
@@ -337,6 +341,9 @@ unsafe extern "system" fn wndproc(window: win::Hwnd, message: u32, wparam: win::
             FOCUS_DROPPED.store(true, Ordering::Release);
             FOCUS_KEPT.fetch_add(1, Ordering::Relaxed);
             return 0;
+        }
+        if drop == 2 {
+            GAME_ACTIVE.store(false, Ordering::Release);
         }
         if drop == 1 && on() {
             DROPPED.fetch_add(1, Ordering::Relaxed);
@@ -573,7 +580,7 @@ unsafe extern "system" fn hook_set_capture(window: win::Hwnd) -> win::Hwnd {
 /// game's own procedure, on the window's thread; the unlock replays the loss ([`replay_focus_loss`]).
 fn give_focus() {
     let window = WINDOW.load(Ordering::Acquire);
-    if !lockbits::give_focus(held(), window != 0, !background(), FOCUS_GIVEN_NOW.load(Ordering::Acquire)) {
+    if !lockbits::give_focus(held(), window != 0, !background() && GAME_ACTIVE.load(Ordering::Acquire), FOCUS_GIVEN_NOW.load(Ordering::Acquire)) {
         return;
     }
     let previous = PREVIOUS.load(Ordering::Acquire);
@@ -591,10 +598,18 @@ fn give_focus() {
         procedure(window, win::WM_ACTIVATE, 1, 0); // WA_ACTIVE
         procedure(window, win::WM_SETFOCUS, 0, 0);
     }
-    // The window is still in the background: the unlock tells the game it lost focus.
-    FOCUS_DROPPED.store(true, Ordering::Release);
+    GAME_ACTIVE.store(true, Ordering::Release);
+    let behind = background();
+    // A window still behind another one: the release tells the game it lost focus.
+    if behind {
+        FOCUS_DROPPED.store(true, Ordering::Release);
+    }
     if FOCUS_GIVEN.fetch_add(1, Ordering::Relaxed) == 0 {
-        log::line("input lock: the game window is in the background; told the game it is active while locked");
+        log::line(if behind {
+            "focus hold: the game window is in the background; told the game it is active"
+        } else {
+            "focus hold: the game had not been activated since the hook; told it it is active"
+        });
     }
 }
 
