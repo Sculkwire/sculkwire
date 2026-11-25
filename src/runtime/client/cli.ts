@@ -98,7 +98,11 @@ const check: CliCommand = {
         ...(values.fresh ? { fresh: true } : {}),
         ...(values["user-world"] !== undefined ? { userWorld: values["user-world"] } : {}),
       });
-      err(`in world ${st.world}; debugger ${st.debugger.attached ? "attached" : "not attached"}, /connect clients ${st.connect.clients}`);
+      err(
+        st.attached
+          ? `attached to the running game${st.world ? ` in ${st.world}` : ""}; debugger ${st.debugger.attached ? "attached" : "not attached"}${st.manualSteps.length ? `; to do: ${st.manualSteps.join("; ")}` : ""}`
+          : `in world ${st.world}; debugger ${st.debugger.attached ? "attached" : "not attached"}, /connect clients ${st.connect.clients}`,
+      );
       await sleep(Number(values.seconds ?? 10) * 1000);
       const shot = values.screenshot ? await bridge.screenshot(values.screenshot) : undefined;
       const { diagnostics } = await bridge.logs({ printSeq: 0 });
@@ -162,10 +166,10 @@ const worlds: CliCommand = {
 
 const stop: CliCommand = {
   name: "game stop",
-  summary: "Stop the client and restore the options.txt keys sculkwire changed",
+  summary: "Stop the client and restore the options.txt keys sculkwire changed (a game sculkwire attached to keeps running: it only detaches)",
   async run() {
     const r = await bridge.stop();
-    out(r.stopped ? `stopped${r.stopNote ? `; ${r.stopNote}` : ""}` : `not stopped: ${r.message}`);
+    out(r.stopped ? `${r.detached ? r.message : "stopped"}${r.stopNote ? `; ${r.stopNote}` : ""}` : `not stopped: ${r.message}`);
     return r.stopped ? ExitCode.ok : ExitCode.usage;
   },
 };

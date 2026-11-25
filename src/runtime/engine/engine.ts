@@ -424,6 +424,17 @@ const PRIME_WAIT_MS = 5_000;
 /** How long `t` may take to open the chat, and Return to close it. */
 const PRIME_SCREEN_MS = 3_000;
 const PRIME_POLL_MS = 150;
+/**
+ * The longest command line, leading slash included, the game takes in a command request: a longer one fails to parse
+ * on its server (`Command exceeds maximum size of 1000 characters`) and the game kicks the player.
+ */
+export const MAX_COMMAND_CHARS = 1000;
+export const COMMAND_TOO_LONG = `the game kicks the player for a command over ${MAX_COMMAND_CHARS} characters`;
+
+/** Whether `line` (with or without its leading slash) is longer than the game takes in a command request. */
+export function commandTooLong(line: string): boolean {
+  return `/${line.replace(/^\//, "")}`.length > MAX_COMMAND_CHARS;
+}
 
 /** The agent cannot run commands until a player command was seen in this world. */
 function needsOrigin(result: EngineResult<unknown>): result is EngineFailure {
@@ -584,7 +595,9 @@ export class EngineSession {
 
   /**
    * Build, inject, connect and verify `engine.status`. Concurrent calls share one attach. A session that is already
-   * connected only refreshes its status, so the common MCP path never recompiles or re-injects.
+   * connected only refreshes its status, and an agent another process (or an earlier session) loaded is reused when it
+   * answers on this session's port, so the common path never recompiles or re-injects: injecting the same DLL into a
+   * game that already has it loaded fails.
    */
   async attach(): Promise<EngineStatus> {
     this.#attaching ??= this.#attach().finally(() => {
@@ -603,6 +616,16 @@ export class EngineSession {
       install = await findInstall();
     } catch (err) {
       throw new EngineAttachError("client", errorMessage(err), { cause: err });
+    }
+    // An agent already listening (loaded by an earlier attach, in this process or another): connect, never inject again.
+    const loaded = await this.#ensureClient().then(
+      () => this.#resolvedStatus(),
+      () => undefined,
+    );
+    if (loaded?.ok) {
+      this.#install = install;
+      this.#everAttached = true;
+      return loaded.value;
     }
     // Any PC (GDK) install works: what has to hold is that the game is the Windows process and its folder exists, so
     // the injector's route agrees with this OS before anything is built or injected. The folder also decides whether
@@ -691,17 +714,19 @@ export class EngineSession {
    * commands.
    *
    * The agent replays the origin of a real player command, so until the player has run one in this world it answers
-   * -32001 `command.origin` (or `command.commands`). Then this types one line in chat itself (see #primeCommandOrigin)
-   * and runs the requested command once the origin is captured.
+   * -32001 `command.origin` (or `command.commands`). Then this types one harmless line (`PRIME_LINE`) in chat itself,
+   * its output kept out of chat by the agent (`command.prime`; see #typeInChat), and runs the requested command once
+   * the origin is captured. A line over `MAX_COMMAND_CHARS` is refused: the game kicks the player for one.
    */
   async command(command: string): Promise<EngineResult<EngineCommandResult>> {
     if (/[\r\n]/.test(command)) return invalid("a command cannot contain a newline");
     const line = command.trim().replace(/^\//, "");
     if (!line) return invalid("a command cannot be empty");
+    if (commandTooLong(line)) return invalid(COMMAND_TOO_LONG);
     const run = () => this.#call<EngineCommandResult>("command", { command: line });
     const first = await run();
     if (!needsOrigin(first)) return first;
-    const primed = await this.#primeCommandOrigin();
+    const primed = await this.#typeInChat(PRIME_LINE, true);
     if (!primed.ok) return { ...first, message: `${first.message} (sculkwire could not type it for you: ${primed.message})` };
     const deadline = Date.now() + PRIME_WAIT_MS;
     for (;;) {
@@ -712,19 +737,36 @@ export class EngineSession {
   }
 
   /**
-   * Types one harmless line (`PRIME_LINE`) in chat so the game builds a player command origin the agent can replay:
-   * only while the player is in a world with no screen open (the HUD alone), only into the chat screen this opened,
-   * and with its output kept out of chat by the agent (`command.prime`). Never types into any other screen.
+   * Type one command line in chat and send it, as the player would: for client commands such as `/connect`, which the
+   * client runs itself and the agent's command dispatcher (the server's) must not. Same rules as the prime: only while
+   * the player is in a world with no screen open, only into the chat screen this opened, and never over
+   * `MAX_COMMAND_CHARS`.
    */
-  async #primeCommandOrigin(): Promise<EngineResult<true>> {
+  async chat(command: string): Promise<EngineResult<true>> {
+    if (/[\r\n]/.test(command)) return invalid("a command cannot contain a newline");
+    const line = command.trim().replace(/^\//, "");
+    if (!line) return invalid("a command cannot be empty");
+    if (commandTooLong(line)) return invalid(COMMAND_TOO_LONG);
+    return this.#typeInChat(line, false);
+  }
+
+  /**
+   * Open the chat with `t`, type `/line`, press Return: only while the player is in a world with no screen open (the
+   * HUD alone), only into the chat screen this opened. Never types into any other screen. `prime` arms the agent's
+   * `command.prime` first, which keeps the line's output out of chat.
+   */
+  async #typeInChat(line: string, prime: boolean): Promise<EngineResult<true>> {
+    if (commandTooLong(line)) return invalid(COMMAND_TOO_LONG);
     const before = await this.uiScreen();
     if (!before.ok) return before;
     // In a world with no screen open: the HUD is the only scene.
     const hudOnly = before.value.name === "hud_screen" && !before.value.modal && before.value.stack.every((name) => name === "hud_screen");
     if (!hudOnly) return invalid(`a screen is open (${uiScreenText(before.value)}): run one line in chat yourself and retry`);
-    // An older agent without `command.prime` still captures the origin; the line's output then shows in chat.
-    const armed = await this.#call("command.prime", {});
-    if (!armed.ok && armed.reason !== "unknown_method") return armed;
+    if (prime) {
+      // An older agent without `command.prime` still captures the origin; the line's output then shows in chat.
+      const armed = await this.#call("command.prime", {});
+      if (!armed.ok && armed.reason !== "unknown_method") return armed;
+    }
     const opened = await this.uiKey("t");
     if (!opened.ok) return opened;
     const chat = await this.#waitScreen((screen) => screen.name === CHAT_SCREEN && screen.stack.length <= 2);
@@ -734,7 +776,7 @@ export class EngineSession {
       if (now.ok && now.value.name !== "hud_screen") await this.uiKey("Escape");
       return chat;
     }
-    const typed = await this.uiText(`/${PRIME_LINE}`);
+    const typed = await this.uiText(`/${line}`);
     if (!typed.ok) {
       await this.uiKey("Escape");
       return typed;
@@ -763,7 +805,7 @@ export class EngineSession {
   async #ensureCommandOrigin(): Promise<void> {
     if (this.lock.state?.camera) return;
     const result = await this.#call("command", { command: PRIME_LINE, quiet: true }, { timeoutMs: INPUT_TIMEOUT_MS });
-    if (needsOrigin(result)) await this.#primeCommandOrigin();
+    if (needsOrigin(result)) await this.#typeInChat(PRIME_LINE, true);
   }
 
   /** Polls `ui.screen` until `test` holds, for at most `PRIME_SCREEN_MS`. */

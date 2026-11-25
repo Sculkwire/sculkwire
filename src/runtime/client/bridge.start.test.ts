@@ -1,29 +1,36 @@
 /**
  * `start` on an install the user starts: the bridge returns at once and keeps waiting for the world in the background.
  * `start` on an install sculkwire launches: `stop` during the wait ends it with "the game stopped".
+ * `start` while the install's game already runs: the bridge attaches to it and `stop` only detaches.
  * The launcher is replaced so no game process is looked up, started or stopped.
  */
-import { createServer, type AddressInfo } from "node:net";
+import { createConnection, createServer, type AddressInfo, type Socket } from "node:net";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { encodeFrame, FrameDecoder } from "../debugger/framing.ts";
 import type * as Install from "../../gamefiles/install.ts";
 import type { ClientInstall } from "../../gamefiles/install.ts";
-import { ClientBridge } from "./bridge.ts";
+import { ClientBridge, dialCommands, helperMissing } from "./bridge.ts";
 import type * as ContentLog from "./contentlog.ts";
 import { readDebugLogSince } from "./contentlog.ts";
 import type * as Launcher from "./launcher.ts";
 import type { LaunchState } from "./launcher.ts";
 import { readLevelDat, TAG, writeLevelDat, type NbtCompound } from "../../gamefiles/nbt.ts";
-import { createWorld, HELPER_PACK_DIR } from "./world.ts";
+import { createWorld, HELPER_PACK_DIR, HELPER_PACK_FOLDER } from "./world.ts";
 import { listAllWorlds } from "./worldstore.ts";
 import { useDevWorld } from "./devworld.ts";
 import { ICON_FILE } from "./icon.ts";
+import { FakePactl } from "../../testing/fakepactl.ts";
+import { MUTE_SINK } from "./mute.ts";
 
 const state: LaunchState = { mode: "desktop", startedAt: 0, pid: 0, argv: [], launchLog: "", notes: ["start Minecraft yourself"] };
+/** Merged into the launch state `launch` returns. */
+let launched: Partial<LaunchState> = {};
+let pactl = new FakePactl();
 let install: ClientInstall;
 /** Replaces the launcher's `waitForGame` while set. */
 let waitForGame: ((signal?: AbortSignal) => Promise<number>) | undefined;
@@ -37,11 +44,12 @@ vi.mock("../../gamefiles/install.ts", async (original) => ({
 }));
 vi.mock("./launcher.ts", async (original) => ({
   ...(await original<typeof Launcher>()),
-  launch: async () => ({ ...state }),
+  launch: async () => ({ ...state, ...launched }),
   waitForGame: async (_install: unknown, _timeoutMs: number, signal?: AbortSignal) => (waitForGame ? waitForGame(signal) : process.pid),
   readLaunchState: async () => ({ ...state }),
   stop: () => stopGame(),
   gamePids: async () => runningPids,
+  systemPactl: (args: readonly string[]) => pactl.run(args),
 }));
 vi.mock("./contentlog.ts", async (original) => {
   const real = await original<typeof ContentLog>();
@@ -70,6 +78,8 @@ describe("client bridge start", () => {
   afterEach(async () => {
     waitForGame = undefined;
     runningPids = [];
+    launched = {};
+    pactl = new FakePactl();
     stopGame.mockClear();
     delete process.env.SCULKWIRE_DATA;
     delete process.env.SCULKWIRE_CONFIG;
@@ -173,6 +183,80 @@ describe("client bridge start", () => {
   const project = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "test", "fixtures", "good_addon");
   const launchOpts = { mode: "desktop", debuggerPort: 0, connectPort: 0 } as const;
 
+  describe.runIf(process.platform === "linux")("mute", () => {
+    /** The game's pid: alive, so the bridge does not take the game for exited. */
+    const GAME = process.pid;
+
+    it("keeps a muted launch's streams on the silent sink through the stop, then removes the sink", async () => {
+      launched = { muteRequested: true };
+      pactl.inputs = [
+        { id: 7, sink: "1", pid: GAME },
+        { id: 8, sink: "1", pid: 999 },
+      ];
+      const bridge = new ClientBridge();
+      await bridge.start(launchOpts);
+      // The game process appears after the launch; the next sweep finds its stream.
+      runningPids = [GAME];
+      await vi.waitFor(() => expect(pactl.sinkOf(7)).toBe(MUTE_SINK), { timeout: 5_000, interval: 100 });
+      expect(bridge.status()).toMatchObject({ muted: true });
+      expect(bridge.status().muteNote).toBeUndefined();
+      expect(pactl.sinkOf(8)).toBe("speakers");
+      let atStop: string | undefined;
+      let sinkAtStop = false;
+      stopGame.mockImplementationOnce(async () => {
+        atStop = pactl.sinkOf(7);
+        sinkAtStop = pactl.sinks.some((s) => s.name === MUTE_SINK);
+        // The game exits: its stream goes with it.
+        pactl.inputs = pactl.inputs.filter((i) => i.pid !== GAME);
+        return { stopped: true, message: "closed the game (1 process(es))" };
+      });
+      await bridge.stop();
+      expect(atStop).toBe(MUTE_SINK);
+      expect(sinkAtStop).toBe(true);
+      expect(pactl.callsOf("move-sink-input").filter((c) => c[2] !== MUTE_SINK)).toEqual([]);
+      expect(pactl.sinks.some((s) => s.name === MUTE_SINK)).toBe(false);
+      expect(pactl.calls.some((c) => c[0] === "set-sink-input-mute")).toBe(false);
+    }, 15_000);
+
+    it("reports muted false with the reason when pactl is missing", async () => {
+      launched = { muteRequested: true };
+      pactl.missing = true;
+      const bridge = new ClientBridge();
+      const status = await bridge.start(launchOpts);
+      await bridge.stop();
+      expect(status).toMatchObject({ muted: false, muteNote: "could not create the silent sink (pactl is not installed); the game's sound plays normally" });
+    });
+
+    it("leaves the sound of a launch without mute alone", async () => {
+      const bridge = new ClientBridge();
+      const status = await bridge.start(launchOpts);
+      await bridge.stop();
+      expect(status.muted).toBe(false);
+      expect(pactl.calls).toEqual([]);
+    });
+
+    it("leaves an attached game's sound alone, and with mute: true silences it until the detach", async () => {
+      runningPids = [GAME];
+      pactl.inputs = [{ id: 7, sink: "1", pid: GAME }];
+      const plain = new ClientBridge();
+      const status = await plain.start(launchOpts);
+      await plain.stop();
+      expect(status).toMatchObject({ attached: true, muted: false });
+      expect(pactl.calls).toEqual([]);
+
+      const bridge = new ClientBridge();
+      const muted = await bridge.start({ ...launchOpts, mute: true });
+      expect(muted).toMatchObject({ attached: true, muted: true });
+      expect(muted.worldNote).not.toContain("mute");
+      expect(pactl.sinkOf(7)).toBe(MUTE_SINK);
+      const r = await bridge.stop();
+      expect(r.detached).toBe(true);
+      expect(pactl.sinkOf(7)).toBe("speakers");
+      expect(pactl.sinks.some((s) => s.name === MUTE_SINK)).toBe(false);
+      expect(stopGame).not.toHaveBeenCalled();
+    });
+  });
+
   it("enters the saved dev world, and on stop leaves the packs in it and their folders in place", async () => {
     const world = await savedUserWorld();
     const bridge = new ClientBridge();
@@ -207,15 +291,134 @@ describe("client bridge start", () => {
     expect(await readFile(join(world, ICON_FILE), "utf8")).toBe("the user's picture");
   });
 
-  it("refuses userWorld with a test world option, and writes nothing into the world while the game runs", async () => {
+  it("writes nothing into the saved dev world while the game runs: it attaches instead", async () => {
     const world = await savedUserWorld();
     const level = await readFile(join(world, "level.dat"));
     await expect(new ClientBridge().start({ ...launchOpts, userWorld: "Steve's Base", world: "other" })).rejects.toThrow(
       "userWorld enters one of your own worlds and cannot be combined with world",
     );
-    runningPids = [4242];
-    await expect(new ClientBridge().start(launchOpts)).rejects.toThrow("the game is running");
+    runningPids = [process.pid];
+    const bridge = new ClientBridge();
+    const status = await bridge.start(launchOpts);
+    await bridge.stop();
+    expect(status).toMatchObject({ attached: true, worldMode: "attached" });
     expect(await readFile(join(world, "level.dat"))).toEqual(level);
     expect(await readFile(join(world, ICON_FILE), "utf8")).toBe("the user's picture");
+    expect(JSON.parse(await readFile(join(world, "world_behavior_packs.json"), "utf8"))).toEqual([{ pack_id: "foreign", version: [2, 0, 0] }]);
+  });
+
+  describe("a game that already runs", () => {
+    beforeEach(() => {
+      runningPids = [process.pid];
+    });
+
+    /** The engine log of the user's game: it opened and joined `levelId`. */
+    async function openedWorld(levelId: string, name: string): Promise<string> {
+      const world = join(install.userComMojang, "minecraftWorlds", levelId);
+      await mkdir(world, { recursive: true });
+      await writeFile(join(world, "levelname.txt"), name);
+      await mkdir(install.logsDir, { recursive: true });
+      await writeFile(
+        join(install.logsDir, "Debug_Log_2026.txt"),
+        `[2026-11-08 20:49:12:490 INFO CLIENT 1 2] Opening level '${world.replaceAll("\\", "/")}/db'\n` +
+          "[2026-11-08 20:49:15:100 INFO CLIENT 1 2] Player Spawned: Steve\n",
+      );
+      return world;
+    }
+
+    it("attaches instead of refusing, and without an agent names the two commands to type", async () => {
+      await openedWorld("Ab+c=", "Steve's Base");
+      const bridge = new ClientBridge();
+      const status = await bridge.start(launchOpts);
+      try {
+        expect(status).toMatchObject({ running: true, ready: false, attached: true, worldMode: "attached", inWorld: true, levelId: "Ab+c=", world: "Steve's Base" });
+        expect(status.worldNote).toContain("attached to the game you opened");
+        const lines = dialCommands(status.debugger.port ?? 0, status.connect.port ?? 0);
+        expect(lines.debugger).toMatch(/^script debugger connect localhost \d+$/);
+        expect(lines.connect).toMatch(/^connect localhost:\d+$/);
+        expect(status.manualSteps.some((m) => m.includes(`type "/${lines.debugger}" in the game chat`))).toBe(true);
+        expect(status.manualSteps.some((m) => m.includes(`type "/${lines.connect}" in the game chat`))).toBe(true);
+        expect(status.manualSteps.some((m) => m.startsWith("open a world"))).toBe(false);
+        expect(bridge.launchState).toMatchObject({ attached: true, gamePid: process.pid, mode: "desktop" });
+        await expect(bridge.input({ action: "key", keys: "w" })).rejects.toThrow("only through the in-game agent");
+      } finally {
+        const r = await bridge.stop();
+        expect(r).toMatchObject({ stopped: true, detached: true, message: "detached from the game you opened; it keeps running" });
+      }
+      expect(stopGame).not.toHaveBeenCalled();
+      expect(bridge.running).toBe(false);
+    });
+
+    it("says the game sits in a menu when no world is open", async () => {
+      const bridge = new ClientBridge();
+      const status = await bridge.start(launchOpts);
+      await bridge.stop();
+      expect(status).toMatchObject({ attached: true, inWorld: false });
+      expect(status.manualSteps[0]).toMatch(/^open a world in the game: it sits in its menus/);
+    });
+
+    it("names the fresh-start options it could not apply, and does not fail for them", async () => {
+      const bridge = new ClientBridge();
+      const status = await bridge.start({ ...launchOpts, fresh: true, difficulty: "hard", width: 800, betaApis: false });
+      await bridge.stop();
+      expect(status.worldNote).toContain("fresh, display, width, difficulty need the game closed first: not applied");
+      expect(stopGame).not.toHaveBeenCalled();
+    });
+
+    it("refuses a launch that needs its own game (attach: false)", async () => {
+      await expect(new ClientBridge().start({ ...launchOpts, attach: false })).rejects.toThrow("is already running and this needs a game of its own");
+    });
+
+    it("keeps deployed pack folders the open world lists on detach, removes the others, and says a missing pack needs a rejoin", async () => {
+      const world = await openedWorld("Ab+c=", "Steve's Base");
+      const bridge = new ClientBridge();
+      const status = await bridge.start({ ...launchOpts, project });
+      const [listed, ...others] = status.packs;
+      expect(listed?.path).toBeDefined();
+      expect(others.length).toBeGreaterThan(0);
+      expect(status.worldNote).toContain("not in the open world's pack lists");
+      // The user added one of the packs to the world meanwhile (sculkwire never writes the open world's pack lists).
+      await writeFile(join(world, "world_behavior_packs.json"), JSON.stringify([{ pack_id: listed?.uuid, version: [1, 0, 0] }]));
+      const r = await bridge.stop();
+      expect(r.keptPackFolders).toEqual([listed?.path]);
+      await access(listed?.path ?? "");
+      for (const p of others) if (p.path) await expect(access(p.path)).rejects.toThrow();
+    });
+
+    it("is ready once the debugger dials in; without the helper pack in the world queries fail at once and the pack is installed", async () => {
+      await openedWorld("Ab+c=", "Steve's Base");
+      const bridge = new ClientBridge();
+      const status = await bridge.start(launchOpts);
+      const socket = dialDebugger(status.debugger.port ?? 0);
+      try {
+        await vi.waitFor(() => expect(bridge.status().ready).toBe(true), { timeout: 8_000, interval: 200 });
+        const ready = bridge.status();
+        expect(ready.helperNote).toContain(helperMissing("Steve's Base"));
+        expect(ready.manualSteps.some((m) => m.includes("script debugger connect"))).toBe(false);
+        await expect(bridge.query("entities", {}, 30_000)).rejects.toThrow("the sculkwire helper pack does not run in \"Steve's Base\"");
+        await access(join(install.sharedComMojang, "development_behavior_packs", HELPER_PACK_FOLDER, "manifest.json"));
+      } finally {
+        socket.destroy();
+        await bridge.stop();
+      }
+    }, 20_000);
   });
 });
+
+/** A game whose world has no helper pack, dialling the bridge's debugger: it echoes commands and answers nothing. */
+function dialDebugger(port: number): Socket {
+  const socket = createConnection({ host: "127.0.0.1", port });
+  const decoder = new FrameDecoder();
+  socket.on("error", () => {});
+  socket.on("connect", () => {
+    socket.write(encodeFrame({ type: "event", event: { type: "ProtocolEvent", version: 11, plugins: [] } }));
+  });
+  socket.on("data", (chunk: Buffer) => {
+    for (const m of decoder.push(chunk) as Record<string, unknown>[]) {
+      if (m.type !== "minecraftCommand") continue;
+      const message = `[Scripting] Executing command [${String(m.command)}]`;
+      socket.write(encodeFrame({ type: "event", event: { type: "PrintEvent", message, logLevel: 1 } }));
+    }
+  });
+  return socket;
+}

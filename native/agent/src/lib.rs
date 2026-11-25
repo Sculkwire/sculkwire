@@ -18,14 +18,18 @@
 extern crate alloc;
 
 mod anchors;
+mod blocks;
 mod capture;
 mod click;
 mod command;
+mod contentlog;
 mod ecs;
+mod entities;
 mod hooks;
 mod input;
 mod inventory;
 mod live;
+mod logring;
 mod look;
 mod methods;
 mod options;
@@ -99,6 +103,13 @@ static METHODS: &[Method] = &[
     Method::main("screen.close", workstation::h_screen_close),
     Method::main("world.settings", m::world_settings_read),
     Method::main("world.set", m::world_set),
+    // The local world's entities and blocks, read on the integrated server's thread.
+    Method::main("world.entities", entities::h_entities),
+    Method::main("world.block", blocks::h_block),
+    Method::main("world.blocks", blocks::h_blocks),
+    // The content log as the game emits it: the agent's own ring, filled from a hook on the game's
+    // content-log writer on whichever thread logs (the main-thread drain only keeps the log emitting).
+    Method::socket("log.content", contentlog::h_content),
     // Diagnosis only, and never in a release artifact: `debug.mem` reads this process's memory.
     #[cfg(feature = "debug-rpc")]
     Method::socket("debug.mem", m::debug_mem),
@@ -149,6 +160,7 @@ impl Engine for Retail {
         anchors.extend(workstation::resolve(core));
         anchors.extend(route::resolve(core));
         anchors.extend(capture::resolve(core));
+        anchors.extend(contentlog::resolve(core));
         hooks::install();
         let missing = anchors.iter().filter(|anchor| anchor.addr == 0).count();
         agent_core::log::fmt(format_args!(
@@ -173,6 +185,7 @@ impl Engine for Retail {
         list.extend(workstation::report());
         list.extend(route::report());
         list.extend(capture::report());
+        list.extend(contentlog::report());
         list
     }
 
@@ -247,6 +260,7 @@ impl Engine for Retail {
     fn lock_frame(&'static self, _core: &'static Core) {
         input::close_abandoned_scopes(usize::MAX);
         input::frame();
+        contentlog::frame();
     }
 
     /// The timers this engine installs carry this crate's code as their callback, so they are killed
@@ -256,6 +270,7 @@ impl Engine for Retail {
         input::detach();
         workstation::detach();
         ui::detach();
+        contentlog::detach();
     }
 }
 

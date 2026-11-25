@@ -7,8 +7,10 @@ import { z } from "zod";
 import { formatDiagnostic, summarize } from "../../core/diagnostic.ts";
 import { diagnosticSchema, diagText, fail, ok, summarySchema } from "../../core/mcp.ts";
 import { dataDir } from "../../core/paths.ts";
+import { errorMessage } from "../../core/errors.ts";
 import { onShutdown } from "../../core/shutdown.ts";
-import { bridge, WORLD_WAIT_MAX_S, WORLD_WAIT_MS, type BridgeStatus, type CommandOutput } from "./bridge.ts";
+import { bridge, HelperQueryError, WORLD_WAIT_MAX_S, WORLD_WAIT_MS, type BridgeStatus, type CommandOutput } from "./bridge.ts";
+import { EngineLogReader, engineQuery } from "./engineread.ts";
 import { entityPropertyIdsFor } from "./entityproperties.ts";
 import { inputProvider, withInputLock } from "./inputprovider.ts";
 import { engine } from "../engine/engine.ts";
@@ -63,8 +65,17 @@ const statusSchema = {
     .optional(),
   prunedWorlds: z.array(z.string()).optional(),
   worldNote: z.string().optional(),
-  worldMode: z.enum(["fresh", "kept", "copied", "user"]).optional(),
+  worldMode: z.enum(["fresh", "kept", "copied", "user", "attached"]).optional(),
+  attached: z.boolean().optional().describe("game_launch found the game already running and attached to it instead of starting one; game_stop only detaches"),
+  inWorld: z.boolean().optional().describe("Attached game: whether it shows a world (false: it sits in a menu; the channels connect once a world is open)"),
+  levelId: z.string().optional().describe("Attached game: the level id (folder under minecraftWorlds) of the world it opened"),
+  helperNote: z
+    .string()
+    .optional()
+    .describe("Attached game: why game_query, wait_until, game_events, scene_* or game_log lack what they need in this world (no helper pack, no content-log file), and how that changes"),
   dead: z.boolean().optional().describe("game_status: the player is dead (the death screen is up, or the helper streamed health 0); player_act respawns it"),
+  muted: z.boolean().optional().describe("The game is kept silent (mute applies and nothing lets its sound through); false: its sound plays, muteNote says why when mute applies"),
+  muteNote: z.string().optional().describe("Why the game's sound may reach the speakers although mute applies (pactl missing, a stream that would not move to the silent sink)"),
   worldBackup: z.string().optional(),
   defaultWorld: z.object({ levelId: z.string(), name: z.string() }).optional(),
 };
@@ -118,7 +129,7 @@ function statusText(s: BridgeStatus): string {
   if (s.gameExited) return `client not running: ${s.manualSteps.join("; ")}`;
   if (!s.running) return `client not running${s.defaultWorld ? `; default dev world ${s.defaultWorld.name} [${s.defaultWorld.levelId}]` : ""}`;
   const parts = [
-    `${s.mode} client ${s.version ?? ""} in world ${s.world ?? "?"}${s.worldMode ? ` (${s.worldMode})` : ""}`,
+    `${s.attached ? "attached" : s.mode} client ${s.version ?? ""} in world ${s.attached && s.inWorld === false ? "none (a menu)" : (s.world ?? "?")}${s.worldMode ? ` (${s.worldMode})` : ""}`,
     `debugger ${s.debugger.attached ? `attached (protocol ${s.debugger.protocolVersion ?? "?"})` : "not attached"}`,
     `/connect clients ${s.connect.clients}`,
   ];
@@ -141,6 +152,7 @@ function statusText(s: BridgeStatus): string {
     );
   }
   if (s.worldNote) parts.push(s.worldNote);
+  if (s.helperNote) parts.push(s.helperNote);
   if (s.prunedWorlds?.length) parts.push(`removed ${s.prunedWorlds.length} old test world(s): ${s.prunedWorlds.join(", ")}`);
   if (s.defaultWorld) parts.push(`default dev world ${s.defaultWorld.name} [${s.defaultWorld.levelId}]`);
   return parts.join("; ");
@@ -192,6 +204,8 @@ function jobText(j: PlayJobInfo): string {
 }
 
 let shutdownHooked = false;
+/** `game_log`'s choice between the log files and the agent's content-log ring, kept across calls (one MCP process). */
+const engineLog = new EngineLogReader();
 
 export function register(server: McpServer): void {
   if (!shutdownHooked) {
@@ -234,7 +248,15 @@ export function register(server: McpServer): void {
         "cannot start the game itself it returns right away with manualSteps for the user, and game_status shows when " +
         "the game is ready. When the world does not load within worldWaitSeconds the game is stopped, unless " +
         "keepOnTimeout is set: then the result is not ready, manualSteps says how to enter the world, and game_status " +
-        "turns ready once it is in.",
+        "turns ready once it is in. When the install's game is already running (the user opened it) it attaches instead " +
+        "of starting one (attached: true, worldMode attached): the game is never restarted and no world is written, so " +
+        "fresh, world, keep, copyFrom, userWorld, display, width, height, fps, difficulty and betaApis are not " +
+        "applied (worldNote names the ones given); its sound stays on unless mute is true. The in-game agent turns /connect and the content log on live and " +
+        "types /script debugger connect and /connect into the open world (needs cheats on); without the agent, or in a " +
+        "menu (inWorld false), manualSteps names the commands to type. ready means the script debugger is attached; " +
+        "helperNote says when the world lacks the helper pack (game_query, wait_until, game_events and scene_* need it) " +
+        "and when game_log has no content-log file. The project's packs load only in a world that already lists them, " +
+        "after a rejoin.",
       inputSchema: {
         project: z.string().optional().describe("Add-on project or pack directory to activate in the world. For a Regolith project whose profile runs filters, the packs are what rgl last built (.regolith/tmp); sculkwire does not run rgl, so run `rgl run` first"),
         deploy: z.boolean().optional().describe("Copy the project's packs into development_*_packs, also over the project's sculkwire_* folder an earlier launch left. Default true. A folder rgl exported to is used as it is. Off: only folders that already serve a pack's uuid are used (what rgl built is still deployed)"),
@@ -242,7 +264,7 @@ export function register(server: McpServer): void {
           .enum(["window", "headless", "desktop"])
           .optional()
           .describe("headless (Linux default): no window and muted, the game runs in the background; Windows runs the window instead. window: a visible gamescope window on Linux, only when the user wants to watch; the game's own window on Windows (default there). desktop: the launcher's own window (on Windows the same as window)"),
-        mute: z.boolean().optional().describe("Silence the game's audio (Linux: a silent sink; Windows: the game's audio sessions, unmuted again by game_stop). Defaults to on in headless mode only"),
+        mute: z.boolean().optional().describe("Silence the game's audio until game_stop (Linux: its streams are kept on a silent sink, through the stop too, and an attached game's streams are moved back to their own output when game_stop detaches; Windows: the game's audio sessions, unmuted again by game_stop). Default: on in headless mode only; window, desktop, a game the user starts and an attached game keep their sound unless this is true. game_status reports muted and muteNote"),
         world: z
           .string()
           .optional()
@@ -312,9 +334,10 @@ export function register(server: McpServer): void {
     {
       title: "Client bridge status",
       description:
-        "Whether the client runs, which world and packs are active (worldMode: fresh, kept, copied or user), which channels " +
-        "(debugger, /connect) are attached, the user's saved default dev world (defaultWorld), and whether the player is " +
-        "dead (dead: the death screen is up or the helper streamed health 0; player_act respawns it).",
+        "Whether the client runs, which world and packs are active (worldMode: fresh, kept, copied, user or attached), " +
+        "which channels (debugger, /connect) are attached, the user's saved default dev world (defaultWorld), and whether " +
+        "the player is dead (dead: the death screen is up or the helper streamed health 0; player_act respawns it). For " +
+        "a game game_launch attached to: inWorld, levelId, and helperNote when the helper pack or the content log is missing.",
       inputSchema: {},
       outputSchema: statusSchema,
     },
@@ -476,16 +499,25 @@ export function register(server: McpServer): void {
       title: "Client content log",
       description:
         "Content-log entries and script errors since the previous call, as diagnostics mapped to the project's files " +
-        "(repeated per-frame errors collapsed). Pass `includeText` for the log text in content-log format.",
+        "(repeated per-frame errors collapsed). Pass `includeText` for the log text in content-log format. `source` says " +
+        "where they came from: `file` (the game's log files) or `engine` (the in-game agent's copy of what the game " +
+        "logged, used when no content-log file is written, e.g. in a game you opened yourself); `note` says why.",
       inputSchema: { includeText: z.boolean().optional() },
-      outputSchema: { diagnostics: z.array(diagnosticSchema), summary: summarySchema, text: z.string().optional() },
+      outputSchema: {
+        diagnostics: z.array(diagnosticSchema),
+        summary: summarySchema,
+        text: z.string().optional(),
+        source: z.enum(["file", "engine"]),
+        note: z.string().optional(),
+      },
     },
     async ({ includeText }) => {
       try {
-        const r = await bridge.logs();
+        const r = await engineLog.read(await bridge.logs(), bridge.indexedPacks);
         const summary = summarize(r.diagnostics);
-        const head = `${summary.errors} error(s), ${summary.warnings} warning(s) since the last read`;
-        const structured: Record<string, unknown> = { diagnostics: r.diagnostics, summary };
+        const head = `${summary.errors} error(s), ${summary.warnings} warning(s) since the last read${r.source === "engine" ? " (from the in-game agent)" : ""}`;
+        const structured: Record<string, unknown> = { diagnostics: r.diagnostics, summary, source: r.source };
+        if (r.note) structured.note = r.note;
         if (includeText) structured.text = r.text;
         return ok(r.diagnostics.length ? `${head}\n${diagText(r.diagnostics)}` : head, structured);
       } catch (err) {
@@ -632,7 +664,9 @@ export function register(server: McpServer): void {
         "with their readable values), `dynamic_properties` (world, player or entity, with total bytes), `scores` " +
         "(scoreboard objectives and scores), `raycast` (first block and the entities along a ray), `entity_properties` " +
         "(values of the properties an entity file declares). `entity` picks an entity by id, else `type` the nearest one, " +
-        "else the player.",
+        "else the player. When the helper pack does not answer (a world without it), `player`, `entities`, `block` and " +
+        "`blocks` are read from the game's memory through the in-game agent instead: `source` is `engine` and `note` says " +
+        "why; that route has no tags, effects, name tags or game mode. The other kinds need the helper pack.",
       inputSchema: {
         kind: z.enum(["player", "entities", "blocks", "block", "ping", "components", "dynamic_properties", "scores", "raycast", "entity_properties"]),
         type: z.string().optional().describe("Filter by entity/block type id; components, dynamic_properties, entity_properties: the nearest entity of this type"),
@@ -655,17 +689,31 @@ export function register(server: McpServer): void {
         includeLiquidBlocks: z.boolean().optional().describe("raycast: water and lava stop the ray (default false)"),
         includePassableBlocks: z.boolean().optional().describe("raycast: passable blocks such as grass stop the ray (default false)"),
       },
-      outputSchema: { result: z.unknown() },
+      outputSchema: { result: z.unknown(), source: z.enum(["script", "engine"]), note: z.string().optional() },
     },
     async ({ kind, ...input }) => {
+      const params: Record<string, unknown> = Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined));
+      let helperError: unknown;
       try {
-        const params: Record<string, unknown> = Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined));
         if (kind === "entity_properties" && !input.ids?.length) {
           params.ids = await entityPropertyIdsFor(input, { query: (k, p) => bridge.query(k, p), declared: (t) => bridge.entityPropertyIds(t) });
         }
         const result = await bridge.query(kind, params);
         const text = JSON.stringify(result);
-        return ok(text.length > 4000 ? `${text.slice(0, 4000)}…` : text, { result });
+        return ok(text.length > 4000 ? `${text.slice(0, 4000)}…` : text, { result, source: "script" });
+      } catch (err) {
+        helperError = err;
+      }
+      // The helper's own refusal (bad input, nothing there) is the answer; only a helper that did not answer falls back.
+      if (helperError instanceof HelperQueryError) return fail(helperError);
+      const why = errorMessage(helperError);
+      try {
+        const answer = await engineQuery(kind, params);
+        if (!answer) return fail(new Error(`${why}; ${kind} needs the helper pack (the in-game agent answers only player, entities, block and blocks)`));
+        if (!answer.ok) return fail(new Error(`${why}; the in-game agent did not answer either: ${answer.message}`));
+        const note = `the helper pack did not answer (${why}); read from the game's memory through the in-game agent`;
+        const text = JSON.stringify(answer.value);
+        return ok(`${text.length > 4000 ? `${text.slice(0, 4000)}…` : text}\n${note}`, { result: answer.value, source: "engine", note });
       } catch (err) {
         return fail(err);
       }
@@ -1249,7 +1297,10 @@ export function register(server: McpServer): void {
         "(settings live while the game still runs, both in options.txt). In the user's dev world (worldMode user) it first " +
         "tries Save & Quit through the pause menu (up to 45 s; savedAndQuit says whether it worked, stopNote what was " +
         "lost otherwise), puts the world's own icon back, and keeps the helper pack and the project's packs in its pack " +
-        "lists and their development pack folders (keptPackFolders). In test worlds the game is ended without Save & Quit.",
+        "lists and their development pack folders (keptPackFolders). In test worlds the game is ended without Save & Quit. " +
+        "A game game_launch attached to (one the user opened) is never closed: game_stop only detaches (detached: true), " +
+        "putting back the settings it turned on live and the options.txt keys, closing the listeners and keeping the " +
+        "pack folders the open world uses; the in-game agent stays loaded in the game.",
       inputSchema: {},
       outputSchema: {
         stopped: z.boolean(),
@@ -1259,6 +1310,7 @@ export function register(server: McpServer): void {
         savedAndQuit: z.boolean().optional(),
         keptPackFolders: z.array(z.string()).optional(),
         stopNote: z.string().optional(),
+        detached: z.boolean().optional(),
       },
     },
     async () => {

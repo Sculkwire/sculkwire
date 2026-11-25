@@ -266,11 +266,31 @@ export async function setSetting(id: string, value: SettingValue, deps: Settings
     change.saved = true;
     await writeOptionsValues(install, { [key]: fileText(key, value) });
   }
+  await remember(key, change, deps);
+  return { ok: true, value: change };
+}
+
+/** Record `change`'s previous value for `restoreGameSettings`; the first change of a key keeps the user's own value. */
+async function remember(key: string, change: SettingChange, deps: SettingsDeps): Promise<void> {
   const record = deps.record ?? defaultRecord();
   const pending = await readPending(record);
   // The first change of a key keeps the user's own original value, so a second change still restores the first one.
   if (!(key in pending.settings)) pending.settings[key] = { previous: change.previous, source: change.source };
   await writePending(record, pending);
+}
+
+/**
+ * Set one of the bridge's own channel keys (`websockets_enabled`, `content_log_file`, ...) live through the agent, for a
+ * game `game_launch` attached to: options.txt reaches only the next start. Recorded like `setSetting`, so `game_stop`
+ * (from this process or another) puts the user's value back. `setSetting` keeps refusing these keys for users.
+ */
+export async function setBridgeSetting(id: string, value: SettingValue, deps: SettingsDeps = {}): Promise<EngineResult<SettingChange>> {
+  if (!BRIDGE_KEYS.has(id)) return invalid(`${id} is not one of the bridge's own keys`);
+  const result = await (deps.session ?? engine).settingsSet(id, value);
+  if (!result.ok) return result;
+  const change: SettingChange = { id, previous: result.value.previous, value: result.value.value, source: "engine", appliesAt: "now" };
+  if (result.value.saved !== undefined) change.saved = result.value.saved;
+  await remember(id, change, deps);
   return { ok: true, value: change };
 }
 

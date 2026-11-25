@@ -302,7 +302,7 @@ pub(crate) fn read_look(element: usize) -> Option<[f32; 2]> {
     (pitch.is_finite() && yaw.is_finite()).then_some([pitch, yaw])
 }
 
-fn read_vec3(address: usize) -> Option<[f32; 3]> {
+pub(crate) fn read_vec3(address: usize) -> Option<[f32; 3]> {
     let vector = [
         pe::read::<f32>(address)?,
         pe::read::<f32>(address + 4)?,
@@ -313,7 +313,7 @@ fn read_vec3(address: usize) -> Option<[f32; 3]> {
 
 /// The feet under `position`, from an `AABBShapeComponent` element: believed only when the box is as
 /// wide and tall as its own size says, is centred on the state vector's x and z, and holds its y.
-fn feet_of(element: usize, position: &[f32; 3]) -> Option<[f32; 3]> {
+pub(crate) fn feet_of(element: usize, position: &[f32; 3]) -> Option<[f32; 3]> {
     let min = read_vec3(element + AABB_MIN)?;
     let max = read_vec3(element + AABB_MAX)?;
     let width = pe::read::<f32>(element + AABB_SIZE)?;
@@ -335,7 +335,7 @@ fn feet_of(element: usize, position: &[f32; 3]) -> Option<[f32; 3]> {
 /// A position is believed only inside the build's world bounds (±30 M blocks, 4096 tall). A player
 /// standing still has a zero delta, so zero is plausible for the *delta* and not a reason to refuse a
 /// position: only the all-zero triple, which no entity ever stands at, is rejected here.
-fn plausible_position(position: &[f32; 3]) -> bool {
+pub(crate) fn plausible_position(position: &[f32; 3]) -> bool {
     position.iter().all(|value| value.abs() < 31_000_000.0)
         && position[1].abs() < 4096.0
         && !position.iter().all(|value| *value == 0.0)

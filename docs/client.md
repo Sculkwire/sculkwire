@@ -46,7 +46,11 @@ On Linux, `window` and `headless` run the game inside [gamescope](https://github
 
 On Windows the game sizes its own window, so `width`, `height` and `fps` do nothing. Screenshots capture the window's client area with `PrintWindow`, which works while the window is covered. When the game hands back an empty frame (one colour), the client area is copied from the screen instead, which needs the game window in the foreground; otherwise the screenshot fails and says so. Clicks use the same client area in physical pixels, so a pixel in the screenshot is the pixel clicked.
 
-`mute` silences the game in any mode: on Linux through a silent PipeWire or PulseAudio sink, on Windows by muting the game's audio sessions once it plays sound. When Windows has no audio output device or the game opened no session, the launch result says so instead of failing. Windows can keep an app's mute in its volume mixer, so `game_stop` unmutes the game before closing it; if the game is closed another way and stays silent later, unmute Minecraft in the volume mixer.
+`mute` silences the game until `game_stop`. It is on by default only in `headless` mode, where the game runs in the background; `window`, `desktop`, a game you start yourself and a game sculkwire attached to keep their sound unless `game_launch` gets `mute: true`.
+
+On Linux the game's audio goes to a silent PipeWire or PulseAudio sink (`sculkwire_muted_game`). PipeWire remembers an output per application and can send the game to that output instead, so while the game is muted sculkwire checks its audio streams every 2 s and moves each stream of the game's own processes onto the silent sink (`pactl move-sink-input`). Streams of other apps are never touched, the default output is never changed, and no stream is muted. When `game_stop` closes a game sculkwire started, its streams stay on the silent sink until the game has exited, so nothing plays during the stop; then the silent sink is removed. PipeWire remembers the move as Minecraft's output, a sink that no longer exists, so the next time Minecraft starts it plays on the default output. If you had sent Minecraft to another output than the default one, pick that output for it again once (in your sound settings or `pavucontrol`). A game you opened yourself that sculkwire attached to with `mute: true` keeps running after `game_stop`: its streams are moved back to the output they came from, so PipeWire remembers your own output for Minecraft again, and then the silent sink is removed. When a stream cannot be moved, or `pactl` is missing, `game_status` reports `muted: false` with a `muteNote`.
+
+On Windows sculkwire mutes the game's audio sessions once it plays sound. When Windows has no audio output device or the game opened no session, the launch result says so instead of failing. Windows can keep an app's mute in its volume mixer, so `game_stop` unmutes the game before closing or leaving it; if the game is closed another way and stays silent later, unmute Minecraft in the volume mixer.
 
 ## Linux Requirements
 
@@ -62,11 +66,19 @@ Nothing to install. Input, screenshots and mute run through Windows PowerShell 5
 
 ## Playing While the Agent Works
 
-On Windows and Linux, sculkwire only manages the game of the install it uses, so you can keep playing from another install at the same time. On Windows that can be Preview while sculkwire uses Stable (or the other way round), and on Linux, for example, Flarial while sculkwire uses mcbe-gdk-installer. Set `SCULKWIRE_CLIENT` to choose which install sculkwire uses. On macOS sculkwire cannot tell installs apart yet, so close your own game first. On Windows the agent's input pauses while your game window is in the foreground, because the agent shares your keyboard and mouse; on Linux it does not.
+On Windows and Linux, sculkwire only manages the game of the install it uses, so you can keep playing from another install at the same time. On Windows that can be Preview while sculkwire uses Stable (or the other way round), and on Linux, for example, Flarial while sculkwire uses mcbe-gdk-installer. Set `SCULKWIRE_CLIENT` to choose which install sculkwire uses. On macOS sculkwire cannot tell installs apart, so any running game counts as the one it uses. On Windows the agent's input pauses while your game window is in the foreground, because the agent shares your keyboard and mouse; on Linux it does not.
 
-Two games from the same install cannot run at once. If your own game is already open from that install, `game_launch` tells you so instead of closing it.
+## Working in a Game You Opened
 
-When the agent session ends, sculkwire closes the game it started.
+Two games from the same install cannot run at once. If your own game is already open from that install, `game_launch` attaches to it instead of starting another one: it never restarts, closes or Save & Quits it, and writes nothing into its world.
+
+1. With the in-game agent, sculkwire turns `/connect` and the content log on in the running game and, once a world is open, runs `/script debugger connect localhost 19151` and types `/connect localhost:19150` in chat for you. Both need cheats on in the world: with cheats off, turn them on (pause menu, Settings, Game) and sculkwire dials again. It never answers a confirmation dialog for you. If your game requires encrypted websockets (Settings > General > Require Encrypted Websockets), turn that off yourself to let sculkwire use `/connect`; commands work through the script debugger meanwhile.
+2. Without the agent (macOS, or the attach failed), type those two commands in the game chat yourself; `manualSteps` names the exact ports.
+3. The tools that read the world through the helper pack (`game_query`, `wait_until`, `game_events`, `scene_*`) work only in a world that lists the helper pack. sculkwire puts it into `development_behavior_packs`; add "sculkwire helper" to the world's Behavior Packs and rejoin, or launch the world through sculkwire once with the game closed.
+
+`game_stop` then only detaches and leaves your game running. See [Attaching to a Running Game](tools.md#attaching-to-a-running-game) for the details.
+
+When the agent session ends, sculkwire closes the game it started, and only detaches from a game you opened.
 
 ## Custom Launchers
 

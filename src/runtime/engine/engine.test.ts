@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { ClientInstall } from "../../gamefiles/install.ts";
 import { gamePath } from "./gamepath.ts";
-import { EngineSession, engineGameDir, type EngineStatus } from "./engine.ts";
+import { COMMAND_TOO_LONG, EngineSession, engineGameDir, MAX_COMMAND_CHARS, type EngineStatus } from "./engine.ts";
 import { schemas } from "./mcp.ts";
 import { AgentClient } from "./client.ts";
 import type { UiKeyAction } from "./ui.ts";
@@ -420,6 +420,41 @@ describe("engine command origin bootstrap", () => {
     expect(result.message).toContain("a screen is open");
     expect(agent.requests.map((request) => request.method)).not.toContain("ui.key");
     expect(agent.requests.map((request) => request.method)).not.toContain("ui.text");
+  });
+
+  it("refuses a command over 1000 characters without sending it, since the game kicks the player for one", async () => {
+    const agent = await makeAgent();
+    const session = makeSession(agent);
+    agent.handler = (request) => reply(request, { success: true, message: "" });
+    const fits = `say ${"a".repeat(MAX_COMMAND_CHARS - 5)}`;
+    expect(`/${fits}`.length).toBe(MAX_COMMAND_CHARS);
+    expect(await session.command(fits)).toMatchObject({ ok: true });
+    const sent = agent.requests.length;
+    for (const line of [`${fits}a`, `/${fits}a`]) {
+      expect(await session.command(line)).toMatchObject({ ok: false, reason: "invalid_params", message: COMMAND_TOO_LONG });
+      expect(await session.chat(line)).toMatchObject({ ok: false, reason: "invalid_params", message: COMMAND_TOO_LONG });
+    }
+    expect(agent.requests.length).toBe(sent);
+  });
+
+  it("types a client command such as /connect in chat without arming the prime", async () => {
+    const agent = await makeAgent();
+    const session = makeSession(agent);
+    let screen = "hud_screen";
+    agent.handler = (request) => {
+      const params = request.params as Record<string, unknown> | undefined;
+      if (request.method === "ui.screen") return reply(request, { name: screen, stack: [screen], modal: false });
+      if (request.method === "ui.key") {
+        if (params?.key === "t") screen = "chat_screen";
+        if (params?.key === "Return") screen = "hud_screen";
+      }
+      return reply(request, { sent: 1 });
+    };
+    expect(await session.chat("/connect localhost:19150")).toEqual({ ok: true, value: true });
+    const methods = agent.requests.map((request) => request.method);
+    expect(methods).not.toContain("command.prime");
+    expect(methods).not.toContain("command");
+    expect(agent.requests.map((request) => [request.method, request.params])).toContainEqual(["ui.text", { text: "/connect localhost:19150" }]);
   });
 });
 

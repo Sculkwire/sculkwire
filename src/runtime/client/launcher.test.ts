@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { defaultMode, gamescopeArgv, gamescopeBackend, gamescopeBlocker, launchArgv, parseGamescopeLog, windowsMode, worldUri } from "./launcher.ts";
+import { defaultMode, gamescopeArgv, gamescopeBackend, gamescopeBlocker, launchArgv, muteByDefault, parseGamescopeLog, windowsMode, worldUri } from "./launcher.ts";
+
+describe("mute default", () => {
+  it("mutes only a game that runs in the background, unless mute says otherwise", () => {
+    expect(muteByDefault(undefined, "headless")).toBe(true);
+    expect(muteByDefault(undefined, "window")).toBe(false);
+    expect(muteByDefault(undefined, "desktop")).toBe(false);
+    expect(muteByDefault(false, "headless")).toBe(false);
+    expect(muteByDefault(true, "desktop")).toBe(true);
+  });
+});
 
 describe("launch arguments", () => {
   it("puts the encoded deeplink where the command says {uri}", () => {

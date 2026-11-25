@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ClientInstall } from "../../gamefiles/install.ts";
 import { EngineSession, type SettingEdit, type SettingValue } from "./engine.ts";
 import type { EngineResult } from "./failure.ts";
-import { changeText, getSetting, listSettings, restoreGameSettings, setSetting, settingsText } from "./settings.ts";
+import { changeText, getSetting, listSettings, restoreGameSettings, setBridgeSetting, setSetting, settingsText } from "./settings.ts";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -120,6 +120,19 @@ describe("settings from options.txt", () => {
     const deps = { install, session: detached(), record };
     expect(await setSetting("websockets_enabled", "0", deps)).toMatchObject({ ok: false, reason: "invalid_params", message: expect.stringContaining("bridge") });
     expect(await setSetting("not_an_option", "1", deps)).toMatchObject({ ok: false, message: expect.stringContaining("only options the game already saved") });
+    expect(existsSync(record)).toBe(false);
+  });
+
+  it("sets a bridge key live for an attached game, records it, and puts the user's value back", async () => {
+    const { install, record } = await fixture();
+    const edits: [string, SettingValue][] = [];
+    const deps = { install, session: attached({ previous: false, edits }), record };
+    const set = await setBridgeSetting("websockets_enabled", true, deps);
+    if (!set.ok) throw new Error(set.message);
+    expect(set.value).toMatchObject({ id: "websockets_enabled", previous: false, value: true, source: "engine", appliesAt: "now" });
+    expect(await setBridgeSetting("gfx_viewdistance", 8, deps)).toMatchObject({ ok: false, message: expect.stringContaining("not one of the bridge's own keys") });
+    expect(await restoreGameSettings(deps)).toEqual({ websockets_enabled: false });
+    expect(edits).toEqual([["websockets_enabled", true], ["websockets_enabled", false]]);
     expect(existsSync(record)).toBe(false);
   });
 

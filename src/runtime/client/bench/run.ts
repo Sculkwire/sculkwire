@@ -471,7 +471,8 @@ export async function runBench(opts: BenchOptions): Promise<BenchReport> {
   }
   const startedAt = new Date().toISOString();
   log(`launching the game (${opts.display ?? "window"}, muted, difficulty normal)`);
-  const started = await bridge.start({ mode: opts.display ?? "window", mute: true, difficulty: "normal", world: "bench" });
+  // The bench plays in its own test world: a game the user already opened is refused, never attached.
+  const started = await bridge.start({ mode: opts.display ?? "window", mute: true, difficulty: "normal", world: "bench", attach: false });
   const reports: ScenarioReport[] = [];
   const traces: BenchTrace[] = [];
   let originalView: GameSetting | undefined;

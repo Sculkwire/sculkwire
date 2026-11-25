@@ -58,6 +58,11 @@ export const METHODS = {
   "screen.move": { timeoutMs: SLOTS_TIMEOUT_MS },
   "screen.act": { timeoutMs: REQUEST_TIMEOUT_MS },
   "screen.close": { timeoutMs: SLOTS_TIMEOUT_MS },
+  // A cube of blocks or every actor of the server level is read on the server thread, one tick.
+  "world.entities": { timeoutMs: SLOTS_TIMEOUT_MS },
+  "world.block": { timeoutMs: SLOTS_TIMEOUT_MS },
+  "world.blocks": { timeoutMs: SLOTS_TIMEOUT_MS },
+  "log.content": {},
 } as const satisfies Record<string, { timeoutMs?: number }>;
 
 export type MethodName = keyof typeof METHODS;

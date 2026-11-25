@@ -10,13 +10,18 @@
  * When the deeplink join beats Microsoft sign-in the client rejects its LoginPacket and shows its connection-error
  * screen; `#finishStart` sees that in the engine log and `#returnToWorld` walks the menus back into the test world
  * (screens.ts), never relaunching the game.
+ *
+ * A game the user already started from the chosen install is attached instead (`#startAttached`): never restarted,
+ * never written to; the in-game agent turns the channels on live and dials them with `/script debugger connect` and
+ * `/connect`, or the user types those two commands. `stop` then only detaches.
  */
 import { errorMessage } from "../../core/errors.ts";
-import { rm } from "node:fs/promises";
-import { resolve } from "node:path";
+import { readFile, rm, stat } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Diagnostic } from "../../core/diagnostic.ts";
 import { compareDiagnostics } from "../../core/diagnostic.ts";
+import { readJsonOr } from "../../core/fs.ts";
 import { dataDir } from "../../core/paths.ts";
 import type { IndexedPack } from "../gamelog/logparse.ts";
 import { printToDiagnostic, type PrintEvent } from "../debugger/print.ts";
@@ -42,8 +47,10 @@ import { deployProject, type DeployedPack } from "./deploy.ts";
 import { findInstall, optionsFiles, type ClientInstall } from "../../gamefiles/install.ts";
 import { debuggerCommandOk, helperTraffic, loadFailureMatcher, type FailureMatcher } from "./commandfail.ts";
 import {
+  attachState,
   DEFAULT_FRAME,
   defaultMode,
+  detachState,
   gamePids,
   gamescopeBlocker,
   hasInput,
@@ -55,16 +62,19 @@ import {
   screenshot,
   sendInput,
   stop as stopGame,
+  systemPactl,
   typeChatCommand,
   waitForGame,
+  writeLaunchState,
   type InputAction,
   type LaunchMode,
   type LaunchState,
 } from "./launcher.ts";
-import { bridgeOptions, restoreOptions, setOptions } from "../../gamefiles/options.ts";
-import { engine, type SettingValue } from "../engine/engine.ts";
+import { bridgeOptions, parseOptions, restoreOptions, setOptions } from "../../gamefiles/options.ts";
+import { COMMAND_TOO_LONG, commandTooLong, engine, type SettingValue } from "../engine/engine.ts";
 import type { EngineResult } from "../engine/failure.ts";
-import { restoreGameSettings } from "../engine/settings.ts";
+import type { UiScreen } from "../engine/ui.ts";
+import { restoreGameSettings, setBridgeSetting } from "../engine/settings.ts";
 import { Staleness, streamEntities, streamEntity, TickClock, type StreamedEntities } from "./entitystream.ts";
 import { horizontalDistance } from "./geometry.ts";
 import { PlayerController } from "./player.ts";
@@ -74,8 +84,10 @@ import { HELPER_MARK, isReplyTo, parseReply, queryCommand } from "./helperprotoc
 import { pngSize, readShot } from "./png.ts";
 import { declaredEntityProperties } from "./entityproperties.ts";
 import { unavailableInput, type InputRoute, type PlayerInput } from "./input.ts";
-import { createWorld, enterUserWorld, markWorldIcon, restoreUserIcon, type CreatedWorld, type PackRef } from "./world.ts";
+import { createWorld, enterUserWorld, installHelperPack, markWorldIcon, restoreUserIcon, type CreatedWorld, type PackRef } from "./world.ts";
 import { pruneWorlds } from "./worldstore.ts";
+import { GameMute } from "./mute.ts";
+import { windowsMute } from "./windows.ts";
 import { readDevWorld, type DevWorld } from "./devworld.ts";
 import type { Difficulty } from "../../gamefiles/worlds.ts";
 import {
@@ -126,6 +138,117 @@ const AUTO_ENTER_ATTEMPTS = 3;
 const AUTO_ENTER_TIMEOUT_MS = 90_000;
 /** On an install the user starts, attach the in-game agent once the start screen shows, or this long after the process came up. */
 const AUTO_ATTACH_AFTER_MS = 30_000;
+/** How often the bridge looks at a game it attached to while the channels are not all up. */
+const ATTACH_POLL_MS = 2_000;
+/** How long `start` waits for an attached game to dial the debugger after the agent sent the command. */
+const ATTACH_DIAL_WAIT_MS = 15_000;
+/**
+ * game_launch options only a game sculkwire starts can apply, by option and parameter name: an attached game keeps
+ * its world, window and settings (`mute: true` does silence it, until game_stop).
+ */
+const FRESH_START_OPTIONS = [
+  ["fresh", "fresh"],
+  ["world", "world"],
+  ["keep", "keep"],
+  ["copyFrom", "copyFrom"],
+  ["userWorld", "userWorld"],
+  ["mode", "display"],
+  ["width", "width"],
+  ["height", "height"],
+  ["fps", "fps"],
+  ["difficulty", "difficulty"],
+  ["betaApis", "betaApis"],
+] as const satisfies readonly (readonly [keyof BridgeStartOptions, string])[];
+/**
+ * The bridge's channel keys an attached game gets live through the agent: options.txt reaches only its next start.
+ * `content_log_file` gives game_log a file to read. `websocket_encryption` is never set live: turning it off opens the
+ * game's security confirmation, which is the user's to answer (`ENCRYPTED_STEP`).
+ */
+const LIVE_KEYS: readonly (readonly [string, SettingValue])[] = [
+  ["websockets_enabled", true],
+  ["content_log_file", true],
+];
+/** The step for a game that requires encrypted websockets: `/connect` cannot attach to the bridge's plain server. */
+export const ENCRYPTED_STEP =
+  "to let sculkwire use /connect, turn off Settings > General > Require Encrypted Websockets yourself (commands already work through the script debugger)";
+
+/** Whether an option value reads as on (`true`, `1`, `"1"`, `"true"`). */
+function isOn(value: SettingValue | string | undefined): boolean {
+  return value === true || value === 1 || value === "1" || value === "true";
+}
+/** What needs the helper pack in the world. */
+const HELPER_TOOLS = "game_query, wait_until, game_events, scene_* and the respawn health checks";
+
+/** The chat commands that connect a running game to the bridge's script debugger and `/connect` server. */
+export function dialCommands(debuggerPort: number, connectPort: number): { debugger: string; connect: string } {
+  return { debugger: `script debugger connect localhost ${debuggerPort}`, connect: `connect localhost:${connectPort}` };
+}
+
+/** Why the helper pack's tools fail in an attached game whose world does not run it. */
+export function helperMissing(world: string | undefined): string {
+  const name = world ? `"${world}"` : "the open world";
+  return (
+    `the sculkwire helper pack does not run in ${name}, and ${HELPER_TOOLS} need it. sculkwire put it into ` +
+    `development_behavior_packs; it takes effect the next time the world loads with it in its pack list (add ` +
+    `"sculkwire helper" under the world's Behavior Packs, then leave and rejoin), or close the game and launch the ` +
+    `world through sculkwire once (game_worlds use, then game_launch): the helper pack then stays in it`
+  );
+}
+
+/** The pack ids a world's pack lists name (`world_behavior_packs.json`, `world_resource_packs.json`); read only. */
+async function worldPackIds(dir: string): Promise<Set<string>> {
+  const ids = new Set<string>();
+  for (const file of ["world_behavior_packs.json", "world_resource_packs.json"]) {
+    const list = await readJsonOr<unknown>(join(dir, file));
+    if (!Array.isArray(list)) continue;
+    for (const entry of list as unknown[]) {
+      if (entry && typeof entry === "object" && "pack_id" in entry && typeof entry.pack_id === "string") ids.add(entry.pack_id);
+    }
+  }
+  return ids;
+}
+
+/** One option of the install's options.txt (the player's file first), or undefined. */
+async function optionValue(install: ClientInstall, key: string): Promise<string | undefined> {
+  for (const file of optionsFiles(install)) {
+    const value = await readFile(file, "utf8").then((text) => parseOptions(text).get(key), () => undefined);
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+/** What the bridge knows of a game it attached to (`#startAttached`). */
+interface AttachedGame {
+  gamePid: number;
+  /** The game shows a world (false: it sits in a menu). */
+  inWorld: boolean;
+  /** Level id and name of the world the game opened last. */
+  levelId?: string;
+  name?: string;
+  /** The open world's cheats flag as the agent read it; null or undefined when unknown. */
+  cheats?: boolean | null;
+  /** Why the in-game agent could not be attached, when it could not. */
+  agentError?: string;
+  /** The dial commands the agent ran that failed, with the game's own message. */
+  dialFailures: { line: string; message: string }[];
+  /** The world, cheats flag and drop count the agent last dialled for: it dials again only when one of them changes. */
+  dialledFor?: string;
+  dialledAt?: number;
+  /** Debugger sessions that closed (a rejoin, a world change): each one makes the agent dial again, once. */
+  drops: number;
+  /** The last debugger session the helper was asked on. */
+  probed?: DebuggerSession;
+  /** The last closed session counted in `drops`. */
+  dropped?: DebuggerSession;
+  helperInstalled: boolean;
+  helperNote?: string;
+  contentLogNote?: string;
+  /**
+   * The open game requires encrypted websockets (Settings > General), which the bridge's plain `/connect` server
+   * cannot serve: the agent's live reading, else options.txt as the game read it at its start; undefined when unknown.
+   */
+  encrypted?: boolean;
+}
 
 /** The bridge's own walk into the world while it waits (`#autoEnter`). */
 interface AutoEnter {
@@ -231,7 +354,10 @@ export interface BridgeStartOptions {
    * on Windows). Default: window on Windows; elsewhere window when gamescope and a desktop are available, else desktop.
    */
   mode?: LaunchMode;
-  /** Silence the game's audio (Linux and Windows). Default: on in headless mode only. */
+  /**
+   * Silence the game's audio (Linux: its streams go to a silent sink; Windows: its audio sessions). Default: on in
+   * headless mode only. A game the user opened (attached) is muted only with `mute: true`, until game_stop.
+   */
   mute?: boolean;
   /** A `sculkwire-` test world by name (`bridge` by default). Never combined with `userWorld`. */
   world?: string;
@@ -263,6 +389,11 @@ export interface BridgeStartOptions {
    * keep waiting in the background (as when the user starts the game) instead of stopping the game.
    */
   keepOnTimeout?: boolean;
+  /**
+   * When the chosen install's game already runs, attach to it (default true) instead of refusing: see `#startAttached`.
+   * False (the bench, which needs its own game) refuses as before.
+   */
+  attach?: boolean;
 }
 
 /** How the game reached the test world for this launch, for `entry()`. */
@@ -309,15 +440,28 @@ export interface BridgeStatus {
   worldNote?: string;
   /**
    * How this launch got its world: `fresh` (a new test world), `kept` (a test world entered as it is), `copied` (a test
-   * world copied from another), `user` (the user's own dev world).
+   * world copied from another), `user` (the user's own dev world), `attached` (the world of a game the user had
+   * already started, taken as it is).
    */
-  worldMode?: "fresh" | "kept" | "copied" | "user";
+  worldMode?: "fresh" | "kept" | "copied" | "user" | "attached";
+  /** game_launch found the game already running and attached to it instead of starting one; game_stop only detaches. */
+  attached?: boolean;
+  /** Attached game: whether it shows a world (false: it sits in a menu, and the channels connect once a world is open). */
+  inWorld?: boolean;
+  /** Attached game: the level id (folder under minecraftWorlds) of the world it opened. */
+  levelId?: string;
+  /** Attached game: what the helper pack's tools or game_log lack in this world, and how it gets there. */
+  helperNote?: string;
   /** `user` mode: the backup of the dev world's level.dat, pack lists and icon this launch made before writing them. */
   worldBackup?: string;
   /** The user's saved default dev world for this game user (game_status reads it; absent when none is saved). */
   defaultWorld?: DevWorld;
   /** game_status only: the player is dead (the death screen is up, or the helper streamed health 0). */
   dead?: boolean;
+  /** sculkwire keeps the game silent (`mute`), and nothing it knows of lets the sound through. */
+  muted?: boolean;
+  /** Why the game's sound may reach the speakers although `mute` applies (pactl missing, a stream that would not move). */
+  muteNote?: string;
 }
 
 /** How long `reload` waits at each step (ms); tests shorten them. */
@@ -358,6 +502,8 @@ export interface StopResult {
   keptPackFolders?: string[];
   /** What the stop did or could not do for a user's dev world (Save & Quit, the icon, the kept folders). */
   stopNote?: string;
+  /** The game was one the user had started and sculkwire attached to: it was left running. */
+  detached?: boolean;
 }
 
 /** `count` clicks one after another, 120 ms apart on `wait`: `count: 2` is a double click. */
@@ -511,6 +657,12 @@ export class ClientBridge {
   #startAbort?: AbortController;
   /** sculkwire's icon is in the user's dev world this bridge entered: the next `stop` puts the world's own back. */
   #iconPending = false;
+  /** Set while this bridge is attached to a game the user started (`#startAttached`); `stop` then only detaches. */
+  #attached?: AttachedGame;
+  /** Linux: keeps the game's streams on the silent sink while the game is muted; stopped by `stop` (see there). */
+  #muteWatcher?: GameMute;
+  /** Windows: why muting the game's audio sessions failed. */
+  #muteNote?: string;
 
   /** A game was launched and has not exited. Before its process is found (a user still starting it) it counts as running. */
   get running(): boolean {
@@ -526,12 +678,15 @@ export class ClientBridge {
   status(): BridgeStatus {
     const exited = this.#gameExited();
     const connect = connectView(this.#connectStep, this.#connectMethod, this.#connect?.clients().length ?? 0);
+    const sessionOpen = !!this.#session && !this.#session.closed;
+    const game = this.#attached;
     const s: BridgeStatus = {
       running: this.running,
       packs: this.#packs.map((p) => ({ ...p })),
-      debugger: { attached: !!this.#session && !this.#session.closed },
+      debugger: { attached: sessionOpen },
       connect: connect.status,
-      ready: this.#ready && this.#helperUp && !!this.#session && !this.#session.closed && !exited,
+      // An attached game is ready once the debugger is: its world may not run the helper pack (helperNote says so).
+      ready: this.#ready && (game !== undefined || this.#helperUp) && sessionOpen && !exited,
       manualSteps: exited
         ? [`the game process (pid ${this.launchState?.gamePid}) exited: call game_stop to clean up, then game_launch`]
         : [...this.#manual, ...(this.#helperStep ? [this.#helperStep] : []), ...connect.steps],
@@ -546,6 +701,15 @@ export class ClientBridge {
       s.worldMode = this.world.how === "created" ? "fresh" : this.world.how;
       if (this.world.backup) s.worldBackup = this.world.backup;
     }
+    if (game) {
+      s.attached = true;
+      s.worldMode = "attached";
+      s.inWorld = game.inWorld;
+      if (game.name) s.world = game.name;
+      if (game.levelId) s.levelId = game.levelId;
+      const notes = [game.helperNote, game.contentLogNote].filter((n) => n !== undefined);
+      if (notes.length) s.helperNote = notes.join("; ");
+    }
     if (this.project) s.project = this.project;
     if (this.#listener) s.debugger.port = this.#listener.port;
     if (this.#session?.info) {
@@ -555,6 +719,11 @@ export class ClientBridge {
     const port = this.#connect?.port;
     if (port) s.connect.port = port;
     if (this.#joinRecovery) s.joinRecovery = this.#joinRecovery;
+    if (this.launchState) {
+      const note = this.#muteWatcher ? this.#muteWatcher.note : this.#muteNote;
+      s.muted = (this.#muteWatcher !== undefined || this.launchState.muteRequested === true) && note === undefined;
+      if (note) s.muteNote = note;
+    }
     return s;
   }
 
@@ -585,15 +754,15 @@ export class ClientBridge {
     await inputProvider()?.stopped();
     const install = await findInstall();
     this.install = install;
-    const userWorld = await userWorldFor(install, opts);
-    // A user's world is written (level.dat, pack lists, icon) only while no game has it open.
-    if (userWorld && (await gamePids(install)).length > 0) {
-      throw new Error(
-        `the game is running: close it first (game_stop, or quit it), then launch again. sculkwire writes the level.dat and ` +
-          `pack lists of ${userWorld.label} only while the game is closed`,
-      );
+    const [runningPid] = await gamePids(install);
+    if (runningPid !== undefined && opts.attach === false) {
+      throw new Error(`Minecraft from ${install.label} is already running and this needs a game of its own: close it first, then try again`);
     }
+    // A game that already runs is attached as it is, so no world is chosen or written (a saved dev world included).
+    const userWorld = runningPid === undefined ? await userWorldFor(install, opts) : undefined;
     this.world = undefined;
+    this.#attached = undefined;
+    this.#worldNote = undefined;
     const mode = opts.mode ?? (await defaultMode(install));
     const timeoutMs = opts.timeoutMs ?? WORLD_WAIT_MS;
     this.#manual = [];
@@ -624,6 +793,7 @@ export class ClientBridge {
       packRefs = deployment.refs;
       this.#indexed = await indexProjectPacks(project, install.sharedComMojang);
     }
+    if (runningPid !== undefined) return this.#startAttached(install, runningPid, opts, signal, waitFailed);
 
     try {
       const debuggerPort = await this.listenDebugger(opts.debuggerPort ?? BRIDGE_DEBUGGER_PORT);
@@ -694,6 +864,7 @@ export class ClientBridge {
       await this.stop();
       throw new Error(`could not start the client: ${errorMessage(e)}`);
     }
+    if (this.launchState.muteRequested && process.platform === "linux") await this.#startMuteWatcher(install);
     // With an input provider, the user only starts the game: the bridge attaches it and walks into the world itself.
     const walks = !install.launch && inputProvider() !== undefined;
     this.#manual.push(
@@ -731,6 +902,340 @@ export class ClientBridge {
   }
 
   /**
+   * Attach to the game the user already started (`gamePid`) instead of starting one. Nothing about it is restarted or
+   * written: no world is created or entered, no pack list or level.dat is touched, and options that need a fresh start
+   * are named in `worldNote`. The listeners open as usual and options.txt gets the bridge keys for the next start. With
+   * an input provider the in-game agent is attached, turns the channel keys on live (recorded, restored on `stop`) and,
+   * once a world is open, runs `/script debugger connect` and `/connect`; without one `manualSteps` names the two
+   * commands to type. Returns at once; `#attachLoop` keeps looking until `stop`.
+   */
+  async #startAttached(
+    install: ClientInstall,
+    gamePid: number,
+    opts: BridgeStartOptions,
+    signal: AbortSignal,
+    waitFailed: (e: unknown) => void,
+  ): Promise<BridgeStatus> {
+    // Set first: a `stop` from here on, the one after a failed start included, only detaches.
+    const game: AttachedGame = { gamePid, inWorld: false, dialFailures: [], drops: 0, helperInstalled: false };
+    this.#attached = game;
+    this.#prunedWorlds = [];
+    const ignored = FRESH_START_OPTIONS.filter(([key]) => opts[key] !== undefined && opts[key] !== false).map(([, name]) => name);
+    let contentLogOn: boolean;
+    try {
+      const debuggerPort = await this.listenDebugger(opts.debuggerPort ?? BRIDGE_DEBUGGER_PORT);
+      this.#connect = new ConnectServer({ port: opts.connectPort ?? DEFAULT_CONNECT_PORT });
+      await this.#connect.start();
+      contentLogOn = (await optionValue(install, "content_log_file")) === "1";
+      // What the open game read when it started; the agent's live value replaces it below. Unknown when absent.
+      const encryption = await optionValue(install, "websocket_encryption");
+      if (encryption !== undefined) game.encrypted = isOn(encryption);
+      // For the game's next start: the open game read its options.txt when it started, so the agent sets them live below.
+      await setOptions(optionsFiles(install), bridgeOptions(debuggerPort));
+      this.#logCursor = await contentEnd(install.logsDir);
+      this.#printCursor = this.#printSeq;
+      this.launchState = await attachState(gamePid);
+      if (opts.mute === true) {
+        this.launchState.muteRequested = true;
+        await writeLaunchState(this.launchState);
+        if (process.platform === "linux") await this.#startMuteWatcher(install);
+        else if (process.platform === "win32") {
+          const state = this.launchState;
+          void muteWindowsGame(state, gamePid).then((note) => {
+            if (note && this.launchState === state) this.#muteNote = note;
+          });
+        } else this.#muteNote = "muting needs Linux or Windows; the game's sound plays normally";
+      }
+    } catch (e) {
+      await this.stop();
+      throw e;
+    }
+    // The whole engine log of this run: it names the world the game opened before sculkwire came.
+    this.#joinCursor = undefined;
+    const notes: string[] = [];
+    const provider = inputProvider();
+    if (provider) {
+      await provider.launched({ mode: this.launchState.mode, pid: this.launchState.pid });
+      try {
+        await provider.attach();
+      } catch (e) {
+        game.agentError = errorMessage(e);
+      }
+    }
+    if (engine.attached) {
+      const set: string[] = [];
+      for (const [id, value] of LIVE_KEYS) {
+        const r = await this.#setLive(id, value, install);
+        if (r.ok) {
+          set.push(r.text);
+          if (id === "content_log_file") contentLogOn = true;
+          continue;
+        }
+        if (id === "content_log_file") {
+          game.contentLogNote =
+            `content_log_file could not be turned on in the running game (${r.message}), so game_log has no content-log ` +
+            "file to read until the game starts again (options.txt has it on for that start)";
+        } else notes.push(`could not set ${id} live (${r.message}): /connect may need the game restarted`);
+      }
+      if (set.length) notes.push(`set live through the in-game agent (put back by game_stop): ${set.join(", ")}`);
+      await this.#readEncryption();
+    }
+    if (!contentLogOn && !game.contentLogNote) {
+      game.contentLogNote =
+        "content_log_file is off in the running game, so game_log has no content-log file to read until the game starts " +
+        "again (options.txt has it on for that start)";
+    }
+    await this.#lookAtGame();
+    if (engine.attached && game.inWorld) {
+      await this.#dialThroughAgent();
+      await this.#newSession(undefined, ATTACH_DIAL_WAIT_MS);
+    }
+    await this.#sessionUp();
+    this.#attachSteps();
+    notes.unshift(`attached to the game you opened${game.name ? `, in "${game.name}"` : ""}; it keeps running and was not restarted`);
+    if (ignored.length) notes.push(`${ignored.join(", ")} need${ignored.length === 1 ? "s" : ""} the game closed first: not applied`);
+    if (this.#packs.length) notes.push(await this.#attachedPacksNote());
+    this.#worldNote = notes.join("; ");
+    this.#attachLoop(signal).catch(waitFailed);
+    return this.status();
+  }
+
+  /**
+   * Set one channel key live through the agent, and make sure the change opened no dialog: when the game answers a
+   * set with a confirmation (a modal sculkwire caused), sculkwire never confirms it for the user. It presses the
+   * dialog's Cancel control (Escape when it lists none), and the setting counts as not taken.
+   */
+  async #setLive(id: string, value: SettingValue, install: ClientInstall): Promise<{ ok: true; text: string } | { ok: false; message: string }> {
+    const before = await engine.uiScreen().catch(() => undefined);
+    const r = await setBridgeSetting(id, value, { install }).catch((e: unknown) => ({ ok: false as const, message: errorMessage(e) }));
+    if (!r.ok) return r;
+    const dialog = await this.#dialogSince(before?.ok ? before.value : undefined);
+    if (!dialog) return { ok: true, text: `${id} ${String(r.value.previous)} -> ${String(r.value.value)}` };
+    const controls = await engine.uiControls().catch(() => undefined);
+    const cancel = controls?.ok ? controls.value.find((c) => c.enabled && /^cancel$/i.test((c.text ?? c.name).trim())) : undefined;
+    const closed = cancel ? await engine.uiPress(cancel.name).catch(() => undefined) : undefined;
+    if (!closed?.ok) await engine.uiKey("Escape").catch(() => undefined);
+    return { ok: false, message: `the game asked to confirm the change (${dialog}); sculkwire cancelled it, since a confirmation is yours to answer` };
+  }
+
+  /**
+   * A dialog that opened over `before` within about a second (the stack grew, or a modal appeared where none was):
+   * its screen name, else undefined.
+   */
+  async #dialogSince(before: UiScreen | undefined): Promise<string | undefined> {
+    for (let waited = 0; waited <= 1_000; waited += 250) {
+      const now = await engine.uiScreen().catch(() => undefined);
+      if (now?.ok && before && (now.value.stack.length > before.stack.length || (now.value.modal && !before.modal))) return now.value.name;
+      await sleep(250);
+    }
+    return undefined;
+  }
+
+  /** Whether the open game requires encrypted websockets, as the agent reads it now (`game.encrypted`). */
+  async #readEncryption(): Promise<void> {
+    const game = this.#attached;
+    if (!game || !engine.attached) return;
+    const r = await engine.settingsGet("websocket_encryption").catch(() => undefined);
+    if (r?.ok) game.encrypted = isOn(r.value.value);
+  }
+
+  /** What the project's packs do in an attached game: only packs its world already lists load, and only on a reload. */
+  async #attachedPacksNote(): Promise<string> {
+    const game = this.#attached;
+    const install = this.install;
+    if (!game?.levelId || !install) {
+      return "the project's packs are in the development pack folders; a world uses them once its pack lists name them and it loads again";
+    }
+    const listed = await worldPackIds(join(install.userComMojang, "minecraftWorlds", game.levelId));
+    const missing = this.#packs.filter((p) => !listed.has(p.uuid));
+    if (missing.length === 0) return "the open world already uses the project's packs: game_reload reloads them";
+    const names = missing.map((p) => p.name ?? p.uuid).join(", ");
+    return (
+      `${names} ${missing.length === 1 ? "is" : "are"} not in the open world's pack lists, and sculkwire never writes the pack ` +
+      "lists of a world the game has open: add them in the world's settings, then leave and rejoin. game_reload reloads " +
+      "the packs the world already uses"
+    );
+  }
+
+  /**
+   * What an attached game shows: its engine log (the world it opened, whether it is in it), the agent's `ui.screen`
+   * when attached, and the open world's name and cheats flag (the agent's `world.settings`, else its levelname.txt).
+   */
+  async #lookAtGame(): Promise<void> {
+    const game = this.#attached;
+    const install = this.install;
+    if (!game || !install) return;
+    await this.#readJoinLog();
+    if (engine.attached) {
+      const screen = await engine.uiScreen().catch(() => undefined);
+      if (screen?.ok) this.#screens = screensFromUi(screen.value, this.#screens);
+    }
+    const levelId = this.#screens.opened;
+    if (levelId !== game.levelId) {
+      game.levelId = levelId;
+      game.name = undefined;
+      game.cheats = undefined;
+      if (this.launchState) {
+        // Other processes (game_worlds delete) read which world the game has open from the launch state.
+        if (levelId) this.launchState.world = levelId;
+        else delete this.launchState.world;
+        await writeLaunchState(this.launchState).catch(() => undefined);
+      }
+    }
+    game.inWorld = this.#screens.inWorld;
+    if (game.inWorld && engine.attached && (game.name === undefined || game.cheats !== true)) {
+      const world = await engine.worldGet().catch(() => undefined);
+      if (world?.ok) {
+        if (world.value.name) game.name = world.value.name;
+        game.cheats = world.value.cheats;
+      }
+    }
+    if (game.name === undefined && levelId) {
+      game.name = await readFile(join(install.userComMojang, "minecraftWorlds", levelId, "levelname.txt"), "utf8").then(
+        (text) => text.trim() || undefined,
+        () => undefined,
+      );
+    }
+    // The user may turn Require Encrypted Websockets off meanwhile: then /connect is dialled.
+    if (game.encrypted) await this.#readEncryption();
+  }
+
+  /** The world, cheats flag, websocket encryption and session drops an attached game's channels were dialled for. */
+  #dialKey(game: AttachedGame): string {
+    return `${game.levelId ?? ""}:${String(game.cheats)}:${String(game.encrypted)}:${game.drops}`;
+  }
+
+  /**
+   * Have an attached game dial the channels that are not up: `/script debugger connect localhost <port>` through the
+   * agent's command dispatcher (a server command, as if the player ran it), and `/connect localhost:<port>` typed in
+   * chat through the agent's UI, because `/connect` is a client command the client runs itself, never the server's
+   * dispatcher. Both need cheats on in the world; a failure is kept with the game's own words for `#attachSteps`.
+   */
+  async #dialThroughAgent(): Promise<void> {
+    const game = this.#attached;
+    const port = this.#listener?.port;
+    const connect = this.#connect;
+    if (!game || port === undefined || !connect) return;
+    const lines = dialCommands(port, connect.port);
+    game.dialFailures = [];
+    const failed = (line: string, e: unknown) => game.dialFailures.push({ line, message: errorMessage(e) });
+    if (!(this.#session && !this.#session.closed)) {
+      const r = await engine.command(lines.debugger).catch((e: unknown) => ({ ok: false as const, message: errorMessage(e) }));
+      const failure = !r.ok ? r.message : r.value.success === false ? r.value.message : undefined;
+      if (failure !== undefined) failed(lines.debugger, failure);
+    }
+    // A game that requires encrypted websockets cannot attach to this server: the user turns it off (ENCRYPTED_STEP).
+    if (connect.clients().length === 0 && !game.encrypted) {
+      const r = await engine.chat(lines.connect).catch((e: unknown) => ({ ok: false as const, message: errorMessage(e) }));
+      if (!r.ok) failed(lines.connect, r.message);
+      // Typed once per dial: wait for the game to dial in rather than type it again on the next look.
+      else await connect.waitForClient(ATTACH_DIAL_WAIT_MS).catch((e: unknown) => failed(lines.connect, e));
+    }
+    game.dialledFor = this.#dialKey(game);
+    game.dialledAt = Date.now();
+  }
+
+  /**
+   * The manual steps of an attached game: open a world when it sits in a menu, and type each channel's command where
+   * the agent cannot (no agent, a failed command, or the game did not dial in after it). Cheats off is named.
+   */
+  #attachSteps(): void {
+    const game = this.#attached;
+    const port = this.#listener?.port;
+    const connect = this.#connect;
+    if (!game || port === undefined || !connect) return;
+    const lines = dialCommands(port, connect.port);
+    const agent = engine.attached;
+    const steps: string[] = [];
+    if (game.agentError) {
+      steps.push(`sculkwire could not attach its in-game agent (${game.agentError}), so the commands below have to be typed in the game chat`);
+    }
+    if (!game.inWorld) {
+      steps.push(`open a world in the game: it sits in its menus${agent ? ", and sculkwire connects to the world itself once it is open" : ""}`);
+    }
+    const cheats = game.cheats === false ? "turn cheats on in this world (pause menu, Settings, Game, Activate Cheats), then " : "";
+    // The agent's commands ran but the game never dialled: after a while the user is told to type it.
+    const late = game.dialledAt !== undefined && Date.now() - game.dialledAt > ATTACH_DIAL_WAIT_MS;
+    const step = (line: string, what: string): string | undefined => {
+      const failed = game.dialFailures.find((f) => f.line === line);
+      if (failed) {
+        const why = game.cheats === false || /cheat|permission|not allowed/i.test(failed.message) ? "turn cheats on in this world, then " : "";
+        return `sculkwire's in-game agent could not run "/${line}" (${failed.message}): ${why}type "/${line}" in the game chat to ${what}`;
+      }
+      if (agent && game.inWorld && !late) return undefined;
+      return `${cheats}type "/${line}" in the game chat to ${what}${cheats ? "" : " (it needs cheats on in the world)"}`;
+    };
+    if (!(this.#session && !this.#session.closed)) {
+      const s = step(lines.debugger, "attach the script debugger");
+      if (s) steps.push(s);
+    }
+    this.#manual = steps;
+    if (connect.clients().length > 0) this.#connectStep = undefined;
+    // Without the agent nobody notices the user turning it off: the step then also names the command to type.
+    else if (game.encrypted) this.#connectStep = agent ? ENCRYPTED_STEP : `${ENCRYPTED_STEP}, then type "/${lines.connect}" in the game chat`;
+    else {
+      const s = step(lines.connect, "enable /connect (commands still work through the script debugger)");
+      // Without the agent nobody knows whether the game requires encrypted websockets, which /connect here cannot serve.
+      this.#connectStep = s && game.encrypted === undefined && !agent ? `${s}; if Settings > General > Require Encrypted Websockets is on, turn it off first` : s;
+    }
+  }
+
+  /**
+   * A debugger session of an attached game is up: the helper pack is asked once per session, then the game is ready
+   * (so `helperNote` is settled when ready shows). When the world does not run the helper pack, it goes into
+   * development_behavior_packs for the next time a world loads it, and `helperNote` says what needs it.
+   */
+  async #sessionUp(): Promise<void> {
+    const game = this.#attached;
+    const session = this.#session;
+    if (!game || !session || session.closed || game.probed === session) return;
+    game.probed = session;
+    if (await this.#ping(3_000)) {
+      game.helperNote = undefined;
+    } else {
+      if (!game.helperInstalled && this.install) {
+        game.helperInstalled = true;
+        await installHelperPack(this.install).catch(() => undefined);
+      }
+      game.helperNote = helperMissing(game.name);
+    }
+    this.#ready = true;
+  }
+
+  /**
+   * Keep up with an attached game until `stop`: a world opened or changed, cheats turned on, a session dropped (the
+   * agent dials again), the user typing the commands, the helper answering. Rejects with `WaitTimeout` when no
+   * debugger session came within `BACKGROUND_WAIT_MS`.
+   */
+  async #attachLoop(signal: AbortSignal): Promise<void> {
+    const deadline = Date.now() + BACKGROUND_WAIT_MS;
+    for (;;) {
+      await sleep(ATTACH_POLL_MS, undefined, { signal });
+      const game = this.#attached;
+      if (!game || !isAlive(game.gamePid)) return;
+      const open = !!this.#session && !this.#session.closed;
+      // A session that was up and closed: the game left the world or rejoined, so the channels are dialled again.
+      if (!open && game.probed?.closed && game.dropped !== game.probed) {
+        game.dropped = game.probed;
+        game.drops++;
+      }
+      if (!open || (this.#connect?.clients().length ?? 0) === 0) {
+        await this.#lookAtGame();
+        if (engine.attached && game.inWorld && game.dialledFor !== this.#dialKey(game)) await this.#dialThroughAgent();
+      }
+      if (open) await this.#sessionUp();
+      this.#attachSteps();
+      if (!this.#ready && Date.now() > deadline) throw new WaitTimeout(`no script debugger session within ${BACKGROUND_WAIT_MS / 60_000} min`);
+    }
+  }
+
+  /** Linux: keep this install's game streams on the silent sink from now until `stop` (`GameMute`). */
+  async #startMuteWatcher(install: ClientInstall): Promise<void> {
+    this.#muteWatcher = new GameMute(systemPactl, () => gamePids(install));
+    await this.#muteWatcher.start();
+  }
+
+  /**
    * Wait for the game process, then for the world (each up to `timeoutMs`), counting helper prints after `since`.
    * Rejects with "the game stopped" once `signal` aborts.
    */
@@ -745,9 +1250,12 @@ export class ClientBridge {
     if (this.launchState) this.launchState.gamePid = gamePid;
     const atFirstLook = await untilStopped(this.#waitForWorld(timeoutMs, since, signal), signal);
     // Windows mutes the game's audio sessions, which exist once it plays sound: by now it surely opened its device.
-    if (this.launchState?.muteRequested) {
+    if (this.launchState?.muteRequested && process.platform === "win32") {
       const note = await muteWindowsGame(this.launchState, gamePid);
-      if (note) this.#manual.push(note);
+      if (note) {
+        this.#muteNote = note;
+        this.#manual.push(note);
+      }
     }
     this.#ready = true;
     const by: WorldEntry["by"] = this.#walks.walked ? "auto-enter" : atFirstLook ? "already-open" : this.install?.launch ? "launch" : "manual";
@@ -1235,7 +1743,11 @@ export class ClientBridge {
     this.#requireRunning();
     const command = commandLine.replace(/^\//, "");
     const connect = this.#connect;
-    const useConnect = via === "connect" || (via === "auto" && connect !== undefined && connect.clients().length > 0);
+    // A `/connect` command reaches the game's server as a command request, which kicks the player when it is over
+    // MAX_COMMAND_CHARS: such a line goes through the script debugger, which has no such limit.
+    const long = commandTooLong(command);
+    if (via === "connect" && long) throw new Error(`${COMMAND_TOO_LONG}: send it through the script debugger (via: debugger)`);
+    const useConnect = via === "connect" || (via === "auto" && !long && connect !== undefined && connect.clients().length > 0);
     if (useConnect) {
       if (!connect || connect.clients().length === 0) throw new Error("no /connect client attached");
       const r: CommandResult = await connect.command(command);
@@ -1393,13 +1905,37 @@ export class ClientBridge {
     return declaredEntityProperties(this.#indexed, typeId);
   }
 
+  /** The launched project's packs as `game_log` maps messages to their files ([] before a launch with a project). */
+  get indexedPacks(): readonly IndexedPack[] {
+    return this.#indexed;
+  }
+
   /**
-   * Ask the helper pack (`/scriptevent sculkwire:query`) and wait for its reply print.
+   * Ask the helper pack (`/scriptevent sculkwire:query`) and wait for its reply print. In an attached game whose world
+   * does not run the helper pack this fails at once with `helperMissing` instead of timing out.
    */
   async query(kind: string, params: Record<string, unknown> = {}, timeoutMs = 10_000): Promise<unknown> {
     this.#requireRunning();
     const session = this.#session;
     if (!session || session.closed) throw new Error("queries need the script debugger (helper replies are prints)");
+    const game = this.#attached;
+    if (game && kind !== "ping" && !this.#helperUp && !(await this.#ping(2_000))) throw new Error(game.helperNote ?? helperMissing(game.name));
+    return this.#ask(session, kind, params, timeoutMs);
+  }
+
+  /** Whether the helper answers a `ping` on the current session; a pong marks it up. */
+  async #ping(timeoutMs: number): Promise<boolean> {
+    const session = this.#session;
+    if (!session || session.closed) return false;
+    const pong = await this.#ask(session, "ping", {}, timeoutMs).then((r) => r === "pong", () => false);
+    if (pong && this.#session === session && !session.closed) {
+      this.#helperUp = true;
+      this.#helperStep = undefined;
+    }
+    return pong;
+  }
+
+  async #ask(session: DebuggerSession, kind: string, params: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
     const id = (this.#queryId = (this.#queryId + 1) % 1_000_000_000);
     const since = this.#printSeq;
     session.command(queryCommand(kind, params, id));
@@ -1577,9 +2113,17 @@ export class ClientBridge {
     }
   }
 
+  /**
+   * PNG of the game: gamescope or Windows capture for a game sculkwire started; for a game it attached to (no host
+   * route reaches the user's window), the in-game agent's screenshot.
+   */
   async screenshot(path: string): Promise<{ path: string; bytes: number }> {
     this.#requireRunning();
-    return screenshot(this.launchState as LaunchState, path);
+    const state = this.launchState as LaunchState;
+    if (!state.attached) return screenshot(state, path);
+    const taken = await engine.screenshot(path);
+    if (!taken.ok) throw new Error(`the in-game agent took no screenshot of the attached game (${taken.reason}): ${taken.message}`);
+    return { path: taken.value.path, bytes: taken.value.bytes ?? (await stat(taken.value.path)).size };
   }
 
   /** Keyboard or mouse input into the game; returns the route it took. */
@@ -1603,20 +2147,47 @@ export class ClientBridge {
    * twice. Game settings are restored first, while the game still runs, so the agent can apply them live. In a user's
    * dev world the game is first told to Save & Quit (`#saveAndQuit`), the world's own icon is put back afterwards
    * (`restoreUserIcon`), and the project's development pack folders stay because the world's pack lists name them.
+   *
+   * A game the bridge attached to (this process's `#startAttached`, or a launch state another process marked attached)
+   * is never stopped and never Save & Quit: the settings set live are put back through the agent, the listeners close,
+   * the deployed pack folders the open world's pack lists name stay, and the game keeps running.
    */
   async stop(): Promise<StopResult> {
     this.#startAbort?.abort();
     this.#startAbort = undefined;
     const install = this.install ?? (await findInstall());
+    const game = this.#attached;
+    const attached = game !== undefined || (this.launchState === undefined && (await readLaunchState())?.attached === true);
+    // The bridge's live channel keys are recorded with the user's settings: put back here, live while the agent answers.
     const restoredSettings = await restoreGameSettings({ install }).catch(() => ({}));
-    const userWorld = this.world?.how === "user" ? this.world : undefined;
+    const agentUsed = attached && engine.attached;
+    const userWorld = !attached && this.world?.how === "user" ? this.world : undefined;
     const quit = userWorld && this.launchState && this.running ? await this.#saveAndQuit(this.launchState) : undefined;
-    const result = await stopGame(install);
+    const muteWatcher = this.#muteWatcher;
+    this.#muteWatcher = undefined;
+    this.#muteNote = undefined;
+    if (attached) {
+      // The game the user opened keeps running and gets its sound back: its streams return to the sinks they came
+      // from, so WirePlumber remembers the user's own target for Minecraft again.
+      await muteWatcher?.stop({ restore: true });
+      if (process.platform === "win32") {
+        // Windows keeps an app's mute in its volume mixer: unmute the game the user opened before leaving it.
+        const mutedPid = (this.launchState ?? (await readLaunchState()))?.mutedPid;
+        if (mutedPid && isAlive(mutedPid)) await windowsMute([mutedPid], false, 0).catch(() => undefined);
+      }
+    }
+    const result = attached ? { stopped: true, message: "detached from the game you opened; it keeps running" } : await stopGame(install);
+    // A game sculkwire stopped stayed on the silent sink (the watcher kept sweeping) until it exited: no sound during
+    // the stop. Its streams are not moved back, and the silent sink goes once the game is gone.
+    if (!attached) await muteWatcher?.stop({ restore: false });
     await inputProvider()?.stopped();
     this.closeDebugger();
     await this.#connect?.stop();
     this.#connect = undefined;
     const restoredOptions = await restoreOptions();
+    if (attached) await detachState();
+    this.#attached = undefined;
+    const packs = this.#packs;
     this.launchState = undefined;
     this.#ready = false;
     this.#helperUp = false;
@@ -1638,7 +2209,9 @@ export class ClientBridge {
     if (quit?.saved) notes.push(`${userWorld?.name} was saved with Save & Quit before the stop`);
     else if (quit) notes.push(`Save & Quit did not work (${quit.detail}), so the game was stopped in ${userWorld?.name}: changes from about the last minute may be lost`);
     const deployed = this.#deployed.splice(0);
+    let kept: string[] = [];
     if (userWorld) {
+      kept = deployed;
       if (deployed.length) notes.push(`kept the development pack folders ${userWorld.name} names in its pack lists: ${deployed.join(", ")}`);
       if (this.#iconPending) {
         this.#iconPending = false;
@@ -1649,6 +2222,14 @@ export class ClientBridge {
             : `${userWorld.name}'s own icon ${icon === "restored" ? "was put back" : icon === "removed" ? "was put back (it had none)" : icon}`,
         );
       }
+    } else if (attached) {
+      // The open world may use them: keep the folders its pack lists name (all of them when the world is unknown).
+      const listed = game?.levelId ? await worldPackIds(join(install.userComMojang, "minecraftWorlds", game.levelId)) : undefined;
+      const ids = listed ? new Set([...listed].map((id) => id.toLowerCase())) : undefined;
+      kept = ids ? deployed.filter((dir) => packs.some((p) => p.path === dir && ids.has(p.uuid.toLowerCase()))) : deployed;
+      for (const dir of deployed) if (!kept.includes(dir)) await rm(dir, { recursive: true, force: true });
+      if (kept.length) notes.push(`kept the development pack folders the open world uses: ${kept.join(", ")}`);
+      if (agentUsed) notes.push("the in-game agent stays loaded in the game (engine_attach reconnects to it)");
     } else {
       for (const dir of deployed) await rm(dir, { recursive: true, force: true });
     }
@@ -1657,8 +2238,9 @@ export class ClientBridge {
       restoredOptions,
       restoredSettings,
       ...(quit ? { savedAndQuit: quit.saved } : {}),
-      ...(userWorld && deployed.length ? { keptPackFolders: deployed } : {}),
+      ...(kept.length ? { keptPackFolders: kept } : {}),
       ...(notes.length ? { stopNote: notes.join("; ") } : {}),
+      ...(attached ? { detached: true } : {}),
     };
   }
 }

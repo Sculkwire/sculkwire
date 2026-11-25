@@ -4,7 +4,7 @@
 # A new pure module with unit tests is added to MODULES here; CI and the docs call this script.
 set -eu
 
-MODULES="look screens registries click"
+MODULES="look screens registries click logring"
 
 mkdir -p target
 for m in $MODULES; do

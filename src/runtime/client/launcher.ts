@@ -19,6 +19,7 @@ import { dataDir } from "../../core/paths.ts";
 import { findOnPath } from "../../core/which.ts";
 import { GAME_EXE } from "../../gamefiles/gdk.ts";
 import { winePrefix } from "../../gamefiles/wine.ts";
+import { loadMuteSink, MUTE_SINK, type Pactl } from "./mute.ts";
 import type { ClientInstall } from "../../gamefiles/install.ts";
 import type { InputRoute, PlayerInput } from "./input.ts";
 import {
@@ -60,19 +61,27 @@ export interface LaunchState {
   height?: number;
   /** What sculkwire could not do itself, e.g. "start Minecraft and open the world". */
   notes: string[];
-  /** PulseAudio/PipeWire null-sink module that swallows the game's audio; unloaded on stop. */
+  /** Linux: the silent sink's module (`loadMuteSink`) the game's audio goes to; unloaded on stop. */
   muteModule?: number;
-  /** Windows: mute the game's audio sessions once it runs (`muteWindowsGame`). */
+  /**
+   * sculkwire mutes this game: on Linux the bridge keeps its streams on the silent sink (`GameMute`), on Windows it
+   * mutes the game's audio sessions once it runs (`muteWindowsGame`).
+   */
   muteRequested?: boolean;
   /** Windows: the game process whose audio sessions sculkwire muted; unmuted on stop. */
   mutedPid?: number;
   /** The game process this launch manages, once it is running (Windows: picks the right window). */
   gamePid?: number;
+  /**
+   * A game the user had already started, which `game_launch` attached to instead of starting one (`attachState`):
+   * nothing is spawned, no host input reaches it (only the in-game agent), and `game_stop` only detaches.
+   */
+  attached?: boolean;
 }
 
 export interface LaunchOptions {
   mode: LaunchMode;
-  /** Silence the game's audio (Linux: a silent sink; Windows: its audio sessions). Default: on in headless mode. */
+  /** Silence the game's audio (Linux: a silent sink; Windows: its audio sessions). Default: on in headless mode only. */
   mute?: boolean;
   /** Deeplink target: world folder name under minecraftWorlds. */
   levelId?: string;
@@ -101,9 +110,26 @@ export async function readLaunchState(): Promise<LaunchState | undefined> {
   return undefined;
 }
 
-async function writeLaunchState(state: LaunchState): Promise<void> {
+/** Persist the launch state so other processes (the CLI) find it. */
+export async function writeLaunchState(state: LaunchState): Promise<void> {
   await mkdir(dataDir("client"), { recursive: true });
   await writeFile(statePath(), `${JSON.stringify(state, null, 2)}\n`);
+}
+
+/**
+ * The launch state of a game the user already started from this install (`gamePid`), taken as it is: nothing is
+ * started, and the state file marks it `attached` so every process's `game_stop` only detaches from it.
+ */
+export async function attachState(gamePid: number, levelId?: string): Promise<LaunchState> {
+  const state: LaunchState = { mode: "desktop", startedAt: Date.now(), pid: 0, argv: [], launchLog: "", notes: [], gamePid, attached: true };
+  if (levelId) state.world = levelId;
+  await writeLaunchState(state);
+  return state;
+}
+
+/** Forget an attached game's launch state; the game keeps running. */
+export async function detachState(): Promise<void> {
+  await rm(statePath(), { force: true });
 }
 
 /**
@@ -251,25 +277,21 @@ export function sessionEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Proces
   return env;
 }
 
-/** A silent PulseAudio/PipeWire sink for the game's audio; returns the module id to unload later. */
-async function loadMuteSink(sink: string): Promise<number | undefined> {
-  try {
-    const { stdout } = await run("pactl", ["load-module", "module-null-sink", `sink_name=${sink}`, "sink_properties=device.description=sculkwire-muted-game"], {
-      env: sessionEnv(),
-    });
-    const id = Number(stdout.trim());
-    return Number.isInteger(id) ? id : undefined;
-  } catch {
-    return undefined;
-  }
+/** `pactl` in the desktop session's environment: resolves to its stdout. */
+export const systemPactl: Pactl = async (args) => (await run("pactl", [...args], { env: sessionEnv(), timeout: 10_000 })).stdout;
+
+/**
+ * Whether a launch mutes the game: `mute` when given, else only a game that runs in the background (`headless`; on
+ * Windows the requested mode, which runs the game's window instead). Every other launch keeps its sound.
+ */
+export function muteByDefault(mute: boolean | undefined, mode: LaunchMode): boolean {
+  return mute ?? mode === "headless";
 }
 
 export async function launch(install: ClientInstall, opts: LaunchOptions): Promise<LaunchState> {
+  // The bridge attaches to a game that already runs before it gets here: this only catches one started meanwhile.
   if ((await gamePids(install)).length > 0) {
-    throw new Error(
-      `Minecraft from ${install.label} is already running. sculkwire needs that install to itself: close the game first, ` +
-        "or keep playing on another install (another launcher or prefix) while sculkwire uses this one",
-    );
+    throw new Error(`Minecraft from ${install.label} started while sculkwire was preparing the launch: call game_launch again to attach to it`);
   }
   const notes: string[] = [];
   let mode = opts.mode;
@@ -294,8 +316,17 @@ export async function launch(install: ClientInstall, opts: LaunchOptions): Promi
   if (opts.levelId) state.world = opts.levelId;
   if (process.platform === "win32") {
     // The game's audio sessions exist only once it runs: the bridge mutes them then (muteWindowsGame).
-    if (opts.mute ?? opts.mode === "headless") state.muteRequested = true;
-  } else if (opts.mute && process.platform !== "linux") notes.push("muting needs Linux or Windows; the game's sound plays normally");
+    if (muteByDefault(opts.mute, opts.mode)) state.muteRequested = true;
+  } else if (muteByDefault(opts.mute, mode)) {
+    if (process.platform !== "linux") notes.push("muting needs Linux or Windows; the game's sound plays normally");
+    else {
+      // Also for a game the user starts: the bridge moves its streams onto this sink (GameMute).
+      state.muteRequested = true;
+      const module = await loadMuteSink(systemPactl).catch(() => undefined);
+      if (module !== undefined) state.muteModule = module;
+      else notes.push("could not mute the game (pactl unavailable); its sound plays normally");
+    }
+  }
   if (!install.launch) {
     notes.push(
       `start Minecraft yourself${opts.levelId ? ` and open the world "${opts.levelId}"` : ""} ` +
@@ -318,14 +349,7 @@ export async function launch(install: ClientInstall, opts: LaunchOptions): Promi
   const argv = !gamescope ? game : gamescopeArgv(gamescopeBackend(mode === "headless" ? "headless" : "window"), width, height, opts.fps ?? 60, game);
   state.argv = argv;
   const env = sessionEnv();
-  if ((opts.mute ?? mode === "headless") && process.platform === "linux") {
-    const sink = "sculkwire_muted_game";
-    const module = await loadMuteSink(sink);
-    if (module !== undefined) {
-      state.muteModule = module;
-      env.PULSE_SINK = sink;
-    } else notes.push("could not mute the game (pactl unavailable); its sound plays normally");
-  }
+  if (state.muteModule !== undefined) env.PULSE_SINK = MUTE_SINK;
   await mkdir(dataDir("client"), { recursive: true });
   const fd = openSync(launchLog, "w");
   const child = spawn(argv[0]!, argv.slice(1), { detached: process.platform !== "win32", stdio: ["ignore", fd, fd], env, windowsHide: true });
@@ -432,7 +456,7 @@ export async function stop(install: ClientInstall): Promise<{ stopped: boolean; 
       }
     }
   }
-  if (state?.muteModule !== undefined) await run("pactl", ["unload-module", String(state.muteModule)], { env: sessionEnv() }).catch(() => undefined);
+  if (state?.muteModule !== undefined) await systemPactl(["unload-module", String(state.muteModule)]).catch(() => undefined);
   const stopped = (await gamePids(install)).length === 0;
   if (stopped) await rm(statePath(), { force: true });
   const n = before.length;
@@ -458,12 +482,19 @@ async function gamescopeWindow(state: LaunchState): Promise<string> {
   return window;
 }
 
-/** Whether keyboard and mouse input can reach this launch's game: gamescope's display on Linux, SendInput on Windows. */
+/**
+ * Whether keyboard and mouse input can reach this launch's game: gamescope's display on Linux, SendInput on Windows.
+ * Never for a game sculkwire attached to: that one is the user's, reached only through the in-game agent.
+ */
 export function hasInput(state: LaunchState): boolean {
-  return !!state.xDisplay || process.platform === "win32";
+  return !state.attached && (!!state.xDisplay || process.platform === "win32");
 }
 
+/** Why host input refuses a game sculkwire attached to. */
+export const ATTACHED_INPUT = "the game was already running when game_launch attached to it, so input reaches it only through the in-game agent (engine_attach)";
+
 function inputRoute(state: LaunchState): InputRoute {
+  if (state.attached) throw new Error(ATTACHED_INPUT);
   if (state.xDisplay) return "gamescope";
   if (process.platform === "win32") return "windows";
   throw new Error(
@@ -694,6 +725,7 @@ function windowsPlayerInput(state: LaunchState): PlayerInput {
  * window has no route for held keys and mouse look.
  */
 export function playerInput(state: LaunchState): PlayerInput {
+  if (state.attached) throw new Error(ATTACHED_INPUT);
   if (process.platform === "win32") return windowsPlayerInput(state);
   const display = state.xDisplay;
   if (!display) {

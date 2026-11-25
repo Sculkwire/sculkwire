@@ -39,7 +39,8 @@ function severityOf(level: string): Severity {
   return "info";
 }
 
-function finish(entries: LogEntry[], keepInfo: boolean): LogEntry[] {
+/** Collapses whitespace and drops empty, banner, noise and (unless `keepInfo`) info entries, as every log parser does. */
+export function finishEntries(entries: LogEntry[], keepInfo: boolean): LogEntry[] {
   const out: LogEntry[] = [];
   for (const e of entries) {
     e.message = e.message.replace(/\s+/g, " ").trim();
@@ -78,7 +79,7 @@ export function parseConsole(lines: readonly string[], keepInfo = false): LogEnt
     }
     if (open) open.message += `\n${line}`;
   }
-  return finish(entries, keepInfo);
+  return finishEntries(entries, keepInfo);
 }
 
 /** Content log file text → entries (same folding rules as the console). */
@@ -98,7 +99,7 @@ export function parseContentLog(text: string, keepInfo = false): LogEntry[] {
     }
     if (open) open.message += `\n${raw}`;
   }
-  return finish(entries, keepInfo);
+  return finishEntries(entries, keepInfo);
 }
 
 /** Digits → `#`, whitespace collapsed: stable across runs (ports, times, ids). */

@@ -477,6 +477,39 @@ pub(crate) fn h_attributes(_core: &'static Core, _params: &Value) -> Result<Valu
     Ok(Value::Object(map))
 }
 
+/// One attribute of any entity in `registry` (the server's, read without creating a storage):
+/// `(current, max)` of the instance named `name`, the same fields `player.attributes` reports, and only
+/// when `min <= current <= max` holds. `None` when the entity has no such attribute or the map does not
+/// read as one.
+pub(crate) fn attribute_in(registry: usize, entity: u32, name: &str) -> Option<(f32, f32)> {
+    let storage = crate::workstation::storage_in(registry, anchors::component_hash("AttributesComponent"))?;
+    let element = ecs::element(storage, entity, ATTRIBUTE_STRIDE)?;
+    let ids = pe::read::<usize>(element + ATTRIBUTE_IDS)?;
+    let ids_end = pe::read::<usize>(element + ATTRIBUTE_IDS_END)?;
+    let instances = pe::read::<usize>(element + ATTRIBUTE_INSTANCES)?;
+    if ids_end < ids || instances == 0 || (ids_end - ids) % 4 != 0 {
+        return None;
+    }
+    let count = (ids_end - ids) / 4;
+    if count == 0 || count > ATTRIBUTE_LIMIT || !pe::readable(instances, count * INSTANCE_STRIDE) {
+        return None;
+    }
+    for index in 0..count {
+        let instance = instances + index * INSTANCE_STRIDE;
+        let Some(definition) = pe::read::<usize>(instance + INSTANCE_DEFINITION) else {
+            continue;
+        };
+        if attribute_name(definition).as_deref() != Some(name) {
+            continue;
+        }
+        let current = pe::read::<f32>(instance + INSTANCE_CURRENT).filter(|value| value.is_finite())?;
+        let minimum = pe::read::<f32>(instance + INSTANCE_MINIMUM).filter(|value| value.is_finite())?;
+        let maximum = pe::read::<f32>(instance + INSTANCE_MAXIMUM).filter(|value| value.is_finite())?;
+        return (minimum <= current && current <= maximum).then_some((current, maximum));
+    }
+    None
+}
+
 /// The name an attribute definition carries, from the first candidate offset that holds one.
 ///
 /// The definition is a static in `.data` whose bytes are written at startup, so the name is read live.
@@ -527,7 +560,7 @@ type GetSize = unsafe extern "C" fn(usize) -> i32;
 ///
 /// The vtable load is what the game's own call sites use (`mov rax,[rcx]; mov rax,[rax+0x38]`), and
 /// requiring the entry to be an image code pointer is what keeps a wrong object from being called.
-fn interface_slot(object: usize, slot: usize) -> Option<usize> {
+pub(crate) fn interface_slot(object: usize, slot: usize) -> Option<usize> {
     if !pe::readable(object, 8) {
         return None;
     }
@@ -584,23 +617,23 @@ const STACK_USER_DATA: usize = 0x10;
 //
 /// A `CompoundTag` is a `Tag` whose map head sits at `+0x08`; the tree's nodes are reached from the
 /// header node's parent (`+0x08`).
-const COMPOUND_HEAD: usize = 0x08;
+pub(crate) const COMPOUND_HEAD: usize = 0x08;
 /// A map node: left `+0x00`, parent `+0x08`, right `+0x10`, is-nil byte `+0x19`, the key as a
 /// `std::string` at `+0x20` (buffer `+0x20`, size `+0x30`, capacity `+0x38`), the value — the `Tag`
 /// itself, by value — at `+0x40`.
-const NODE_LEFT: usize = 0x00;
-const NODE_PARENT: usize = 0x08;
-const NODE_RIGHT: usize = 0x10;
-const NODE_NIL: usize = 0x19;
-const NODE_KEY: usize = 0x20;
-const NODE_VALUE: usize = 0x40;
+pub(crate) const NODE_LEFT: usize = 0x00;
+pub(crate) const NODE_PARENT: usize = 0x08;
+pub(crate) const NODE_RIGHT: usize = 0x10;
+pub(crate) const NODE_NIL: usize = 0x19;
+pub(crate) const NODE_KEY: usize = 0x20;
+pub(crate) const NODE_VALUE: usize = 0x40;
 /// The bytes of a node this module reads (through the cached type id at `value + 0x28`).
-const NODE_SIZE: usize = 0x70;
+pub(crate) const NODE_SIZE: usize = 0x70;
 /// A tree this shallow holds every `display`/`ench`/`Items` key; deeper means a loop.
 const TREE_DEPTH: usize = 48;
 /// `Tag + 0x00` vtable, `+0x08` value, `+0x28` the type id the compound's accessors compare.
-const TAG_VALUE: usize = 0x08;
-const TAG_TYPE: usize = 0x28;
+pub(crate) const TAG_VALUE: usize = 0x08;
+pub(crate) const TAG_TYPE: usize = 0x28;
 /// `Tag::getId()`: the virtual slot the game calls on every list element.
 const TAG_GET_ID: usize = 0x28;
 /// A `ListTag`'s elements: `std::vector<Tag*>` begin `+0x08`, end `+0x10`.
@@ -612,12 +645,12 @@ const LIST_LIMIT: usize = 64;
 const CONTENTS_DEPTH: usize = 2;
 
 /// The tag type ids the game's accessors check.
-const TAG_BYTE: u8 = 1;
+pub(crate) const TAG_BYTE: u8 = 1;
 const TAG_SHORT: u8 = 2;
-const TAG_INT: u8 = 3;
-const TAG_STRING: u8 = 8;
+pub(crate) const TAG_INT: u8 = 3;
+pub(crate) const TAG_STRING: u8 = 8;
 const TAG_LIST: u8 = 9;
-const TAG_COMPOUND: u8 = 10;
+pub(crate) const TAG_COMPOUND: u8 = 10;
 /// `ActorEquipmentComponent` element stride: two container pointers, the hand at `+0x00` and the armour at
 /// `+0x08` (the game's own per-slot armour helper reads `[element + 8]` and calls `getItem(0..3)` on it;
 /// live, `[element + 0]` slot 0 is the selected hotbar stack, i.e. the main hand).
@@ -730,7 +763,7 @@ fn tag(compound: usize, key: &str) -> Option<(usize, u8)> {
 }
 
 /// The tag under `key` when it is of type `kind`.
-fn typed(compound: usize, key: &str, kind: u8) -> Option<usize> {
+pub(crate) fn typed(compound: usize, key: &str, kind: u8) -> Option<usize> {
     tag(compound, key).and_then(|(value, got)| (got == kind).then_some(value))
 }
 
@@ -806,7 +839,7 @@ fn element_type(element: usize) -> Option<u8> {
 }
 
 /// A string tag's value: the `std::string` at `tag + 0x08`.
-fn text_value(tag: usize) -> Option<String> {
+pub(crate) fn text_value(tag: usize) -> Option<String> {
     let text = pe::std_string(tag + TAG_VALUE)?;
     (!text.is_empty() && text.len() <= 1024).then_some(text)
 }
@@ -1315,7 +1348,7 @@ fn virtual0(object: usize, slot: usize) -> Option<usize> {
 }
 
 /// True when `object` starts with a vtable of the game's image.
-fn has_game_table(object: usize) -> bool {
+pub(crate) fn has_game_table(object: usize) -> bool {
     object != 0 && pe::readable(object, 8) && pe::read::<usize>(object).is_some_and(pe::in_image_data)
 }
 
@@ -1327,8 +1360,8 @@ fn has_game_table(object: usize) -> bool {
 const UNIQUE_STRIDE: usize = ecs::UNIQUE_STRIDE;
 /// An actor's entity context: its registry at `+0x10` and its entity id at `+0x18` (every inlined component
 /// read of an actor method, e.g. the region lookup that reads `BlockSourceComponent`).
-const ACTOR_REGISTRY: usize = 0x10;
-const ACTOR_ENTITY: usize = 0x18;
+pub(crate) const ACTOR_REGISTRY: usize = 0x10;
+pub(crate) const ACTOR_ENTITY: usize = 0x18;
 /// `BlockSourceComponent` element: a `WeakRef<BlockSource>` (`+0x00` the object, `+0x08` its control
 /// block, `shl edx,4` at its readers).
 const BLOCK_SOURCE_STRIDE: usize = 0x10;
@@ -1362,12 +1395,7 @@ pub(crate) fn h_container_get(core: &'static Core, params: &Value) -> Result<Val
             return Err(RpcError::anchor(LINK_NAMES[index]));
         }
     }
-    let (accessor, entity) = context().ok_or_else(|| RpcError::anchor("inventory.context"))?;
-    let unique = ecs::storage(accessor, anchors::component_hash("ActorUniqueIDComponent"))
-        .and_then(|storage| ecs::element(storage, entity, UNIQUE_STRIDE))
-        .and_then(pe::read::<u64>)
-        .filter(|id| *id != u64::MAX)
-        .ok_or_else(|| RpcError::anchor("inventory.unique_id"))?;
+    let unique = local_unique()?;
     let request = json!({
         "x": position[0], "y": position[1], "z": position[2],
         "dimension": dimension,
@@ -1376,18 +1404,30 @@ pub(crate) fn h_container_get(core: &'static Core, params: &Value) -> Result<Val
     crate::server::submit(core, crate::server::Request::Call(container_on_server, request))
 }
 
-/// The server half of `container.get`, on the server thread.
-pub(crate) fn container_on_server(params: &Value) -> Result<Value, RpcError> {
-    let missing = |index: usize| RpcError::anchor(LINK_NAMES[index]);
-    let coordinate = |key: &str| params.get(key).and_then(Value::as_i64).map(|value| value as i32);
-    let (Some(x), Some(y), Some(z)) = (coordinate("x"), coordinate("y"), coordinate("z")) else {
-        return Err(RpcError::invalid_params("x, y and z are required"));
-    };
-    let unique = params
+/// The local player's unique id, read from the client's own registry (the main thread's side). The
+/// server-thread reads find the same player in the server level by it.
+pub(crate) fn local_unique() -> Result<u64, RpcError> {
+    let (accessor, entity) = context().ok_or_else(|| RpcError::anchor("inventory.context"))?;
+    ecs::storage(accessor, anchors::component_hash("ActorUniqueIDComponent"))
+        .and_then(|storage| ecs::element(storage, entity, UNIQUE_STRIDE))
+        .and_then(pe::read::<u64>)
+        .filter(|id| *id != u64::MAX)
+        .ok_or_else(|| RpcError::anchor("inventory.unique_id"))
+}
+
+/// The `unique` a main-thread half handed its server half.
+pub(crate) fn unique_param(params: &Value) -> Result<u64, RpcError> {
+    params
         .get("unique")
         .and_then(Value::as_str)
         .and_then(|text| text.parse::<u64>().ok())
-        .ok_or_else(|| RpcError::anchor("inventory.unique_id"))?;
+        .ok_or_else(|| RpcError::anchor("inventory.unique_id"))
+}
+
+/// On the server thread: the server `Level` and its player with the local player's unique id, checked to
+/// be a game object whose level is that level.
+pub(crate) fn server_player(unique: u64) -> Result<(usize, usize), RpcError> {
+    let missing = |index: usize| RpcError::anchor(LINK_NAMES[index]);
     let level = live::server_level().ok_or_else(|| RpcError::anchor("server.level"))?;
     let get_player = link(L_GET_PLAYER).and_then(|slot| interface_slot(level, slot)).ok_or_else(|| missing(L_GET_PLAYER))?;
     // SAFETY: the server level's own player lookup by unique id (`rdx` = the id by value), as the player
@@ -1399,27 +1439,85 @@ pub(crate) fn container_on_server(params: &Value) -> Result<Value, RpcError> {
             "message": "the server level has no player with the local player's unique id",
         })));
     }
-    let player_dimension = link(L_ACTOR_DIMENSION)
-        .and_then(|at| pe::read::<usize>(player + at))
-        .filter(|dimension| has_game_table(*dimension))
-        .ok_or_else(|| missing(L_ACTOR_DIMENSION))?;
+    Ok((level, player))
+}
+
+/// On the server thread: the region of the dimension `id` (the player's own when `None`) and that
+/// dimension's object.
+pub(crate) fn server_region(level: usize, player: usize, id: Option<i64>) -> Result<(usize, usize), RpcError> {
+    let player_dimension = actor_dimension(player).ok_or_else(|| RpcError::anchor(LINK_NAMES[L_ACTOR_DIMENSION]))?;
     let source = player_source(player)?;
-    let region = match params.get("dimension").and_then(Value::as_i64) {
-        None => source,
+    match id {
+        None => Ok((source, player_dimension)),
         Some(id) => {
             let dimension = level_dimension(level, id as i32)?;
             if dimension == player_dimension {
-                source
+                Ok((source, dimension))
             } else {
-                dimension_source(source, player_dimension, dimension)?
+                Ok((dimension_source(source, player_dimension, dimension)?, dimension))
             }
         }
-    };
-    let chunk_at = link(L_CHUNK_AT).and_then(|slot| interface_slot(region, slot)).ok_or_else(|| missing(L_CHUNK_AT))?;
-    let position = [x, y, z];
+    }
+}
+
+/// The `Dimension*` an actor is in (its dimension reference), when it is a game object.
+pub(crate) fn actor_dimension(actor: usize) -> Option<usize> {
+    link(L_ACTOR_DIMENSION).and_then(|at| pe::read::<usize>(actor + at)).filter(|dimension| has_game_table(*dimension))
+}
+
+/// The `Level*` an actor belongs to.
+pub(crate) fn actor_level(actor: usize) -> Option<usize> {
+    link(L_ACTOR_LEVEL).and_then(|at| pe::read::<usize>(actor + at))
+}
+
+/// The `Dimension*` of dimension `id`, as the level's own `getDimension` answers it (`None` when that
+/// dimension is not loaded).
+pub(crate) fn dimension_object(level: usize, id: i32) -> Option<usize> {
+    level_dimension(level, id).ok()
+}
+
+/// The dimension name the Script API reports (`minecraft:overworld`) for an id.
+pub(crate) fn dimension_name(id: i32) -> Option<&'static str> {
+    match id {
+        0 => Some("minecraft:overworld"),
+        1 => Some("minecraft:nether"),
+        2 => Some("minecraft:the_end"),
+        _ => None,
+    }
+}
+
+/// The dimension id of a request's `dimension` name, which [`block_position`] already checked.
+pub(crate) fn dimension_param(params: &Value) -> Option<i32> {
+    let name = params.get("dimension").and_then(Value::as_str)?;
+    DIMENSIONS.iter().find(|(known, _)| *known == name.trim_start_matches("minecraft:")).map(|(_, id)| *id)
+}
+
+/// On the server thread: the region's chunk holding `position`, or null when it is not loaded.
+pub(crate) fn chunk_at(region: usize, position: &[i32; 3]) -> Result<usize, RpcError> {
+    let chunk_at = link(L_CHUNK_AT).and_then(|slot| interface_slot(region, slot)).ok_or_else(|| RpcError::anchor(LINK_NAMES[L_CHUNK_AT]))?;
     // SAFETY: the region's own `getChunkAt(BlockPos const&)`; it answers null for a chunk not loaded.
-    let chunk = unsafe { transmute::<usize, extern "C" fn(usize, *const [i32; 3]) -> usize>(chunk_at)(region, &position) };
-    if chunk == 0 || !pe::readable(chunk, 8) {
+    let chunk = unsafe { transmute::<usize, extern "C" fn(usize, *const [i32; 3]) -> usize>(chunk_at)(region, position) };
+    Ok(if chunk != 0 && pe::readable(chunk, 8) { chunk } else { 0 })
+}
+
+/// The region's minimum height (its dimension's lowest block row).
+pub(crate) fn min_height(region: usize) -> Option<i16> {
+    link(L_MIN_HEIGHT).and_then(|at| pe::read::<i16>(region + at))
+}
+
+/// The server half of `container.get`, on the server thread.
+pub(crate) fn container_on_server(params: &Value) -> Result<Value, RpcError> {
+    let missing = |index: usize| RpcError::anchor(LINK_NAMES[index]);
+    let coordinate = |key: &str| params.get(key).and_then(Value::as_i64).map(|value| value as i32);
+    let (Some(x), Some(y), Some(z)) = (coordinate("x"), coordinate("y"), coordinate("z")) else {
+        return Err(RpcError::invalid_params("x, y and z are required"));
+    };
+    let unique = unique_param(params)?;
+    let (level, player) = server_player(unique)?;
+    let (region, _) = server_region(level, player, params.get("dimension").and_then(Value::as_i64))?;
+    let position = [x, y, z];
+    let chunk = chunk_at(region, &position)?;
+    if chunk == 0 {
         return Err(RpcError::invalid_params(format!("the chunk holding {x} {y} {z} is not loaded")));
     }
     let min = link(L_MIN_HEIGHT).and_then(|at| pe::read::<i16>(region + at)).ok_or_else(|| missing(L_MIN_HEIGHT))?;
@@ -1537,7 +1635,7 @@ fn block_name(region: usize, position: &[i32; 3]) -> Value {
 }
 
 /// `BlockSource::getBlock(pos)`: the region's `Block` there, one object per block *state*.
-fn block_at(region: usize, position: &[i32; 3]) -> Option<usize> {
+pub(crate) fn block_at(region: usize, position: &[i32; 3]) -> Option<usize> {
     let entry = interface_slot(region, link(L_GET_BLOCK)?)?;
     // SAFETY: the region's own `Block const& getBlock(BlockPos const&)`.
     let block = unsafe { transmute::<usize, extern "C" fn(usize, *const [i32; 3]) -> usize>(entry)(region, position) };
@@ -1545,7 +1643,7 @@ fn block_at(region: usize, position: &[i32; 3]) -> Option<usize> {
 }
 
 /// A `Block`'s identifier, through its legacy.
-fn block_identifier(block: usize) -> Value {
+pub(crate) fn block_identifier(block: usize) -> Value {
     let Some(legacy_at) = link(L_BLOCK_LEGACY) else {
         return Value::Null;
     };
@@ -1600,7 +1698,7 @@ fn legacy_identifier(legacy: usize) -> Option<String> {
 
 /// The shape of a `{x, y, z, dimension?}` block position: three block coordinates (floored) and a known
 /// dimension name, when one is given.
-fn block_position(params: &Value) -> Result<[i64; 3], RpcError> {
+pub(crate) fn block_position(params: &Value) -> Result<[i64; 3], RpcError> {
     let mut out = [0i64; 3];
     for (index, key) in ["x", "y", "z"].into_iter().enumerate() {
         let value = params
