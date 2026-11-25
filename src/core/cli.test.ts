@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { parseArgs } from "node:util";
 import { runMain } from "./cli.ts";
 import { ExitCode } from "./diagnostic.ts";
 import { UsageError } from "./errors.ts";
@@ -29,6 +30,16 @@ describe("runMain", () => {
       throw new UsageError("unknown flag --x\nusage: sculk thing");
     });
     expect(lines).toEqual(["unknown flag --x\nusage: sculk thing\n"]);
+    expect(process.exitCode).toBe(ExitCode.usage);
+  });
+
+  it("prints a bad command line's message alone, as an option given without its value", async () => {
+    const lines = stderrLines();
+    await runMain(async () => {
+      parseArgs({ args: ["--use"], options: { use: { type: "string" } } });
+      return ExitCode.ok;
+    });
+    expect(lines).toEqual(["Option '--use <value>' argument missing\n"]);
     expect(process.exitCode).toBe(ExitCode.usage);
   });
 

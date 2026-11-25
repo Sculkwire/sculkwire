@@ -23,9 +23,14 @@ export function err(text: string): void {
   process.stderr.write(`${text}\n`);
 }
 
+/** Node's `parseArgs` rejects a bad command line (unknown option, missing value) with an `ERR_PARSE_ARGS_*` code. */
+function isArgsError(error: unknown): error is Error {
+  return error instanceof Error && "code" in error && typeof error.code === "string" && error.code.startsWith("ERR_PARSE_ARGS_");
+}
+
 /**
- * Runs an entry point's `main` and sets the exit code it returns. A thrown `UsageError` prints its message, anything
- * else its stack, on stderr; both exit with `ExitCode.usage`.
+ * Runs an entry point's `main` and sets the exit code it returns. A thrown `UsageError` or a bad command line
+ * (`parseArgs`) prints its message, anything else its stack, on stderr; all exit with `ExitCode.usage`.
  */
 export function runMain(main: () => Promise<number>): Promise<void> {
   return main().then(
@@ -33,7 +38,8 @@ export function runMain(main: () => Promise<number>): Promise<void> {
       process.exitCode = code;
     },
     (error: unknown) => {
-      err(error instanceof UsageError ? error.message : error instanceof Error ? (error.stack ?? error.message) : String(error));
+      const usage = error instanceof UsageError || isArgsError(error);
+      err(usage ? error.message : error instanceof Error ? (error.stack ?? error.message) : String(error));
       process.exitCode = ExitCode.usage;
     },
   );

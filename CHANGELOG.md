@@ -2,6 +2,10 @@
 
 Release notes for sculkwire. Each `## vX.Y.Z` section becomes the GitHub release text when its tag is pushed.
 
+## Unreleased
+
+- A command given an option without its value (`sculk game worlds --use`) or an unknown option prints the reason and exits 2 instead of a stack trace. This holds for every `sculk` command.
+
 ## v0.1.11
 
 - A muted game's own audio can no longer reach the speakers while the game is being found at start or has just exited during `game_stop`: the watcher moves a stream off the silent sink only while it knows the game's processes (v0.1.10 could take a lingering stream of the stopped game for another app's and move it to the default output).
