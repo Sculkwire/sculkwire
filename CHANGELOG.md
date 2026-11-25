@@ -2,7 +2,7 @@
 
 Release notes for sculkwire. Each `## vX.Y.Z` section becomes the GitHub release text when its tag is pushed.
 
-## Unreleased
+## v0.1.12
 
 - A command given an option without its value (`sculk game worlds --use`) or an unknown option prints the reason and exits 2 instead of a stack trace. This holds for every `sculk` command.
 
