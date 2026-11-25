@@ -73,9 +73,10 @@ pub fn badge_due(since: u64, now: u64) -> bool {
     since != 0 && now.saturating_sub(since) >= BADGE_DELAY_MS
 }
 
-/// How often the action-bar badge is sent again while nothing changes: the game shows an action-bar
-/// text for about 5 s (fade-in 10, stay 70, fade-out 20 ticks), so 4 s keeps it up without a gap.
-pub const BADGE_REFRESH_MS: u64 = 4_000;
+/// How often the action-bar badge is sent again while nothing changes: the game starts fading an
+/// action-bar text out about 3 s after it was sent (measured on 1.26.60: a 4 s refresh left a gap of
+/// about 1 s), so 2 s keeps it up without a gap.
+pub const BADGE_REFRESH_MS: u64 = 2_000;
 
 /// The wait before sending again a lock command (camera gate, badge) that failed `failures` times in a
 /// row: 1 s doubling up to 8 s, then `None` after the fifth failure, so a command that keeps failing
@@ -160,7 +161,7 @@ mod tests {
         assert_eq!(retry_after_ms(1), Some(1_000));
         assert_eq!(retry_after_ms(4), Some(8_000));
         assert_eq!(retry_after_ms(5), None);
-        assert!(BADGE_REFRESH_MS < 5_000);
+        assert!(BADGE_REFRESH_MS < 3_000);
     }
 
     #[test]
