@@ -128,3 +128,5 @@ A change to `native/agent-core/` keeps the `Engine` seam and the wire stable: me
 ## Releases
 
 Releasing is described in [Install and Update](docs/install.md#releasing): bump `package.json`, move the `## Unreleased` notes into a `## vX.Y.Z` section of `CHANGELOG.md`, commit, tag `vX.Y.Z` and push the tag. The `release` workflow runs the checks, builds the agent without `debug-rpc`, and publishes `sculkwire-agent-<version>-x86_64-windows.zip` with its `.sha256` next to the release notes. Managed installs pick the tag up on their next daily check.
+
+Release rarely, and only when it is worth an update. Every managed install updates itself within a day, so each release is a change on every user's machine. Collect fixes and features under `## Unreleased` on `main` and publish once a batch is complete and checked live, not after each change; a lone small fix waits for the next batch. The one exception is a fix for something that breaks users now (a crash, sound on their speakers, a lost world), which ships on its own. Tag only after CI is green for the release commit.
