@@ -22,10 +22,11 @@ Sculkwire gives your AI agent the Bedrock docs, a validator, a test server and t
 - **Knowledge.** Looks up docs, Script API, components, commands, Molang, vanilla examples and changelogs for stable and preview.
 - **Validation.** Reports each problem with its file, line and rule.
 - **Test server.** Runs your packs and GameTests on a Bedrock Dedicated Server.
-- **Live game.** Starts the real game in a test world with your packs, reloads after edits, reads the log and takes screenshots. Works on Windows and Linux.
-- **Player control.** The agent walks, finds paths, fights mobs, crafts, smelts, trades and works toward goals like a player.
+- **Live game.** Starts the real game in the background (silent, off your screen) with your packs, or works in a game you already opened. Reloads after edits, reads the content log and takes screenshots. Works on Windows and Linux.
+- **In-world testing.** Reads entity components, dynamic properties, scores and raycasts; waits for a condition instead of sleeping (`wait_until`); reads what happened (`game_events`); saves a test start and puts the world back to it in one call (`scene_save`, `scene_reset`).
+- **Player control.** The agent walks, finds paths, fights mobs, crafts, smelts, trades and works toward goals like a player, and respawns by itself after dying.
 - **Game files.** Unpacks the vanilla packs from your installed game so you can search or compare them.
-- **In-game agent.** An optional helper inside the game. It lets the agent run commands as the player, take screenshots, read inventories, use menus and crafting stations, and pause or step game time. See [In-Game Agent](docs/engine.md).
+- **In-game agent.** An optional helper inside the game. It lets the agent run commands as the player, take screenshots, read inventories, use menus and crafting stations, and pause or step game time. It also reads the content log, entities and blocks from the game's memory when the helper pack or the log file is missing. See [In-Game Agent](docs/engine.md).
 - **Extensions.** Add your own tools and commands. See [Extensions](docs/extensions.md).
 - **Benchmarks.** `sculk bench` measures the agent's combat, movement, goal and task skills in the real game. See [Bench](docs/bench.md).
 
@@ -44,6 +45,16 @@ Sculkwire gives your AI agent the Bedrock docs, a validator, a test server and t
 | Setup | `sculkwire_version` |
 
 The [tool reference](docs/tools.md) explains each tool and its inputs, the MCP prompts, and `SCULKWIRE_TOOLSETS`.
+
+## Where the Game Runs
+
+| Mode | How | What happens |
+|---|---|---|
+| Test world (default until you choose a dev world) | `game_launch {project}` | A fresh `sculkwire-bridge` world each launch. On Linux the game runs in the background and muted; pass `display: "window"` to watch it |
+| Your own dev world | `game_worlds {action: "use", world}` once, then `game_launch` | Enters your world with the helper pack and your packs added, after backing up its settings files; Save & Quit before the stop. `fresh: true` goes back to a test world |
+| A game you opened | `game_launch` while the game runs | Attaches without restarting it. Commands, the content log and world reads work; `game_stop` only detaches and the game keeps running with its sound |
+
+See [Game Client Setup](docs/client.md) for platforms and display modes.
 
 ## Quick Start
 
@@ -134,7 +145,7 @@ Details are in [Install and Update](docs/install.md#updates).
 |---|---|
 | Knowledge and validation | Node.js 22.18 or newer |
 | Test server | Windows or Linux x64. You accept the [Minecraft EULA](https://www.minecraft.net/eula) |
-| Game client | Minecraft Bedrock for PC (GDK). Linux also needs gamescope and xdotool. See [Game Client Setup](docs/client.md) |
+| Game client | Minecraft Bedrock for PC (GDK). Linux also needs gamescope and xdotool, and `pactl` (PipeWire or PulseAudio) to mute a background game. See [Game Client Setup](docs/client.md) |
 | In-game agent (optional) | The game running. sculkwire downloads the helper, or builds it if you have Rust. See [In-Game Agent](docs/engine.md) |
 | Game files | An installed PC (GDK) copy of the game. See [Game Client Setup](docs/client.md) |
 
@@ -146,9 +157,12 @@ Tools that work on state the MCP server keeps between calls have no command: `bd
 
 ```sh
 sculk validate path/to/addon            # Exit code 1 when errors are found
+sculk validate fix-versions path/to/addon --apply   # Raise outdated min_engine_version and module versions
 sculk bds gametest path/to/addon        # Run GameTests
 sculk game check path/to/addon --screenshot shot.png
+sculk game worlds --use "My World"      # Launch into your own world from now on
 sculk api Entity.applyDamage
+sculk molang 'math.sin(q.anim_time * 90)' -q anim_time=0.5
 sculk bench combat --runs 3             # Measure the player skills
 sculk doctor                            # Check the machine
 sculk --help                            # List all commands

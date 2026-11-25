@@ -16,6 +16,7 @@ While the agent is attached, the bridge's own input takes its route where it can
 |---|---|---|
 | Supported installs | Microsoft Store / Xbox app, stable and Preview, on any drive (the folder Windows registered for the package, else `XboxGames` on every fixed drive, plus `SCULKWIRE_GAME_DIRS`) | [mcbe-gdk-installer](https://gitlab.com/ve3dy/mcbe-gdk-installer), BedrockOnLinux, Flarial, Bottles, Lutris, Steam (any Wine or Proton prefix; the launcher's game folder is found next to its prefix) |
 | Starts the game automatically | Yes | With mcbe-gdk-installer, or any launcher given a launch command |
+| Use a game you already opened (attach) | Yes | Yes |
 | Commands, reload, content log, world queries | Yes | Yes |
 | Screenshots | Yes, also while the window is covered | Yes, in window or off-screen mode |
 | Keyboard and mouse input (`game_input`, `/connect` typing, sign-in recovery) | Yes, while the game window is in the foreground | Yes, in window or off-screen mode |
