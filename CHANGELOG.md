@@ -2,6 +2,10 @@
 
 Release notes for sculkwire. Each `## vX.Y.Z` section becomes the GitHub release text when its tag is pushed.
 
+## v0.1.8
+
+- `game_status` `dead`, and the respawn a `player_act` call does first, now see a death without a running state stream. On 1.26.60 the death screen is a page neither the in-game agent nor the engine log names, so the player's health is the only sign; when no fresh streamed state exists, the helper pack is now asked for it once. Before, a player killed outside `play` read as alive until a `play` job or the `respawn` action started the stream.
+
 ## v0.1.7
 
 - The player no longer stays on the death screen. `player_act` has a `respawn` action, which presses RESPAWN by its control name through the in-game agent when the screen lists it, else clicks the green RESPAWN button where a screenshot shows it (never a fixed spot), and never presses "Game menu"; any `player_act` call that starts while the player is dead respawns first and says so in `respawned`. A `play` run that dies respawns, logs and counts the death, and goes on with the goal, up to `maxDeaths` times (default 3; `maxDeaths: 0` stops at the first death as before). It stops with `died` only after that or when RESPAWN does not bring the player back.

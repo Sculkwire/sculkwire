@@ -988,7 +988,9 @@ export class ClientBridge {
 
   /**
    * Whether the player is dead: the death screen is up (`ui.screen` when the in-game agent is attached, else the engine
-   * log), or the helper's player state from the last `DEATH_HEALTH_FRESH_MS` shows health 0 or less.
+   * log), or the player's health is 0 or less: from the helper's streamed state of the last `DEATH_HEALTH_FRESH_MS`, else
+   * asked from the helper once (on 1.26.60 the death screen is an OreUI page neither the agent nor the log names, so
+   * without a running stream health is the only sign).
    */
   async dead(): Promise<boolean> {
     if (!this.running) return false;
@@ -998,7 +1000,11 @@ export class ClientBridge {
       .catch(() => undefined);
     if (screen) this.#screens = screensFromUi(screen, this.#screens);
     if (currentScreen(this.#screens) === "death") return true;
-    const health = this.#freshHealth();
+    let health = this.#freshHealth();
+    if (health === undefined) {
+      const state = await this.query("state", {}, 3000).catch(() => undefined);
+      if (state && typeof state === "object" && "health" in state && typeof state.health === "number") health = state.health;
+    }
     return health !== undefined && health <= 0;
   }
 
