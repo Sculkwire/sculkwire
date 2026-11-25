@@ -44,13 +44,12 @@ pub fn focus_held(locked: bool, focus_bits: u32) -> bool {
     locked || focus_bits != 0
 }
 
-/// Whether the agent tells the game its window is active now: focus is held and the window known, the
-/// game is not both in front and active by its own messages, and it was not told since focus was last
-/// let go. A game started behind another window was told at launch that it lost focus (before anything
-/// held it), or was never activated at all (a window the desktop never focused, which Wine still calls
-/// the foreground one), and then stops reading its mouse and ignores the agent's clicks on its menus.
-pub fn give_focus(held: bool, window_known: bool, active_in_front: bool, already_given: bool) -> bool {
-    held && window_known && !active_in_front && !already_given
+/// Whether the agent tells the game its window is active now: focus is held and the window known, it
+/// is not really the foreground one, and the game was not told since focus was last let go. A game
+/// started behind another window was told at launch that it lost focus (before anything held it) and
+/// then ignores the agent's clicks on its menus.
+pub fn give_focus(held: bool, window_known: bool, foreground: bool, already_given: bool) -> bool {
+    held && window_known && !foreground && !already_given
 }
 
 /// The game's focus queries are answered with its own window only while focus is held.
@@ -75,8 +74,8 @@ pub fn badge_due(since: u64, now: u64) -> bool {
 }
 
 /// How often the action-bar badge is sent again while nothing changes: the game starts fading an
-/// action-bar text out about 3 s after it was sent (measured on 1.26.60: a 4 s refresh left a gap of
-/// about 1 s), so 2 s keeps it up without a gap.
+/// action-bar text out about 3 s after it was sent (a 4 s refresh left a gap of about 1 s), so 2 s
+/// keeps it up without a gap.
 pub const BADGE_REFRESH_MS: u64 = 2_000;
 
 /// The wait before sending again a lock command (camera gate, badge) that failed `failures` times in a
