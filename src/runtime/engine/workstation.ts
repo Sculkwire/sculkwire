@@ -856,18 +856,20 @@ export function registerWorkstationTools(server: McpServer): void {
       },
       outputSchema: interactSchema,
     },
-    async ({ target, x, y, z: bz, dimension, face, id }) => {
-      if (target === "entity") {
-        if (id === undefined) return invalidParamsResult("entity needs id: an entity's unique id");
-        const result = await interactEntity(id);
+    async ({ target, x, y, z: bz, dimension, face, id }) =>
+      // The use is input to the game: the lock keeps the user's keyboard and mouse out for this call only.
+      engine.locked(async () => {
+        if (target === "entity") {
+          if (id === undefined) return invalidParamsResult("entity needs id: an entity's unique id");
+          const result = await interactEntity(id);
+          if (!result.ok) return agentRequired(result);
+          return ok(interactText(result.value), { ok: true, ...result.value });
+        }
+        if (x === undefined || y === undefined || bz === undefined) return invalidParamsResult("block needs x, y and z");
+        const result = await interactBlock({ x, y, z: bz, ...(dimension !== undefined ? { dimension } : {}), ...(face ? { face } : {}) });
         if (!result.ok) return agentRequired(result);
         return ok(interactText(result.value), { ok: true, ...result.value });
-      }
-      if (x === undefined || y === undefined || bz === undefined) return invalidParamsResult("block needs x, y and z");
-      const result = await interactBlock({ x, y, z: bz, ...(dimension !== undefined ? { dimension } : {}), ...(face ? { face } : {}) });
-      if (!result.ok) return agentRequired(result);
-      return ok(interactText(result.value), { ok: true, ...result.value });
-    },
+      }),
   );
 
   server.registerTool(
@@ -914,38 +916,41 @@ export function registerWorkstationTools(server: McpServer): void {
         if (!result.ok) return agentRequired(result);
         return ok(screenStateText(result.value), { ok: true, action, ...result.value });
       }
-      if (action === "close") {
-        const result = await screenClose();
-        if (!result.ok) return agentRequired(result);
-        const summary = result.value.closed ? "screen closed" : "the game kept the screen open";
-        return ok(summary, { ok: true, action, ...result.value });
-      }
-      if (action === "move") {
-        if (!from || !to) return invalidParamsResult("move needs from and to: {container, slot} each");
-        const result = await screenMove({ from, to, ...(items !== undefined ? { count: items } : {}) });
-        if (!result.ok) return agentRequired(result);
-        return ok(`moved ${result.value.moved} item(s): ${from.container} ${from.slot} to ${to.container} ${to.slot}`, {
-          ok: true,
-          action,
-          ...result.value,
-          from,
-          to,
+      // Moves, actions and closing drive the screen: the lock keeps the user's input out for this call only.
+      return engine.locked(async () => {
+        if (action === "close") {
+          const result = await screenClose();
+          if (!result.ok) return agentRequired(result);
+          const summary = result.value.closed ? "screen closed" : "the game kept the screen open";
+          return ok(summary, { ok: true, action, ...result.value });
+        }
+        if (action === "move") {
+          if (!from || !to) return invalidParamsResult("move needs from and to: {container, slot} each");
+          const result = await screenMove({ from, to, ...(items !== undefined ? { count: items } : {}) });
+          if (!result.ok) return agentRequired(result);
+          return ok(`moved ${result.value.moved} item(s): ${from.container} ${from.slot} to ${to.container} ${to.slot}`, {
+            ok: true,
+            action,
+            ...result.value,
+            from,
+            to,
+          });
+        }
+        if (act === undefined) return invalidParamsResult(`act needs act: one of ${SCREEN_ACTIONS.join(", ")}`);
+        const result = await screenAct({
+          action: act,
+          ...(recipe !== undefined ? { recipe } : {}),
+          ...(times !== undefined ? { times } : {}),
+          ...(name !== undefined ? { name } : {}),
+          ...(pattern !== undefined ? { pattern } : {}),
+          ...(option !== undefined ? { option } : {}),
+          ...(offer !== undefined ? { offer } : {}),
+          ...(primary !== undefined ? { beaconPrimary: primary } : {}),
+          ...(secondary !== undefined ? { beaconSecondary: secondary } : {}),
         });
-      }
-      if (act === undefined) return invalidParamsResult(`act needs act: one of ${SCREEN_ACTIONS.join(", ")}`);
-      const result = await screenAct({
-        action: act,
-        ...(recipe !== undefined ? { recipe } : {}),
-        ...(times !== undefined ? { times } : {}),
-        ...(name !== undefined ? { name } : {}),
-        ...(pattern !== undefined ? { pattern } : {}),
-        ...(option !== undefined ? { option } : {}),
-        ...(offer !== undefined ? { offer } : {}),
-        ...(primary !== undefined ? { beaconPrimary: primary } : {}),
-        ...(secondary !== undefined ? { beaconSecondary: secondary } : {}),
+        if (!result.ok) return agentRequired(result);
+        return ok(screenActText(result.value), { ok: true, action, ...result.value });
       });
-      if (!result.ok) return agentRequired(result);
-      return ok(screenActText(result.value), { ok: true, action, ...result.value });
     },
   );
 }

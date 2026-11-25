@@ -5,25 +5,42 @@ import { InputLock, type LockMode } from "../engine/lock.ts";
 import { AgentInputProvider } from "./agentprovider.ts";
 
 /**
- * A session whose agent answers `input.lock` like the DLL for one connection: `mode`, and a session lock that locks in
- * `auto`. `old`: an agent that predates session locks (ignores `session`, never reports it). Records each call's params.
+ * A session whose agent answers `input.lock` like the DLL for one connection: `mode`, a session lock that locks in
+ * `auto`, and the focus hold. `old`: an agent that predates session locks (ignores `session`, never reports it).
+ * Records each call's params. Its attach succeeds at once (the agent is listening).
  */
 function lockingSession(mode: LockMode, { attached = true, old = false } = {}): { session: EngineSession; sent: unknown[] } {
   const session = new EngineSession({ port: 9, timeoutMs: 500 });
   const sent: unknown[] = [];
   let current = mode;
   let held = false;
+  let focus = false;
   const lock = new InputLock(async (params): Promise<EngineResult<unknown>> => {
     sent.push(params);
     if (params.mode) current = params.mode;
     if (params.session !== undefined && !old) held = params.session;
+    if (params.focus !== undefined && !old) focus = params.focus;
     const locked = current === "on" || (current === "auto" && held);
-    return { ok: true, value: { locked, mode: current, by: "agent", user: false, ...(old ? {} : { session: held }) } };
+    return { ok: true, value: { locked, mode: current, by: "agent", user: false, ...(old ? {} : { session: held, focusHeld: focus }) } };
   });
-  Object.assign(session, { lock });
+  Object.assign(session, { lock, attach: async () => ({}) });
   Object.defineProperty(session, "attached", { get: () => attached });
   return { session, sent };
 }
+
+describe("AgentInputProvider focus hold", () => {
+  it("holds the game's focus once when it attaches, and a new connection declares it again", async () => {
+    const { session, sent } = lockingSession("auto");
+    const provider = new AgentInputProvider(session, "linux");
+    await provider.attach();
+    await provider.attach();
+    expect(sent).toEqual([{ focus: true }]);
+    expect(session.lock.state?.focusHeld).toBe(true);
+    // Nothing is locked by it.
+    expect(provider.lockStatus()).toMatchObject({ locked: false });
+    expect(session.lock.reassert()).toEqual({ focus: true });
+  });
+});
 
 describe("AgentInputProvider session lock", () => {
   it("holds a session lock that locks in auto, leaves the mode alone, and ends it on release", async () => {
@@ -32,11 +49,11 @@ describe("AgentInputProvider session lock", () => {
     expect(await provider.sessionLock("on")).toBeUndefined();
     expect(provider.lockStatus()).toEqual({ mode: "auto", locked: true, user: false, session: true });
     await provider.releaseSessionLock();
-    expect(sent).toEqual([{ session: true }, { session: false }]);
+    expect(sent).toEqual([{ focus: true }, { session: true }, { session: false }]);
     expect(provider.lockStatus()).toEqual({ mode: "auto", locked: false, user: false, session: false });
     // Released once: a second release sends nothing.
     await provider.releaseSessionLock();
-    expect(sent.length).toBe(2);
+    expect(sent.length).toBe(3);
   });
 
   it("says why when the loaded agent predates session locks, or game_input_lock set off", async () => {
@@ -50,18 +67,26 @@ describe("AgentInputProvider session lock", () => {
     );
   });
 
-  it("auto: sets mode auto when another mode is set, and puts back an off but never an on", async () => {
+  it("auto and off set the mode when another one is set, and the release puts back an off but never an on", async () => {
     const stale = lockingSession("on");
     const fromStale = new AgentInputProvider(stale.session, "linux");
     await fromStale.sessionLock("auto");
     await fromStale.releaseSessionLock();
-    expect(stale.sent).toEqual([{}, { mode: "auto" }]);
+    expect(stale.sent).toEqual([{ focus: true }, {}, { mode: "auto" }]);
 
     const off = lockingSession("off");
     const fromOff = new AgentInputProvider(off.session, "linux");
     await fromOff.sessionLock("auto");
     await fromOff.releaseSessionLock();
-    expect(off.sent).toEqual([{}, { mode: "auto" }, { mode: "off" }]);
+    expect(off.sent).toEqual([{ focus: true }, {}, { mode: "auto" }, { mode: "off" }]);
+
+    // inputLock off: nothing locks for the session, and the release puts the agent's default back.
+    const auto = lockingSession("auto");
+    const fromAuto = new AgentInputProvider(auto.session, "linux");
+    expect(await fromAuto.sessionLock("off")).toBeUndefined();
+    expect(fromAuto.lockStatus()).toMatchObject({ mode: "off", locked: false });
+    await fromAuto.releaseSessionLock();
+    expect(auto.sent).toEqual([{ focus: true }, {}, { mode: "off" }, { mode: "auto" }]);
   });
 
   it("turns an on set by game_input_lock into auto on release, and sends nothing without an agent", async () => {

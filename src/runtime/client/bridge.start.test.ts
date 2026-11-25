@@ -97,6 +97,21 @@ describe("client bridge start", () => {
     expect(r).toMatchObject({ stopped: true, message: expect.stringMatching(/left alone/) });
   });
 
+  it("leaves the user's game alone when a stale launch state names a game that is gone", async () => {
+    // A crash left the state of sculkwire's launch (pid 0, game 1111 gone); the user's own game 4242 runs now.
+    launched = {};
+    stateFile = true;
+    state.gamePid = 1111;
+    runningPids = [4242];
+    try {
+      const r = await new ClientBridge().stop();
+      expect(stopGame).not.toHaveBeenCalled();
+      expect(r.message).toMatch(/left alone/);
+    } finally {
+      delete state.gamePid;
+    }
+  });
+
   it("frees the debugger port when the start fails after opening it, so the next launch can take it", async () => {
     const freePort = async (): Promise<number> => {
       const s = createServer();
@@ -375,10 +390,10 @@ describe("client bridge start", () => {
       return world;
     }
 
-    it("attaches instead of refusing, and without an agent names the two commands to type", async () => {
+    it("attaches instead of refusing, and without an agent names the commands to type (/connect only when asked for)", async () => {
       await openedWorld("Ab+c=", "Steve's Base");
       const bridge = new ClientBridge();
-      const status = await bridge.start(launchOpts);
+      const status = await bridge.start({ ...launchOpts, connect: true });
       try {
         expect(status).toMatchObject({ running: true, ready: false, attached: true, worldMode: "attached", inWorld: true, levelId: "Ab+c=", world: "Steve's Base" });
         expect(status.worldNote).toContain("attached to the game you opened");

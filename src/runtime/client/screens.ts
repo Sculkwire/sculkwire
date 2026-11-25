@@ -340,6 +340,8 @@ export interface RecoveryIO {
   ui?(sleep: (ms: number) => Promise<void>): UiRecovery | undefined;
   /** A screenshot of the game: its file and PNG bytes. */
   screenshot(label: string): Promise<{ path: string; png: Buffer } | undefined>;
+  /** True once the caller knows the world is in (the helper pack answered in it): the recovery ends recovered. */
+  inWorld?(): boolean;
   /** False once the game process is gone. */
   alive(): Promise<boolean>;
   sleep(ms: number): Promise<void>;
@@ -383,6 +385,13 @@ export interface RecoveryResult {
   reason?: string;
   /** It stopped on the Play screen because the world's tile cannot be told apart: only the user can open the world. */
   needsUser?: boolean;
+  /**
+   * It stopped after clicking the world's tile because nothing opened: `dialog` when the Play screen stayed up and the
+   * tile was covered afterwards (a dialog over the screen, such as the World update that makes an old world higher and
+   * deeper, which only the user may confirm), `ignored` when the tile stayed in view and the screen did not change.
+   * Nothing more is clicked; `needsUser` is set.
+   */
+  stuck?: "dialog" | "ignored";
 }
 
 /** How long a screen must stay unchanged before acting on it: the game may still move on by itself. */
@@ -412,6 +421,10 @@ const MAX_SCROLLS = 3;
 const SCROLL_NOTCHES = 5;
 const LOOK_PATIENCE_MS = 1500;
 /**
+ * After a tile click, how long the agent's UI may stay silent (the world loading) before it counts as down.
+ */
+const LOADING_PATIENCE_MS = 120_000;
+/**
  * A tile matched only by its visible half (the rest cut off by the list's edge or under the tab strip) is scrolled into
  * view at most this many times by these notches; then its visible half is opened.
  */
@@ -419,6 +432,11 @@ const MAX_NUDGES = 2;
 const NUDGE_NOTCHES = 2;
 /** Worlds other than the wanted one that may open (through a tile that showed its picture) before the recovery stops. */
 const MAX_WRONG_WORLDS = 2;
+/**
+ * Double-clicks on the world's tile with no change of the screen after them before the recovery stops: a world that
+ * opens shows its loading screen within `OPEN_PATIENCE_MS` of the first one.
+ */
+const MAX_TILE_CLICKS = 2;
 
 type Press = { label: string; run: () => Promise<void>; patienceMs?: number; /** False for a wait that sends nothing. */ input?: boolean };
 
@@ -570,7 +588,7 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
     if (shot) frame = pngSize(shot.png) ?? frame;
     return shot;
   };
-  const done = (recovered: boolean, reason?: string, needsUser = false): RecoveryResult => ({
+  const done = (recovered: boolean, reason?: string, needsUser = false, stuck?: RecoveryResult["stuck"]): RecoveryResult => ({
     recovered,
     steps,
     ...(evidence ? { screenshot: evidence } : {}),
@@ -583,10 +601,18 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
     seen,
     ...(reason ? { reason } : {}),
     ...(needsUser ? { needsUser } : {}),
+    ...(stuck ? { stuck } : {}),
   });
+  /** The tile clicks made on the screen state `changes` (the Play screen as it was when the tile was clicked). */
+  let tileClick: { changes: number; count: number } | undefined;
+  /** When the last tile click was sent: the agent's UI going quiet after it is the world loading. */
+  let clickedAt: number | undefined;
+  let loadingNoted = false;
 
   for (;;) {
     if (!(await io.alive())) return done(false, "the game stopped");
+    // The caller knows the world is in (its scripts answered): nothing more to do, whatever the screens read.
+    if (io.inWorld?.()) return done(true);
     const text = await io.readLog();
     if (text) {
       screens = screensInLog(text, screens);
@@ -600,6 +626,16 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
         screens = screensFromUi(screen, screens);
         route = screen.route;
         uiFailures = 0;
+      } else if (clickedAt !== undefined && io.now() - clickedAt < LOADING_PATIENCE_MS) {
+        // Right after the tile click the agent's UI does not answer while the world loads: that is progress. Nothing is
+        // pressed meanwhile (an Escape in the loaded world would open its pause menu).
+        if (!loadingNoted) {
+          loadingNoted = true;
+          steps.push("the agent's UI does not answer after the tile click: the world is loading, waiting for it");
+        }
+        if (io.now() > deadline) return done(false, `the world did not come back within ${Math.round((opts.timeoutMs ?? 180_000) / 1000)} s`);
+        await io.sleep(500);
+        continue;
       } else if (++uiFailures >= 2) {
         uiDown = true;
         steps.push("the agent's UI stopped answering: back to the log and the keyboard route");
@@ -681,6 +717,26 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
             );
           }
           const tile = matches[0] && image && onLocalTile(image, matches[0], locals) ? matches[0] : undefined;
+          // The tile was clicked and the screen did not change since: no loading screen came within the patience.
+          const clicked = tileClick !== undefined && tileClick.changes === screens.changes ? tileClick.count : 0;
+          if (clicked > 0 && !tile) {
+            return done(
+              false,
+              `after the tile of ${opts.levelId} was clicked the Play screen stayed up and the tile is covered now: the game ` +
+                "shows a dialog over it (such as the World update that makes an old world higher and deeper), which sculkwire never confirms",
+              true,
+              "dialog",
+            );
+          }
+          if (clicked >= MAX_TILE_CLICKS) {
+            return done(
+              false,
+              `the tile of ${opts.levelId} was double-clicked ${clicked} times and the world did not open: the Play screen stayed ` +
+                "up without a change (the game may show a dialog over it, or ignore clicks)",
+              true,
+              "ignored",
+            );
+          }
           const scroll = ui?.scroll?.bind(ui);
           const wheel = (label: string, notches: number): Press => ({
             label,
@@ -700,6 +756,8 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
             const at = { x: tile.at.x / image.width, y: tile.at.y / image.height };
             const what = tile.whole ? "the tile showing the world's picture" : `the visible half of the tile showing the world's picture (its ${tile.hidden} is hidden)`;
             press = touches.click(`${what} of ${opts.levelId}`, at, 2, OPEN_PATIENCE_MS);
+            tileClick = { changes: screens.changes, count: clicked + 1 };
+            clickedAt = io.now();
           } else if (list.looks < THUMBNAIL_LOOKS) {
             list.looks++;
             press = { label: "no tile shows the world's picture yet: looking again", run: async () => undefined, patienceMs: LOOK_PATIENCE_MS, input: false };

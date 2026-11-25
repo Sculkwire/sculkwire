@@ -86,10 +86,14 @@ export function schemas() {
     user: z.boolean().optional(),
     active: z.boolean().optional(),
     session: z.boolean().optional(),
+    focusHeld: z.boolean().optional(),
+    cameraGate: z.boolean().optional(),
     window: z.boolean().optional(),
     dropped: z.number().optional(),
     focusLost: z.number().optional(),
     focusKept: z.number().optional(),
+    focusGiven: z.number().optional(),
+    cursorKept: z.number().optional(),
     wineFocused: z.boolean().optional(),
     wineForeground: z.boolean().optional(),
     shift: z.object({ message: z.tuple([z.number(), z.number()]), raw: z.tuple([z.number(), z.number()]) }).optional(),
@@ -382,24 +386,27 @@ export function register(server: McpServer, deps: EngineDeps): void {
     {
       title: "Lock the user's input while the agent plays",
       description:
-        "Keep the user's own keyboard and mouse out of the game while sculkwire plays through the injected agent, so a " +
-        "click or key in the game window cannot disturb an action. While locked, the game also does not pause when " +
-        "its window loses focus, and the action bar shows a badge. F9 in the game always works: it hands control to " +
-        "the user (a running player_act action stops, a play job pauses) and gives it back; the user keeps control until " +
-        "F9 again or until sculkwire changes the lock (a mode set here, or the start of a new player_act action or play " +
-        "job). mode on locks now, off never locks, auto (the agent's default) locks while a player_act action or play " +
-        "job runs, or while game_launch holds its session lock (session: true; inputLock, default on). That session lock " +
-        "belongs to the sculkwire process's connection: game_stop ends it, and the agent ends it by itself when the " +
-        "process exits or dies, so the game is never left locked. Without mode it reports the state. Needs " +
-        "engine_attach. The keyboard route cannot be locked, because its input arrives the same way as the user's, and " +
-        "while locked it is kept out with the user's: use the engine route, or launch with inputLock auto or off.",
+        "Keep the user's own keyboard and mouse out of the game while sculkwire acts through the injected agent, so a " +
+        "click or key in the game window cannot disturb it. In mode auto (the default) the lock holds only while a tool " +
+        "call sends input through the agent (player_act and play jobs, game_ui, game_input, interact, screen, craft run, " +
+        "the walk into the world, Save & Quit) and the user has full control between calls; game_launch inputLock on adds " +
+        "a session lock until game_stop (session: true). A badge shows in the action bar once the lock has held 1 s, and " +
+        "is cleared when it ends. F9 in the game always works: it hands control to the user for the rest of the call (a " +
+        "running player_act action stops, a play job pauses) and gives it back; the next call that acts locks again. mode " +
+        "on locks now, off never locks. The game never sees its window lose focus while sculkwire is attached (focusHeld) " +
+        "or locked, so the agent's clicks work in the background and switching away does not pause it; that and every " +
+        "session lock end with the sculkwire process's connection, even if it dies. cameraGate: true also turns the " +
+        "player's camera permission off while locked (off by default: the lock already keeps the user's mouse motion out). " +
+        "Without mode it reports the state. Needs engine_attach. The keyboard route cannot be locked, because its input " +
+        "arrives the same way as the user's, and while locked it is kept out with the user's.",
       inputSchema: {
         mode: z.enum(LOCK_MODES).optional().describe("on, off or auto. Omit to read the state"),
+        cameraGate: z.boolean().optional().describe("Turn the player's camera permission off while the lock holds (default false)"),
       },
       outputSchema: lockSchema,
     },
-    async ({ mode }) => {
-      const result = await engine.lock.request(mode);
+    async ({ mode, cameraGate }) => {
+      const result = await engine.lock.request(mode, cameraGate !== undefined ? { cameraGate } : {});
       if (!result.ok) {
         const keyboard = result.reason === "not_attached" ? { ...result, message: `${result.message}. ${KEYBOARD_LOCK_NOTE}` } : result;
         return failureResult(keyboard);
@@ -548,34 +555,37 @@ export function register(server: McpServer, deps: EngineDeps): void {
         if (!result.ok) return failureResult(result);
         return ok(uiControlsText(result.value, filter), { ok: true, controls: result.value });
       }
-      if (action === "press") {
-        const control = name?.trim();
-        if (!control) return invalidParamsResult("press needs name: the control as `controls` lists it");
-        const result = await engine.uiPress(control);
-        return result.ok ? ok(`pressed ${control}`, { ok: true, pressed: control }) : failureResult(result);
-      }
-      if (action === "key") {
-        const sent = chord?.trim();
-        if (!sent) return invalidParamsResult("key needs key, e.g. Escape or ctrl+a");
-        const result = await engine.uiKey(sent, keyAction);
-        return result.ok
-          ? ok(`sent ${sent}${keyAction ? ` (${keyAction})` : ""}`, { ok: true, key: sent, ...(keyAction ? { keyAction } : {}), ...delivery(result.value) })
-          : failureResult(result);
-      }
-      if (action === "text") {
-        if (!text) return invalidParamsResult("text needs the text to type");
-        const result = await engine.uiText(text);
-        return result.ok ? ok(`typed ${text.length} character(s)`, { ok: true, typed: text.length, ...delivery(result.value) }) : failureResult(result);
-      }
-      if (x === undefined || y === undefined) return invalidParamsResult(`${action} needs x and y in client pixels`);
-      if (action === "click") {
-        const result = await engine.uiClick(x, y, button);
-        const at = { x, y, button: button ?? "left" };
-        return result.ok ? ok(`clicked ${at.button} at ${x},${y}`, { ok: true, click: at, ...delivery(result.value) }) : failureResult(result);
-      }
-      if (delta === undefined) return invalidParamsResult("scroll needs delta: whole notches, positive up");
-      const result = await engine.uiScroll(x, y, delta);
-      return result.ok ? ok(`scrolled ${delta} at ${x},${y}`, { ok: true, scroll: { x, y, delta }, ...delivery(result.value) }) : failureResult(result);
+      // Input holds the lock for this call only: the user's keyboard and mouse are kept out while it is sent.
+      return engine.locked(async () => {
+        if (action === "press") {
+          const control = name?.trim();
+          if (!control) return invalidParamsResult("press needs name: the control as `controls` lists it");
+          const result = await engine.uiPress(control);
+          return result.ok ? ok(`pressed ${control}`, { ok: true, pressed: control }) : failureResult(result);
+        }
+        if (action === "key") {
+          const sent = chord?.trim();
+          if (!sent) return invalidParamsResult("key needs key, e.g. Escape or ctrl+a");
+          const result = await engine.uiKey(sent, keyAction);
+          return result.ok
+            ? ok(`sent ${sent}${keyAction ? ` (${keyAction})` : ""}`, { ok: true, key: sent, ...(keyAction ? { keyAction } : {}), ...delivery(result.value) })
+            : failureResult(result);
+        }
+        if (action === "text") {
+          if (!text) return invalidParamsResult("text needs the text to type");
+          const result = await engine.uiText(text);
+          return result.ok ? ok(`typed ${text.length} character(s)`, { ok: true, typed: text.length, ...delivery(result.value) }) : failureResult(result);
+        }
+        if (x === undefined || y === undefined) return invalidParamsResult(`${action} needs x and y in client pixels`);
+        if (action === "click") {
+          const result = await engine.uiClick(x, y, button);
+          const at = { x, y, button: button ?? "left" };
+          return result.ok ? ok(`clicked ${at.button} at ${x},${y}`, { ok: true, click: at, ...delivery(result.value) }) : failureResult(result);
+        }
+        if (delta === undefined) return invalidParamsResult("scroll needs delta: whole notches, positive up");
+        const result = await engine.uiScroll(x, y, delta);
+        return result.ok ? ok(`scrolled ${delta} at ${x},${y}`, { ok: true, scroll: { x, y, delta }, ...delivery(result.value) }) : failureResult(result);
+      });
     },
   );
 }

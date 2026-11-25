@@ -264,16 +264,18 @@ export function register(server: McpServer): void {
         "of starting one (attached: true, worldMode attached): the game is never restarted and no world is written, so " +
         "userWorld, display, width, height, fps, difficulty and betaApis are not " +
         "applied (worldNote names the ones given); its sound stays on unless mute is true. The in-game agent turns /connect and the content log on live and " +
-        "types /script debugger connect and /connect into the open world (needs cheats on); without the agent, or in a " +
-        "menu (inWorld false), manualSteps names the commands to type. ready means the script debugger is attached; " +
+        "runs /script debugger connect in the open world quietly (needs cheats on); /connect is typed in its chat only " +
+        "with connect: true. Without the agent, or in a menu (inWorld false), manualSteps names what to type. ready means the script debugger is attached; " +
         "helperNote says when the world lacks the helper pack (game_query, wait_until, game_events and scene_* need it) " +
         "and when game_log has no content-log file. The project's packs load only in a world that already lists them, " +
-        "after a rejoin. inputLock (default on): once sculkwire has the game (the world loaded, or right after attaching) " +
-        "it attaches the in-game agent and keeps the user's keyboard and mouse out of the game until game_stop releases " +
-        "it; the lock belongs to this process's connection, so it also ends if sculkwire exits or dies. F9 in the game " +
-        "hands control to the user and back (game_input_lock). " +
-        "With the lock on, the keyboard route (player_act input keyboard, game_input move or a middle click) is kept out " +
-        "too: pass inputLock auto or off to use it. When the lock cannot be set the launch still succeeds and lockNote says why.",
+        "after a rejoin. inputLock (default auto): the user's keyboard and mouse are kept out of the game only while " +
+        "sculkwire acts through the in-game agent (a tool call that sends input, the walk into the world, Save & Quit), " +
+        "and the user has full control between calls; F9 hands control back for the rest of a call. on keeps them out " +
+        "for the whole session until game_stop (released while a step in manualSteps is the user's), off never. The game " +
+        "never sees its window lose focus while sculkwire is attached, so its clicks work in the background and switching " +
+        "away does not pause it; all of this ends with this process's connection, even if sculkwire dies. While locked the " +
+        "keyboard route (player_act input keyboard, game_input move or a middle click) is kept out too. When the lock " +
+        "cannot be set the launch still succeeds and lockNote says why.",
       // Strict: a removed input (fresh, world, keep, copyFrom) is refused, never silently ignored.
       inputSchema: z.object({
         project: z.string().optional().describe("Add-on project or pack directory to activate in the world. For a Regolith project whose profile runs filters, the packs are what rgl last built (.regolith/tmp); sculkwire does not run rgl, so run `rgl run` first"),
@@ -309,7 +311,11 @@ export function register(server: McpServer): void {
         inputLock: z
           .enum(LOCK_MODES)
           .optional()
-          .describe("Input lock for this session (default on): on keeps the user's keyboard and mouse out of the game until game_stop or until this sculkwire process exits (F9 hands control over), auto locks only while a player_act action or play job runs, off sets nothing"),
+          .describe("Input lock (default auto): auto keeps the user's keyboard and mouse out only while sculkwire acts through the agent (each input tool call, the walk into the world, Save & Quit; F9 hands control back for the rest of a call); on keeps them out for the whole session until game_stop or until this sculkwire process exits; off never locks"),
+        connect: z
+          .boolean()
+          .optional()
+          .describe("When the game does not dial /connect by itself, type /connect in its chat (or, where sculkwire cannot type, ask the user in manualSteps) to attach the websocket channel. Default false: commands go through the script debugger, and nothing is typed in or asked for the user's chat"),
       }).strict(),
       outputSchema: statusSchema,
     },
@@ -329,7 +335,8 @@ export function register(server: McpServer): void {
           ...(a.fps ? { fps: a.fps } : {}),
           ...(a.worldWaitSeconds ? { timeoutMs: a.worldWaitSeconds * 1000 } : {}),
           ...(a.keepOnTimeout ? { keepOnTimeout: true } : {}),
-          inputLock: a.inputLock ?? "on",
+          inputLock: a.inputLock ?? "auto",
+          ...(a.connect ? { connect: true } : {}),
         });
         return ok(statusText(s), s);
       } catch (err) {
@@ -777,7 +784,9 @@ export function register(server: McpServer): void {
     },
     async (a) => {
       try {
-        if (await inputThroughUi(a)) return ok("done via engine", { done: true, route: "engine" });
+        // Through the agent the input holds the lock for this call only, so the user's own input cannot collide with it.
+        const viaUi = engine.attached ? await engine.locked(() => inputThroughUi(a)) : false;
+        if (viaUi) return ok("done via engine", { done: true, route: "engine" });
         let route: InputRoute;
         if (a.action === "key") {
           if (!a.keys) throw new Error("key needs `keys`");

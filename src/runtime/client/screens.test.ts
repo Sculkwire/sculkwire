@@ -201,6 +201,16 @@ interface FakeGameOptions {
   noQuitControl?: boolean;
   /** Pixels the list starts scrolled under the tab strip (the first row's tops hidden); each notch up moves it 60 px. */
   shift?: number;
+  /**
+   * What a double-click on the test world's tile does instead of opening it: `covers` puts a dialog over the Play
+   * screen (the World update one: the route stays, the tiles are hidden), `ignores` does nothing at all.
+   */
+  dialog?: "covers" | "ignores";
+  /**
+   * Once a world opens, the agent's UI stops answering and the log says nothing (as live on retail while it loads);
+   * the caller learns the world is in 5 s later (`inWorld`, the helper's ready print).
+   */
+  silentLoad?: boolean;
 }
 
 /**
@@ -224,6 +234,8 @@ class FakeGame {
   playClicks: { x: number; y: number }[] = [];
   /** Worlds opened, in order. */
   opened: string[] = [];
+  /** A dialog covers the Play screen (`dialog: covers` after the tile was clicked). */
+  dialogUp = false;
   readonly tiles: string[];
   readonly opts: FakeGameOptions;
   constructor(opts: FakeGameOptions) {
@@ -246,6 +258,7 @@ class FakeGame {
   }
   log(text: string): void {
     if (this.opts.quiet && /Created '|Destroyed '|world\.cheatsEnabled: /.test(text)) return;
+    if (this.opts.silentLoad && this.world !== undefined) return;
     const s = Math.floor(this.clock / 1000);
     const ms = String(this.clock % 1000).padStart(3, "0");
     this.pending += `${at(`12:00:${String(s % 60).padStart(2, "0")}:${ms}`, "GUI", text)}\n`;
@@ -270,7 +283,10 @@ class FakeGame {
     this.log("Player Spawned: Steve xuid: 1");
     this.screen = "world";
     this.world = id;
+    this.loadedAt = this.clock;
   }
+  /** When the world opened, on the fake clock (`silentLoad`). */
+  loadedAt = 0;
   near(x: number, y: number, target: { x: number; y: number }): boolean {
     return Math.abs(x - target.x) < 0.04 && Math.abs(y - target.y) < 0.04;
   }
@@ -332,6 +348,7 @@ class FakeGame {
       const slot = [...tiles.keys()].find((i) => this.near(x, y + this.shift / 668, LAYOUT.worldTile(i)));
       const id = slot === undefined ? undefined : tiles[slot];
       if (id === "LAN") this.joinedServer = true;
+      else if (id === "sculkwire-bridge" && this.opts.dialog) this.dialogUp ||= this.opts.dialog === "covers";
       else if (id) this.openWorld(id);
     } else if (this.screen === "pause" && this.near(x, y, LAYOUT.saveAndQuit)) {
       this.log("Destroyed 'pause_screen' screen in 0.4ms");
@@ -403,12 +420,15 @@ class FakeGame {
   }
   uiRoute(): UiRecovery {
     return {
-      screen: async () => ({
-        name: this.uiName(),
-        stack: [this.uiName()],
-        modal: false,
-        ...(this.screen === "play" && this.route ? { route: this.route } : {}),
-      }),
+      screen: async () => {
+        if (this.opts.silentLoad && this.world !== undefined) throw new Error("anchor_missing: ui.scene_name");
+        return {
+          name: this.uiName(),
+          stack: [this.uiName()],
+          modal: false,
+          ...(this.screen === "play" && this.route ? { route: this.route } : {}),
+        };
+      },
       controls: async () => this.uiControls(),
       press: async (name) => this.uiPress(name),
       key: async (keys) => {
@@ -444,8 +464,12 @@ class FakeGame {
       key: async (keys) => this.key(keys),
       ...(this.opts.noMouse ? {} : { click: async (x: number, y: number, count = 1) => this.click(x, y, count) }),
       ...(this.opts.ui ? { ui: () => this.uiRoute() } : {}),
-      screenshot: async (label) => ({ path: `/tmp/${label}.png`, png: this.screen === "play" ? playScreen(this.visible(), this.shift) : playScreen([]) }),
+      screenshot: async (label) => ({
+        path: `/tmp/${label}.png`,
+        png: this.screen === "play" && !this.dialogUp ? playScreen(this.visible(), this.shift) : playScreen([]),
+      }),
       alive: async () => true,
+      ...(this.opts.silentLoad ? { inWorld: () => this.world !== undefined && this.clock - this.loadedAt >= 5_000 } : {}),
       sleep: async (ms) => {
         this.clock += ms;
       },
@@ -694,6 +718,39 @@ describe("join recovery through the agent's UI", () => {
     expect(game.opened).toEqual([]);
     expect(result.scrolls).toBeGreaterThan(0);
     expect(result.foundByThumbnail).toBe(false);
+  });
+
+  it("stops at once, pressing nothing more, when a dialog covers the Play screen after the tile click", async () => {
+    const game = uiOnly({ start: "play", dialog: "covers" });
+    const result = await recoverJoin(game.io(), start);
+    expect(result).toMatchObject({ recovered: false, needsUser: true, stuck: "dialog" });
+    expect(result.reason).toMatch(/shows a dialog over it .* which sculkwire never confirms/);
+    // One double-click on the tile, and nothing after it: never Escape, Return or a press that could answer the dialog.
+    expect(game.inputs).toHaveLength(1);
+    expectTileClick(game.inputs[0], 2, true);
+    expect(game.opened).toEqual([]);
+    expect(game.clock).toBeLessThan(30_000);
+  });
+
+  it("waits out the agent's UI going quiet after the tile click as the world loading, presses nothing, and ends recovered", async () => {
+    const game = uiOnly({ start: "play", silentLoad: true });
+    const result = await recoverJoin(game.io(), start);
+    expect(result.recovered).toBe(true);
+    expect(game.opened).toEqual(["sculkwire-bridge"]);
+    // The tile's double-click is the only input: never an Escape that would open the loaded world's pause menu.
+    expect(game.inputs).toHaveLength(1);
+    expectTileClick(game.inputs[0], 2, true);
+    expect(result.steps.some((s) => s.includes("the world is loading"))).toBe(true);
+    expect(result.steps.some((s) => s.includes("stopped answering"))).toBe(false);
+  });
+
+  it("gives up after two clicks on a tile the game ignores, instead of clicking until the time limit", async () => {
+    const game = uiOnly({ start: "play", dialog: "ignores" });
+    const result = await recoverJoin(game.io(), start);
+    expect(result).toMatchObject({ recovered: false, needsUser: true, stuck: "ignored" });
+    expect(result.reason).toMatch(/double-clicked 2 times and the world did not open/);
+    expect(game.inputs.filter((i) => i.startsWith("ui:click"))).toHaveLength(2);
+    expect(game.clock).toBeLessThan(30_000);
   });
 
   it("selects the Worlds tab by its name, never presses or clicks another tab, and never clicks the tab strip", async () => {

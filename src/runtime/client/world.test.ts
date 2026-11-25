@@ -28,6 +28,19 @@ describe("scratch world", () => {
     await createWorld(target, { name: "bench", helper: false });
     await expect(readFile(join(world.dir, "db", "000001.ldb"))).rejects.toThrow();
   });
+
+  it("is written as a world of the installed game, so the game never asks to update it", async () => {
+    const target = { ...(await install()), version: "1.26.63.1" } as ClientInstall;
+    const world = await createWorld(target, { name: "bench", helper: false });
+    const root = readLevelDat(new Uint8Array(await readFile(join(world.dir, "level.dat")))).root;
+    const ints = (key: string): unknown[] => {
+      const value = root.get(key)?.value;
+      return value && typeof value === "object" && "items" in value ? value.items.map((i) => i.value) : [];
+    };
+    expect(root.get("WorldVersion")?.value).toBe(1);
+    expect(ints("lastOpenedWithVersion")).toEqual([1, 26, 63, 1, 0]);
+    expect(root.get("InventoryVersion")?.value).toBe("1.26.63");
+  });
 });
 
 describe("helper pack install", () => {

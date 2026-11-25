@@ -113,15 +113,14 @@ export class AgentInputProvider implements InputProvider {
    * `on` is a session lock on this provider's connection, not mode `on`: the agent drops it when the connection
    * closes, so a sculkwire process that dies never leaves the game locked, and the engine session declares it again
    * on its own reconnect. `auto` makes sure the mode is `auto` (the agent's default), which locks only while an
-   * action or play job runs.
+   * action or play job runs; `off` sets the mode off, so nothing locks. `releaseSessionLock` puts the earlier mode back.
    */
-  async sessionLock(mode: Exclude<LockMode, "off">): Promise<string | undefined> {
-    if (!this.#session.attached) {
-      try {
-        await this.attach();
-      } catch (e) {
-        return `the in-game agent could not be attached (${errorMessage(e)})`;
-      }
+  async sessionLock(mode: LockMode): Promise<string | undefined> {
+    // Attached already, this only refreshes the status and holds the focus.
+    try {
+      await this.attach();
+    } catch (e) {
+      return `the in-game agent could not be attached (${errorMessage(e)})`;
     }
     const lock = this.#session.lock;
     if (mode === "on") {
@@ -135,18 +134,18 @@ export class AgentInputProvider implements InputProvider {
     }
     const before = await lock.request();
     if (!before.ok) return `the agent did not report its lock (${before.message})`;
-    if (before.value.mode === "auto") return undefined;
-    const set = await lock.request("auto");
-    if (!set.ok) return `the agent refused mode auto (${set.message})`;
+    if (before.value.mode === mode) return undefined;
+    const set = await lock.request(mode);
+    if (!set.ok) return `the agent refused mode ${mode} (${set.message})`;
     // An `on` found here would lock with nobody to release it: never put that back.
     this.#restoreMode ??= before.value.mode === "on" ? "auto" : before.value.mode;
     return undefined;
   }
 
   /**
-   * End the session lock and put back a mode `sessionLock("auto")` changed, so the lock never outlives sculkwire's
-   * hold on the game. A mode `on` set some other way (game_input_lock) becomes `auto` too. Only while connected: a
-   * closed connection already released the session lock, and a stopped game needs nothing.
+   * End the session lock and put back a mode `sessionLock` changed, so the lock never outlives sculkwire's hold on the
+   * game. A mode `on` set some other way (game_input_lock) becomes `auto` too. Only while connected: a closed
+   * connection already released the session lock, and a stopped game needs nothing.
    */
   async releaseSessionLock(): Promise<void> {
     const lock = this.#session.lock;
@@ -157,9 +156,15 @@ export class AgentInputProvider implements InputProvider {
     if (mode !== undefined && mode !== lock.state?.mode) await lock.request(mode).catch(() => undefined);
   }
 
+  /**
+   * Attach the agent and hold the game's focus for this connection, like bedrock-mcp: the game never sees its window
+   * lose focus, so the agent's clicks work in the background and switching away never pauses it. The agent lets go of
+   * the focus when the connection closes. An older agent without the focus hold is used as it is.
+   */
   async attach(): Promise<void> {
     await this.#session.attach();
     await this.#watch();
+    if (!this.#session.lock.focusHeld) await this.#session.lock.focus(true).catch(() => undefined);
   }
 
   /**

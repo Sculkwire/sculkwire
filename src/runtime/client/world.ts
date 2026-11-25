@@ -38,7 +38,7 @@ export interface WorldOptions {
   /** Experiment toggles, e.g. `gametest` (Beta APIs). */
   experiments?: string[];
   seed?: bigint;
-  /** Game version for `lastOpenedWithVersion` (e.g. `1.26.60.30`). */
+  /** Game version for `lastOpenedWithVersion` and `InventoryVersion` (e.g. `1.26.60.30`); `createWorld` defaults it to the install's. */
   gameVersion?: string;
   /** Default `normal`, so hostile mobs exist (peaceful removes them). */
   difficulty?: Difficulty;
@@ -91,8 +91,14 @@ export function levelDatRoot(name: string, opts: Pick<WorldOptions, "experiments
   root.set("showcoordinates", byte(1));
   setSinglePlayer(root);
   root.set("LastPlayed", long(BigInt(Math.floor(Date.now() / 1000))));
+  // A world made by this game version: without `WorldVersion` 1 (the post-1.18 world height) and the game's own version
+  // the game takes the world for an old one and asks to update it ("makes your world both higher and deeper").
+  root.set("WorldVersion", int(1));
   const v = opts.gameVersion ? parseGameVersion(opts.gameVersion) : undefined;
-  if (v) root.set("lastOpenedWithVersion", intList([v.major, v.minor, v.patch, v.build ?? 0, 0]));
+  if (v) {
+    root.set("lastOpenedWithVersion", intList([v.major, v.minor, v.patch, v.build ?? 0, 0]));
+    root.set("InventoryVersion", str(`${v.major}.${v.minor}.${v.patch}`));
+  }
   root.set("MinimumCompatibleClientVersion", intList([1, 21, 0, 0, 0]));
   const exp: NbtCompound = new Map();
   for (const e of opts.experiments ?? []) exp.set(e, byte(1));
@@ -141,7 +147,8 @@ export async function createWorld(install: ClientInstall, opts: WorldOptions): P
   if (!levelId.startsWith(WORLD_PREFIX)) throw new Error(`refusing to write world folder ${levelId}`);
   await rm(dir, { recursive: true, force: true });
   await mkdir(join(dir, "db"), { recursive: true });
-  const root = levelDatRoot(name, opts);
+  const gameVersion = opts.gameVersion ?? install.version;
+  const root = levelDatRoot(name, { ...opts, ...(gameVersion ? { gameVersion } : {}) });
   await writeFile(join(dir, "level.dat"), writeLevelDat({ storageVersion: 10, rootName: "", root }));
   await writeFile(join(dir, "levelname.txt"), name);
   await activatePacks(install, dir, opts, true);

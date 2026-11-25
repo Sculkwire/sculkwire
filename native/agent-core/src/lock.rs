@@ -1,26 +1,34 @@
 //! The input lock: keeps the user's own keyboard, mouse and gamepad out of the game while the agent
 //! plays, and gives them back with F9.
 //!
-//! Four gates, each independent and each failing open:
+//! Three gates, each independent and each failing open:
 //!
 //! 1. **The window procedure** of the game's main window (the largest visible unowned top-level
-//!    window of this process) drops key, mouse and raw-input messages, and keeps focus-loss messages
-//!    from the game so it does not open its pause menu. Releases always pass; a lone release cannot
-//!    disturb anything. F9 is handled here and never reaches the game while the lock is wanted.
+//!    window of this process) drops key, mouse and raw-input messages. Releases always pass; a lone
+//!    release cannot disturb anything. F9 is handled here and never reaches the game while the lock
+//!    is wanted.
 //! 2. **The polled key-state APIs** (`GetAsyncKeyState`, `GetKeyState`, `GetKeyboardState`) are
 //!    replaced in the import tables of every input module that loads them, so keys that reach the
 //!    engine without a window message answer "not pressed". `GetCursorPos` holds still too.
 //! 3. **XInput** exports (`XInputGetState` and its ordinal-100 `Ex`) are hooked in place, reporting a
 //!    centred pad with a packet number the game has never seen, so a controller is neutral while
 //!    locked even though no window message carries it.
-//! 4. **The camera permission** of the local player follows the lock through the engine's own
-//!    `inputpermission` command, with an action-bar badge that says who has control.
+//!
+//! Once the lock has held a second an action-bar badge says who has control, cleared when it ends.
+//! The camera permission follows the lock only on request (`cameraGate`).
 //!
 //! `auto` (the default) locks while any connection declares an action running or holds a session
-//! lock (`session`, game_launch's lock for the whole time the host has the game); each connection
-//! owns one bit of `active` and one of `session`, both cleared when it disconnects, so a host that
-//! dies never leaves the lock on through them. A hook that cannot be installed leaves the user's
-//! input untouched: the lock degrades to fewer gates, never to a stuck keyboard.
+//! lock (`session`, game_launch's opt-in lock for the whole time the host has the game); each
+//! connection owns one bit of `active` and one of `session`, both cleared when it disconnects, so a
+//! host that dies never leaves the lock on through them. A hook that cannot be installed leaves the
+//! user's input untouched: the lock degrades to fewer gates, never to a stuck keyboard.
+//!
+//! **Focus** is held apart from the lock: while the lock holds, or while a connection holds focus
+//! (`focus`, a bit of its own, cleared on disconnect), the game's focus queries answer with its own
+//! window, a focus loss is kept from it (and replayed once nothing holds focus and the window is
+//! still behind), a background window is told once that it is active, and its cursor clip and mouse
+//! capture are skipped while it is behind, so the agent's clicks work in the background and
+//! switching away never pauses the game.
 
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -57,6 +65,15 @@ static FOCUS_DROPPED: AtomicBool = AtomicBool::new(false);
 static FOCUS_LOST: AtomicU32 = AtomicU32::new(0);
 static FOCUS_KEPT: AtomicU32 = AtomicU32::new(0);
 static DROPPED: AtomicU32 = AtomicU32::new(0);
+/// Focus held: the game was told its window is active while it was not the foreground window
+/// ([`give_focus`]); cleared when the release replays the loss.
+static FOCUS_GIVEN_NOW: AtomicBool = AtomicBool::new(false);
+/// How often the game was told its window is active.
+static FOCUS_GIVEN: AtomicU32 = AtomicU32::new(0);
+/// Cursor clips and mouse captures skipped while the game's window was in the background.
+static CURSOR_KEPT: AtomicU32 = AtomicU32::new(0);
+/// One bit per connection that holds the game's focus for its whole life (`input.lock {focus: true}`).
+static FOCUS_HOLD: AtomicU32 = AtomicU32::new(0);
 
 /// Shift presses seen per delivery path (`0` window message, `1` raw input) and whether the game
 /// window was the foreground window at that moment (`1`).
@@ -92,9 +109,12 @@ static FIND_AREA: AtomicI64 = AtomicI64::new(0);
 static CAMERA_PERMISSION: AtomicI32 = AtomicI32::new(-1);
 static CAMERA_AT: AtomicU64 = AtomicU64::new(0);
 static CAMERA_WORLD: AtomicBool = AtomicBool::new(false);
-/// The gate's failure is logged once per world; it is retried every second and an engine may refuse
-/// it for the whole session.
+/// The gate's failure is logged once per world. A command that ran and failed is sent again with
+/// backoff and stops after a few attempts, until the wanted permission changes or the world does.
 static CAMERA_FAILURE_LOGGED: AtomicBool = AtomicBool::new(false);
+static CAMERA_FAILURES: AtomicU32 = AtomicU32::new(0);
+/// The permission the gate last tried to set (-1 none): a new one starts with no failures.
+static CAMERA_WANT: AtomicI32 = AtomicI32::new(-1);
 /// Set by [`release_camera`]: the gate sets nothing more, so the unload's last word stands.
 static CAMERA_RELEASED: AtomicBool = AtomicBool::new(false);
 /// True while the gate's own command is in flight, which the release waits out.
@@ -103,6 +123,15 @@ static CAMERA_BUSY: AtomicBool = AtomicBool::new(false);
 /// Action-bar badge bookkeeping.
 static BADGE_AT: AtomicU64 = AtomicU64::new(0);
 static BADGE_SEQUENCE: AtomicU32 = AtomicU32::new(u32::MAX);
+/// Badges in a row that ran and failed since the last state change.
+static BADGE_FAILURES: AtomicU32 = AtomicU32::new(0);
+/// Since when (`tick_ms`) the lock or the user's hand-over stands, 0 while neither does.
+static BADGE_SINCE: AtomicU64 = AtomicU64::new(0);
+/// A badge was sent since the lock took hold: the release clears it from the action bar.
+static BADGE_SHOWN: AtomicBool = AtomicBool::new(false);
+/// The camera permission follows the lock only when asked (`input.lock {cameraGate: true}`): the
+/// lock already keeps the user's mouse motion out of the game's readings.
+static CAMERA_GATE: AtomicBool = AtomicBool::new(false);
 
 /* ------------------------------------------------------------------------------------------------
  * State machine
@@ -114,6 +143,11 @@ fn wanted() -> bool {
 
 fn nothing_held() -> bool {
     lockbits::nothing_held(MODE.load(Ordering::Acquire), ACTIVE.load(Ordering::Acquire), SESSION.load(Ordering::Acquire))
+}
+
+/// The game is kept unaware of losing focus: while the lock holds, or while a connection holds focus.
+fn held() -> bool {
+    lockbits::focus_held(on(), FOCUS_HOLD.load(Ordering::Acquire))
 }
 
 /// True while the user's input is being kept out of the game.
@@ -131,16 +165,23 @@ pub fn sequence() -> u32 {
     SEQUENCE.load(Ordering::Acquire)
 }
 
-fn changed(was_locked: bool, by_user: bool) {
+fn changed(was_held: bool, by_user: bool) {
     BY_USER.store(by_user, Ordering::Release);
     SEQUENCE.fetch_add(1, Ordering::AcqRel);
-    if was_locked && !on() {
+    focus_changed(was_held);
+}
+
+/// Nothing holds the game's focus any more: let it see the loss it was kept from.
+fn focus_changed(was_held: bool) {
+    if was_held && !held() {
         replay_focus_loss();
     }
 }
 
 /// Lets the game see the focus loss the lock hid from it.
 fn replay_focus_loss() {
+    // The next lock tells the game again that its window is active.
+    FOCUS_GIVEN_NOW.store(false, Ordering::Release);
     let window = WINDOW.load(Ordering::Acquire);
     if !FOCUS_DROPPED.load(Ordering::Acquire) || window == 0 {
         return;
@@ -168,7 +209,7 @@ fn f9(down: bool) -> bool {
         return false;
     }
     if down && !F9_DOWN.load(Ordering::Acquire) {
-        let was = on();
+        let was = held();
         BY_USER.store(!BY_USER.load(Ordering::Acquire), Ordering::Release);
         if BY_USER.load(Ordering::Acquire) {
             // The agent is not playing any more: drop what it held.
@@ -275,32 +316,31 @@ unsafe extern "system" fn wndproc(window: win::Hwnd, message: u32, wparam: win::
         if message == win::WM_ACTIVATE || message == win::WM_KILLFOCUS || (message == win::WM_ACTIVATEAPP && key == 0) {
             FOCUS_LOST.fetch_add(1, Ordering::Relaxed);
         }
-        if on() {
-            let drop = if message == win::WM_ACTIVATE {
-                2 // WA_INACTIVE: the active case was handled above
-            } else if message == win::WM_ACTIVATEAPP {
-                if key != 0 {
-                    0
-                } else {
-                    2
-                }
-            } else if message == win::WM_KILLFOCUS {
-                2
-            } else if WM_MOUSE_DROP.contains(&message) {
-                1
-            } else {
+        let drop = if message == win::WM_ACTIVATE {
+            2 // WA_INACTIVE: the active case was handled above
+        } else if message == win::WM_ACTIVATEAPP {
+            if key != 0 {
                 0
-            };
-            if drop == 2 {
-                // A focus loss would open the pause menu and stop the agent's own input.
-                FOCUS_DROPPED.store(true, Ordering::Release);
-                FOCUS_KEPT.fetch_add(1, Ordering::Relaxed);
-                return 0;
+            } else {
+                2
             }
-            if drop == 1 {
-                DROPPED.fetch_add(1, Ordering::Relaxed);
-                return 0;
-            }
+        } else if message == win::WM_KILLFOCUS {
+            2
+        } else if WM_MOUSE_DROP.contains(&message) {
+            1
+        } else {
+            0
+        };
+        if drop == 2 && held() {
+            // A focus loss would open the pause menu and stop the agent's own input: withheld while
+            // the lock holds or the host holds focus, and replayed when nothing does.
+            FOCUS_DROPPED.store(true, Ordering::Release);
+            FOCUS_KEPT.fetch_add(1, Ordering::Relaxed);
+            return 0;
+        }
+        if drop == 1 && on() {
+            DROPPED.fetch_add(1, Ordering::Relaxed);
+            return 0;
         }
     }
 
@@ -456,6 +496,108 @@ unsafe extern "system" fn hook_get_cursor_pos(point: *mut i32) -> win::Bool {
     ok
 }
 
+/* ------------------------------------------------------------------------------------------------
+ * Focus while locked: the game's focus queries and its cursor clip
+ * ---------------------------------------------------------------------------------------------- */
+
+type GetWindowFn = unsafe extern "system" fn() -> win::Hwnd;
+type ClipCursorFn = unsafe extern "system" fn(*const win::Rect) -> win::Bool;
+type SetCaptureFn = unsafe extern "system" fn(win::Hwnd) -> win::Hwnd;
+
+static ORIGINAL_GET_FOCUS: AtomicUsize = AtomicUsize::new(0);
+static ORIGINAL_GET_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static ORIGINAL_GET_FOREGROUND: AtomicUsize = AtomicUsize::new(0);
+static ORIGINAL_CLIP_CURSOR: AtomicUsize = AtomicUsize::new(0);
+static ORIGINAL_SET_CAPTURE: AtomicUsize = AtomicUsize::new(0);
+
+/// The game's window is not the real foreground window (our own `user32` import is never patched).
+fn background() -> bool {
+    let window = WINDOW.load(Ordering::Acquire);
+    // SAFETY: no invariants; reads the foreground window of this desktop.
+    window != 0 && unsafe { win::GetForegroundWindow() } != window
+}
+
+/// A focus query of the game: answered with the game's own window while the lock holds, so a game in
+/// the background behaves as the focused one for the agent's input; otherwise the system's answer.
+unsafe fn focus_query(original: &AtomicUsize) -> win::Hwnd {
+    let window = WINDOW.load(Ordering::Acquire);
+    if lockbits::spoof_focus(held(), window != 0) {
+        return window;
+    }
+    match core::mem::transmute::<usize, Option<GetWindowFn>>(original.load(Ordering::Acquire)) {
+        Some(original) => original(),
+        None => 0,
+    }
+}
+
+unsafe extern "system" fn hook_get_focus() -> win::Hwnd {
+    focus_query(&ORIGINAL_GET_FOCUS)
+}
+
+unsafe extern "system" fn hook_get_active_window() -> win::Hwnd {
+    focus_query(&ORIGINAL_GET_ACTIVE)
+}
+
+unsafe extern "system" fn hook_get_foreground_window() -> win::Hwnd {
+    focus_query(&ORIGINAL_GET_FOREGROUND)
+}
+
+/// The game clips the cursor to its window when it captures the mouse for mouse look: skipped while
+/// the lock holds and the window is in the background, where it would confine the user's real pointer.
+unsafe extern "system" fn hook_clip_cursor(rect: *const win::Rect) -> win::Bool {
+    if lockbits::keep_cursor_free(held(), background(), rect.is_null()) {
+        CURSOR_KEPT.fetch_add(1, Ordering::Relaxed);
+        return 1;
+    }
+    match core::mem::transmute::<usize, Option<ClipCursorFn>>(ORIGINAL_CLIP_CURSOR.load(Ordering::Acquire)) {
+        Some(original) => original(rect),
+        None => 0,
+    }
+}
+
+/// Its mouse capture goes with the clip, for the same reason.
+unsafe extern "system" fn hook_set_capture(window: win::Hwnd) -> win::Hwnd {
+    if lockbits::keep_cursor_free(held(), background(), false) {
+        CURSOR_KEPT.fetch_add(1, Ordering::Relaxed);
+        return 0;
+    }
+    match core::mem::transmute::<usize, Option<SetCaptureFn>>(ORIGINAL_SET_CAPTURE.load(Ordering::Acquire)) {
+        Some(original) => original(window),
+        None => 0,
+    }
+}
+
+/// While the lock holds, tell a game whose window is in the background that it is active, once per
+/// lock: a game started behind another window was told at launch that it lost focus (before any lock
+/// could withhold it) and then ignores the agent's clicks on its menus. The messages go straight to the
+/// game's own procedure, on the window's thread; the unlock replays the loss ([`replay_focus_loss`]).
+fn give_focus() {
+    let window = WINDOW.load(Ordering::Acquire);
+    if !lockbits::give_focus(held(), window != 0, !background(), FOCUS_GIVEN_NOW.load(Ordering::Acquire)) {
+        return;
+    }
+    let previous = PREVIOUS.load(Ordering::Acquire);
+    // SAFETY: the previous procedure of the window this process subclassed, called on its own thread
+    // with plain activation messages that carry no pointers.
+    let Some(procedure) = (unsafe { core::mem::transmute::<usize, Option<win::WndProc>>(previous) }) else {
+        return;
+    };
+    if procedure as usize == wndproc as *const () as usize {
+        return;
+    }
+    FOCUS_GIVEN_NOW.store(true, Ordering::Release);
+    unsafe {
+        procedure(window, win::WM_ACTIVATEAPP, 1, 0);
+        procedure(window, win::WM_ACTIVATE, 1, 0); // WA_ACTIVE
+        procedure(window, win::WM_SETFOCUS, 0, 0);
+    }
+    // The window is still in the background: the unlock tells the game it lost focus.
+    FOCUS_DROPPED.store(true, Ordering::Release);
+    if FOCUS_GIVEN.fetch_add(1, Ordering::Relaxed) == 0 {
+        log::line("input lock: the game window is in the background; told the game it is active while locked");
+    }
+}
+
 /// Puts back everything the lock patched: the window procedure and the polled key-state slots.
 ///
 /// The XInput hooks are inline hooks and are restored by [`crate::hook::remove_all`], which knows
@@ -474,8 +616,28 @@ pub fn remove() -> (usize, usize) {
         }
     }
     // The key-state slots: find each name again and put the original back.
-    const NAMES: [&str; 4] = ["GetAsyncKeyState", "GetKeyState", "GetKeyboardState", "GetCursorPos"];
-    let originals = [&ORIGINAL_ASYNC, &ORIGINAL_KEY_STATE, &ORIGINAL_KEYBOARD_STATE, &ORIGINAL_CURSOR_POS];
+    const NAMES: [&str; 9] = [
+        "GetAsyncKeyState",
+        "GetKeyState",
+        "GetKeyboardState",
+        "GetCursorPos",
+        "GetFocus",
+        "GetActiveWindow",
+        "GetForegroundWindow",
+        "ClipCursor",
+        "SetCapture",
+    ];
+    let originals = [
+        &ORIGINAL_ASYNC,
+        &ORIGINAL_KEY_STATE,
+        &ORIGINAL_KEYBOARD_STATE,
+        &ORIGINAL_CURSOR_POS,
+        &ORIGINAL_GET_FOCUS,
+        &ORIGINAL_GET_ACTIVE,
+        &ORIGINAL_GET_FOREGROUND,
+        &ORIGINAL_CLIP_CURSOR,
+        &ORIGINAL_SET_CAPTURE,
+    ];
     let mut restored = 0usize;
     for (name, original) in NAMES.iter().zip(originals) {
         let address = original.swap(0, Ordering::AcqRel);
@@ -500,16 +662,23 @@ pub fn remove() -> (usize, usize) {
     (window, previous)
 }
 
-/// Points the `user32` key-state import slots of `module` at the wrappers. Returns how many slots
+/// Points the lock's `user32` import slots of `module` at the wrappers: the polled key state, the
+/// cursor position (`cursor`: GameInput's module), the focus queries, and the cursor clip and mouse
+/// capture (`main`: the game's own module, the one that captures the mouse). Returns how many slots
 /// were patched.
 ///
 /// The walk itself is [`crate::import`]'s; this only says which names belong to the lock.
-fn patch_key_state_imports(module: win::Hmodule, cursor: bool) -> u32 {
-    let wanted: [(&str, usize, &AtomicUsize, bool); 4] = [
+fn patch_key_state_imports(module: win::Hmodule, cursor: bool, main: bool) -> u32 {
+    let wanted: [(&str, usize, &AtomicUsize, bool); 9] = [
         ("GetAsyncKeyState", hook_get_async_key_state as *const () as usize, &ORIGINAL_ASYNC, true),
         ("GetKeyState", hook_get_key_state as *const () as usize, &ORIGINAL_KEY_STATE, true),
         ("GetKeyboardState", hook_get_keyboard_state as *const () as usize, &ORIGINAL_KEYBOARD_STATE, true),
         ("GetCursorPos", hook_get_cursor_pos as *const () as usize, &ORIGINAL_CURSOR_POS, cursor),
+        ("GetFocus", hook_get_focus as *const () as usize, &ORIGINAL_GET_FOCUS, true),
+        ("GetActiveWindow", hook_get_active_window as *const () as usize, &ORIGINAL_GET_ACTIVE, true),
+        ("GetForegroundWindow", hook_get_foreground_window as *const () as usize, &ORIGINAL_GET_FOREGROUND, true),
+        ("ClipCursor", hook_clip_cursor as *const () as usize, &ORIGINAL_CLIP_CURSOR, main),
+        ("SetCapture", hook_set_capture as *const () as usize, &ORIGINAL_SET_CAPTURE, main),
     ];
     let mut patched = 0u32;
     for (name, replacement, original, wanted) in wanted {
@@ -553,7 +722,7 @@ fn install_key_state_hooks() {
         if IAT_DONE.load(Ordering::Acquire) & bit != 0 || *module == 0 {
             continue;
         }
-        let patched = patch_key_state_imports(*module, index == 0);
+        let patched = patch_key_state_imports(*module, index == 0, index == 3);
         IAT_DONE.fetch_or(bit, Ordering::AcqRel);
         log::fmt(format_args!("input lock: key-state imports module {index} slots={patched}"));
     }
@@ -699,13 +868,16 @@ fn pad_hooked() -> u32 {
 
 /// The camera gate: the local player's camera input permission follows the lock, so the user's mouse
 /// look cannot fight the agent's view. A world change resets the state, so its first frame sets it
-/// again; a failed command is retried once a second.
+/// again. A command that was not attempted (the world or the command path is not ready) is tried again
+/// every second; one that ran and failed backs off and stops ([`lockbits::retry_after_ms`]), so the
+/// player never sees it repeated.
 fn camera_gate(core: &'static Core, locked: bool, now: u64) {
     let in_world = core.engine().in_world();
     if in_world != CAMERA_WORLD.load(Ordering::Acquire) {
         CAMERA_WORLD.store(in_world, Ordering::Release);
         CAMERA_PERMISSION.store(-1, Ordering::Release);
         CAMERA_FAILURE_LOGGED.store(false, Ordering::Release);
+        CAMERA_FAILURES.store(0, Ordering::Release);
     }
     if !in_world {
         return;
@@ -714,7 +886,16 @@ fn camera_gate(core: &'static Core, locked: bool, now: u64) {
         return;
     }
     let want = i32::from(locked);
-    if CAMERA_PERMISSION.load(Ordering::Acquire) == want || now.saturating_sub(CAMERA_AT.load(Ordering::Relaxed)) < 1000 {
+    if CAMERA_PERMISSION.load(Ordering::Acquire) == want {
+        return;
+    }
+    if CAMERA_WANT.swap(want, Ordering::AcqRel) != want {
+        CAMERA_FAILURES.store(0, Ordering::Release);
+    }
+    let Some(wait) = lockbits::retry_after_ms(CAMERA_FAILURES.load(Ordering::Acquire)) else {
+        return;
+    };
+    if now.saturating_sub(CAMERA_AT.load(Ordering::Relaxed)) < wait.max(1000) {
         return;
     }
     CAMERA_AT.store(now, Ordering::Release);
@@ -725,38 +906,65 @@ fn camera_gate(core: &'static Core, locked: bool, now: u64) {
     match outcome {
         Ok(()) => {
             CAMERA_PERMISSION.store(want, Ordering::Release);
+            CAMERA_FAILURES.store(0, Ordering::Release);
             log::fmt(format_args!("input lock: camera permission {want}"));
         }
         Err(error) => {
+            if attempted(&error) {
+                CAMERA_FAILURES.fetch_add(1, Ordering::AcqRel);
+            }
             if !CAMERA_FAILURE_LOGGED.swap(true, Ordering::AcqRel) {
-                log::fmt(format_args!("input lock: camera permission failed: {} (retried every second, logged once per world)", error.message));
+                log::fmt(format_args!("input lock: camera permission failed: {} (logged once per world)", error.message));
             }
         }
     }
 }
 
-/// The action-bar badge, refreshed after every state change and every two seconds.
+/// The command ran (or may have) and failed: not a world, command path or origin that is not ready,
+/// which the quiet path answers before it sends anything.
+fn attempted(error: &RpcError) -> bool {
+    !matches!(error.code, crate::engine::ANCHOR_MISSING | crate::engine::NOT_IN_WORLD)
+}
+
+/// The action-bar badge, sent at every state change and again every [`lockbits::BADGE_REFRESH_MS`]
+/// while it stands, just often enough to stay visible. A badge that ran and failed backs off and stops
+/// until the next state change.
 fn badge(core: &'static Core, locked: bool, user: bool, now: u64) {
     if !locked && !user {
         return;
     }
-    if BADGE_SEQUENCE.load(Ordering::Acquire) == sequence() && now.saturating_sub(BADGE_AT.load(Ordering::Relaxed)) < 2000 {
+    let fresh = BADGE_SEQUENCE.load(Ordering::Acquire) != sequence();
+    if fresh {
+        BADGE_FAILURES.store(0, Ordering::Release);
+    }
+    let Some(wait) = lockbits::retry_after_ms(BADGE_FAILURES.load(Ordering::Acquire)) else {
+        return;
+    };
+    if !fresh && now.saturating_sub(BADGE_AT.load(Ordering::Relaxed)) < wait.max(lockbits::BADGE_REFRESH_MS) {
         return;
     }
     if !core.engine().in_world() {
         return;
     }
-    // A failure is retried with the refresh; it is logged once per state change, not every two seconds.
-    let fresh = BADGE_SEQUENCE.swap(sequence(), Ordering::AcqRel) != sequence();
+    BADGE_SEQUENCE.store(sequence(), Ordering::Release);
     BADGE_AT.store(now, Ordering::Release);
     let text = if locked {
         "/title @s actionbar \u{a7}esculkwire is playing \u{b7} your input is locked \u{b7} F9 to take over"
     } else {
         "/title @s actionbar \u{a7}ayou have control \u{b7} F9 to give it back"
     };
-    if let Err(error) = core.quiet_command(text) {
-        if fresh {
-            log::fmt(format_args!("input lock: badge failed: {} (retried every two seconds)", error.message));
+    match core.quiet_command(text) {
+        Ok(()) => {
+            BADGE_FAILURES.store(0, Ordering::Release);
+            BADGE_SHOWN.store(true, Ordering::Release);
+        }
+        Err(error) => {
+            if attempted(&error) {
+                BADGE_FAILURES.fetch_add(1, Ordering::AcqRel);
+            }
+            if fresh {
+                log::fmt(format_args!("input lock: badge failed: {} (sent again with backoff)", error.message));
+            }
         }
     }
 }
@@ -792,24 +1000,53 @@ pub fn frame(core: &'static Core) {
     install();
     install_key_state_hooks();
     install_pad_hooks();
+    give_focus();
     let locked = on();
     let user = BY_USER.load(Ordering::Acquire) && wanted();
     let now = win::tick_ms();
-    camera_gate(core, locked, now);
-    badge(core, locked, user, now);
+    // The camera permission follows the lock only when asked for; a camera it disabled is enabled again
+    // once the gate is turned off.
+    let gate = CAMERA_GATE.load(Ordering::Acquire);
+    if gate || CAMERA_PERMISSION.load(Ordering::Acquire) == 1 {
+        camera_gate(core, locked && gate, now);
+    }
+    // The badge only once the lock (or the user's hand-over) has stood a second, so a short action
+    // leaves no trace; cleared from the action bar when it ends.
+    if locked || user {
+        if BADGE_SINCE.load(Ordering::Acquire) == 0 {
+            BADGE_SINCE.store(now.max(1), Ordering::Release);
+        }
+        if lockbits::badge_due(BADGE_SINCE.load(Ordering::Acquire), now) {
+            badge(core, locked, user, now);
+        }
+    } else {
+        BADGE_SINCE.store(0, Ordering::Release);
+        if BADGE_SHOWN.load(Ordering::Acquire) && core.engine().in_world() {
+            BADGE_SHOWN.store(false, Ordering::Release);
+            // A new badge starts fresh: the next lock sends it at once after its delay.
+            BADGE_SEQUENCE.store(u32::MAX, Ordering::Release);
+            if let Err(error) = core.quiet_command("/title @s actionbar \u{a7}r") {
+                log::fmt(format_args!("input lock: badge not cleared: {}", error.message));
+            }
+        }
+    }
 }
 
 /* ------------------------------------------------------------------------------------------------
  * Requests
  * ---------------------------------------------------------------------------------------------- */
 
-/// `input.lock {mode?: "on"|"off"|"auto", active?: bool, session?: bool}`; no params reads the state.
-/// `active` and `session` belong to the calling connection (bit `conn`) and end with it. `on` and
-/// `off` take control back from the user.
+/// `input.lock {mode?: "on"|"off"|"auto", active?: bool, session?: bool, focus?: bool, cameraGate?: bool}`;
+/// no params reads the state. `active`, `session` and `focus` belong to the calling connection (bit
+/// `conn`) and end with it. `on` and `off` take control back from the user. `focus` holds the game's
+/// focus for the connection without locking anything; `cameraGate` makes the camera permission follow
+/// the lock (off by default).
 pub fn request(conn: usize, params: &Value) -> Result<Value, RpcError> {
     let mode = params.get("mode").and_then(Value::as_str);
     let active = params.get("active").and_then(Value::as_bool);
     let session = params.get("session").and_then(Value::as_bool);
+    let focus = params.get("focus").and_then(Value::as_bool);
+    let camera = params.get("cameraGate").and_then(Value::as_bool);
     let mut set_mode = -1i32;
     if let Some(mode) = mode {
         set_mode = match mode {
@@ -822,14 +1059,34 @@ pub fn request(conn: usize, params: &Value) -> Result<Value, RpcError> {
     if params.get("mode").is_some() && mode.is_none() {
         return Err(RpcError::invalid_params("mode must be a string"));
     }
-    if params.get("active").is_some() && active.is_none() {
-        return Err(RpcError::invalid_params("active must be a boolean"));
+    for (name, value) in [("active", active), ("session", session), ("focus", focus), ("cameraGate", camera)] {
+        if params.get(name).is_some() && value.is_none() {
+            return Err(RpcError::invalid_params(match name {
+                "active" => "active must be a boolean",
+                "session" => "session must be a boolean",
+                "focus" => "focus must be a boolean",
+                _ => "cameraGate must be a boolean",
+            }));
+        }
     }
-    if params.get("session").is_some() && session.is_none() {
-        return Err(RpcError::invalid_params("session must be a boolean"));
+    if let Some(camera) = camera {
+        CAMERA_GATE.store(camera, Ordering::Release);
+        SEQUENCE.fetch_add(1, Ordering::AcqRel);
+    }
+    if let Some(focus) = focus {
+        // Focus alone never touches who has control.
+        let was = held();
+        let bit = lockbits::bit(conn);
+        if focus {
+            FOCUS_HOLD.fetch_or(bit, Ordering::AcqRel);
+        } else {
+            FOCUS_HOLD.fetch_and(!bit, Ordering::AcqRel);
+        }
+        SEQUENCE.fetch_add(1, Ordering::AcqRel);
+        focus_changed(was);
     }
     if set_mode >= 0 || active.is_some() || session.is_some() {
-        let was = on();
+        let was = held();
         if set_mode >= 0 {
             if set_mode != MODE_AUTO {
                 BY_USER.store(false, Ordering::Release);
@@ -871,15 +1128,16 @@ pub fn focus(params: &Value) -> Result<Value, RpcError> {
     Ok(json())
 }
 
-/// The connection closed: its `active` and `session` bits end with it.
+/// The connection closed: its `active`, `session` and `focus` bits end with it.
 pub fn connection_closed(conn: usize) {
     let bit = lockbits::bit(conn);
-    if (ACTIVE.load(Ordering::Acquire) | SESSION.load(Ordering::Acquire)) & bit == 0 {
+    if (ACTIVE.load(Ordering::Acquire) | SESSION.load(Ordering::Acquire) | FOCUS_HOLD.load(Ordering::Acquire)) & bit == 0 {
         return;
     }
-    let was = on();
+    let was = held();
     ACTIVE.fetch_and(!bit, Ordering::AcqRel);
     SESSION.fetch_and(!bit, Ordering::AcqRel);
+    FOCUS_HOLD.fetch_and(!bit, Ordering::AcqRel);
     if nothing_held() {
         BY_USER.store(false, Ordering::Release);
     }
@@ -900,10 +1158,16 @@ pub fn json() -> Value {
         "user": user_has_control(),
         "active": ACTIVE.load(Ordering::Acquire) != 0,
         "session": SESSION.load(Ordering::Acquire) != 0,
+        // A connection holds the game's focus (the game never sees it lost), and whether the camera gate is on.
+        "focusHeld": FOCUS_HOLD.load(Ordering::Acquire) != 0,
+        "cameraGate": CAMERA_GATE.load(Ordering::Acquire),
         "window": WINDOW.load(Ordering::Acquire) != 0,
         "dropped": DROPPED.load(Ordering::Relaxed),
         "focusLost": FOCUS_LOST.load(Ordering::Relaxed),
         "focusKept": FOCUS_KEPT.load(Ordering::Relaxed),
+        // The lock told a game in the background that it is active, and skipped its cursor clips.
+        "focusGiven": FOCUS_GIVEN.load(Ordering::Relaxed),
+        "cursorKept": CURSOR_KEPT.load(Ordering::Relaxed),
         // `focused` is the composed view; the two parts are reported as well.
         "focused": APP_FOCUSED.load(Ordering::Relaxed) && FOREGROUND.load(Ordering::Relaxed),
         "appFocused": APP_FOCUSED.load(Ordering::Relaxed),

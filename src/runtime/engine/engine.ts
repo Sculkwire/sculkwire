@@ -568,11 +568,8 @@ export class EngineSession {
   /** The client `stream.subscribe` ran on, and at what interval. A new connection needs a new subscription. */
   #subscribed: { client: AgentClient; every: number; off: () => void } | undefined;
   #lastTick: { at: number; tick: EngineTick } | undefined;
-  /** The input lock. Its state follows `input.lock` answers and the DLL's `lock` notifications. */
-  readonly lock = new InputLock(
-    (params) => this.#call("input.lock", params),
-    () => this.#ensureCommandOrigin(),
-  );
+  /** The input lock. Its state follows `input.lock` answers and the DLL's `lock` notifications. Turning it on types nothing. */
+  readonly lock = new InputLock((params) => this.#call("input.lock", params));
   /** The host focus this process watches (`focus.ts`, driven by `runtime/client/agentprovider.ts`), or undefined when it watches none. */
   #hostFocused: boolean | undefined;
   /**
@@ -591,6 +588,20 @@ export class EngineSession {
   /** True while a connected agent socket exists. */
   get attached(): boolean {
     return this.#client?.connected === true;
+  }
+
+  /**
+   * Run `body` while this session holds the input lock (`auto` locks for it): the user's keyboard and mouse are kept
+   * out for this call only, F9 hands control back for the rest of it, and the lock is let go at the end either way. A
+   * lock that cannot be declared (no agent, an older one) lets the body run unlocked.
+   */
+  async locked<T>(body: () => Promise<T>): Promise<T> {
+    const release = await this.lock.hold();
+    try {
+      return await body();
+    } finally {
+      await release();
+    }
   }
 
   /**
@@ -716,14 +727,15 @@ export class EngineSession {
    * The agent replays the origin of a real player command, so until the player has run one in this world it answers
    * -32001 `command.origin` (or `command.commands`). Then this types one harmless line (`PRIME_LINE`) in chat itself,
    * its output kept out of chat by the agent (`command.prime`; see #typeInChat), and runs the requested command once
-   * the origin is captured. A line over `MAX_COMMAND_CHARS` is refused: the game kicks the player for one.
+   * the origin is captured. A line over `MAX_COMMAND_CHARS` is refused: the game kicks the player for one. `quiet`
+   * keeps the command's own output out of chat.
    */
-  async command(command: string): Promise<EngineResult<EngineCommandResult>> {
+  async command(command: string, opts: { quiet?: boolean } = {}): Promise<EngineResult<EngineCommandResult>> {
     if (/[\r\n]/.test(command)) return invalid("a command cannot contain a newline");
     const line = command.trim().replace(/^\//, "");
     if (!line) return invalid("a command cannot be empty");
     if (commandTooLong(line)) return invalid(COMMAND_TOO_LONG);
-    const run = () => this.#call<EngineCommandResult>("command", { command: line });
+    const run = () => this.#call<EngineCommandResult>("command", { command: line, ...(opts.quiet ? { quiet: true } : {}) });
     const first = await run();
     if (!needsOrigin(first)) return first;
     const primed = await this.#typeInChat(PRIME_LINE, true);
@@ -794,18 +806,6 @@ export class EngineSession {
       if (now.ok && now.value.name === CHAT_SCREEN) await this.uiKey("Escape");
     }
     return { ok: true, value: true };
-  }
-
-  /**
-   * Makes sure the agent has a player command of this world to replay before the lock turns on: its camera gate and
-   * badge are quiet commands, which the agent only attempts with that origin. A gate that already ran in this world
-   * (`camera` reported) needs nothing; otherwise one quiet no-op command runs, and the origin is primed when it is
-   * missing. Outside a world it does nothing.
-   */
-  async #ensureCommandOrigin(): Promise<void> {
-    if (this.lock.state?.camera) return;
-    const result = await this.#call("command", { command: PRIME_LINE, quiet: true }, { timeoutMs: INPUT_TIMEOUT_MS });
-    if (needsOrigin(result)) await this.#typeInChat(PRIME_LINE, true);
   }
 
   /** Polls `ui.screen` until `test` holds, for at most `PRIME_SCREEN_MS`. */

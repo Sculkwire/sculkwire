@@ -79,7 +79,7 @@ import { Staleness, streamEntities, streamEntity, TickClock, type StreamedEntiti
 import { horizontalDistance } from "./geometry.ts";
 import { PlayerController } from "./player.ts";
 import type { EntityInfo, Impact, Loadout, PlayerState, PlayerWorld, RespawnOutcome } from "./types.ts";
-import { inputProvider, NO_INPUT_PROVIDER, type InputLockStatus } from "./inputprovider.ts";
+import { inputProvider, NO_INPUT_PROVIDER, withInputLock, type InputLockStatus } from "./inputprovider.ts";
 import type { LockMode } from "../engine/lock.ts";
 import { HELPER_MARK, isReplyTo, parseReply, queryCommand } from "./helperprotocol.ts";
 import { pngSize, readShot } from "./png.ts";
@@ -131,6 +131,8 @@ const WORLD_NOT_LOADED = "the world has not loaded yet";
 const START_YOURSELF = "start Minecraft yourself";
 /** Start of the manual steps the bridge leaves when it could not walk into the world by itself. */
 const OPEN_YOURSELF = "open the world yourself";
+/** The step when a tile click left the Play screen up: a dialog only the user may answer (`stuck` in screens.ts). */
+const WORLD_DIALOG = "the game shows a dialog over the Play screen";
 /** How long the game sits on the start or Play screen, no world opening, before the bridge walks into the world itself. */
 const AUTO_ENTER_IDLE_MS = 6_000;
 /** At most one walk into the world per this long, and this many in all: an input the user makes is not fought. */
@@ -263,6 +265,9 @@ interface AutoEnter {
 /** A wait in `start` ran out: the game process or the world did not come up in time. */
 export class WaitTimeout extends Error {}
 
+/** The world wait handed a step to the user (`#handOver`): a foreground launch returns and keeps waiting in the background. */
+class NeedsUser extends Error {}
+
 /**
  * A helper pack query that answered `ok: false`. `reason` is the helper's own machine-readable label when it sent one
  * (`no_container` for a block that has none), so a caller can tell a bad request from a broken pack.
@@ -392,12 +397,18 @@ export interface BridgeStartOptions {
    */
   attach?: boolean;
   /**
-   * The input lock while sculkwire has the game: once a launched game reached its world, or right after attaching to a
-   * game the user opened, the input provider is attached when it is not yet and the lock is set to this mode until
-   * `stop` puts the earlier mode back. Fails open: `lockNote` says why it is not set. Omitted or `off`: nothing is set
-   * (game_launch passes `on` by default; the bench and the CLI set nothing).
+   * The input lock for this session. `auto` (game_launch's default): the lock holds only while sculkwire acts through
+   * the agent (a tool call that sends input, the walk into the world, Save & Quit) and the user has full control
+   * between those. `on`: a session lock from the moment sculkwire has the game until `stop`, released while a step is
+   * the user's (`#handOver`). `off`: the agent's mode is set to off for the session, so nothing locks. `stop` puts the
+   * earlier mode back. Fails open: `lockNote` says why it is not set. Omitted: nothing is set (the bench and the CLI).
    */
   inputLock?: LockMode;
+  /**
+   * A game the user opened: type `/connect` in its chat to attach the websocket channel (default false: commands go
+   * through the script debugger, and nothing is typed in the user's chat).
+   */
+  connect?: boolean;
 }
 
 /** How the game reached the test world for this launch, for `entry()`. */
@@ -700,6 +711,14 @@ export class ClientBridge {
   #inputLock?: LockMode;
   /** Why `#inputLock` could not be applied. */
   #lockNote?: string;
+  /** `#lockInput` ran for the newest `start` (set or failed): it runs once, at the first point sculkwire has the agent. */
+  #lockTried = false;
+  /** The session lock `#lockInput` set is held now (released by `#handOver` and `stop`). */
+  #lockHeld = false;
+  /** The step in the game handed to the user (`#handOver`): no walk or click until sculkwire has the game back. */
+  #userStep?: string;
+  /** game_launch `connect`: an attached game gets `/connect` typed in its chat (`#dialThroughAgent`). */
+  #connectWanted = false;
 
   /** A game was launched and has not exited. Before its process is found (a user still starting it) it counts as running. */
   get running(): boolean {
@@ -770,6 +789,10 @@ export class ClientBridge {
   async start(opts: BridgeStartOptions = {}): Promise<BridgeStatus> {
     this.#inputLock = opts.inputLock;
     this.#lockNote = undefined;
+    this.#lockTried = false;
+    this.#lockHeld = false;
+    this.#userStep = undefined;
+    this.#connectWanted = opts.connect === true;
     const status = await this.#start(opts);
     return { ...status, prunedWorlds: this.#prunedWorlds, ...(this.#worldNote ? { worldNote: this.#worldNote } : {}) };
   }
@@ -918,8 +941,13 @@ export class ClientBridge {
       return this.status();
     }
     try {
-      await this.#finishStart(timeoutMs, since, signal);
+      await this.#finishStart(timeoutMs, since, signal, true);
     } catch (e) {
+      if (e instanceof NeedsUser && this.running) {
+        // The user has a step in the game (manualSteps): keep the game and wait for the world in the background.
+        this.#finishStart(BACKGROUND_WAIT_MS, since, signal).catch(waitFailed);
+        return this.status();
+      }
       if (opts.keepOnTimeout && e instanceof WaitTimeout && this.running) {
         // Enter the world by hand (a launch command that cannot open it, a slow sign-in): keep the game and keep waiting.
         this.#manual.push(
@@ -997,6 +1025,9 @@ export class ClientBridge {
         game.agentError = errorMessage(e);
       }
     }
+    // As soon as the agent is attached, before anything is driven through it: the lock also tells a game in the
+    // background that its window is active, so it takes the agent's clicks on its menus.
+    await this.#lockInput(signal, game.agentError);
     if (engine.attached) {
       const set: string[] = [];
       for (const [id, value] of LIVE_KEYS) {
@@ -1027,11 +1058,11 @@ export class ClientBridge {
     }
     await this.#sessionUp();
     this.#attachSteps();
+    await this.#lockForSteps();
     notes.unshift(`attached to the game you opened${game.name ? `, in "${game.name}"` : ""}; it keeps running and was not restarted`);
     if (ignored.length) notes.push(`${ignored.join(", ")} need${ignored.length === 1 ? "s" : ""} the game closed first: not applied`);
     if (this.#packs.length) notes.push(await this.#attachedPacksNote());
     this.#worldNote = notes.join("; ");
-    await this.#lockInput(signal, game.agentError);
     this.#attachLoop(signal).catch(waitFailed);
     return this.status();
   }
@@ -1156,12 +1187,14 @@ export class ClientBridge {
     game.dialFailures = [];
     const failed = (line: string, e: unknown) => game.dialFailures.push({ line, message: errorMessage(e) });
     if (!(this.#session && !this.#session.closed)) {
-      const r = await engine.command(lines.debugger).catch((e: unknown) => ({ ok: false as const, message: errorMessage(e) }));
+      // Quiet: the command's own feedback stays out of the user's chat.
+      const r = await engine.command(lines.debugger, { quiet: true }).catch((e: unknown) => ({ ok: false as const, message: errorMessage(e) }));
       const failure = !r.ok ? r.message : r.value.success === false ? r.value.message : undefined;
       if (failure !== undefined) failed(lines.debugger, failure);
     }
-    // A game that requires encrypted websockets cannot attach to this server: the user turns it off (ENCRYPTED_STEP).
-    if (connect.clients().length === 0 && !game.encrypted) {
+    // `/connect` is typed in the user's chat only when asked for (`connect`); a game that requires encrypted websockets
+    // cannot attach to this server: the user turns it off (ENCRYPTED_STEP).
+    if (this.#connectWanted && connect.clients().length === 0 && !game.encrypted) {
       const r = await engine.chat(lines.connect).catch((e: unknown) => ({ ok: false as const, message: errorMessage(e) }));
       if (!r.ok) failed(lines.connect, r.message);
       // Typed once per dial: wait for the game to dial in rather than type it again on the next look.
@@ -1206,7 +1239,8 @@ export class ClientBridge {
       if (s) steps.push(s);
     }
     this.#manual = steps;
-    if (connect.clients().length > 0) this.#connectStep = undefined;
+    // Without `connect` the websocket channel is not wanted: nothing is asked of the user for it.
+    if (connect.clients().length > 0 || !this.#connectWanted) this.#connectStep = undefined;
     // Without the agent nobody notices the user turning it off: the step then also names the command to type.
     else if (game.encrypted) this.#connectStep = agent ? ENCRYPTED_STEP : `${ENCRYPTED_STEP}, then type "/${lines.connect}" in the game chat`;
     else {
@@ -1261,6 +1295,7 @@ export class ClientBridge {
       }
       if (open) await this.#sessionUp();
       this.#attachSteps();
+      await this.#lockForSteps();
       if (!this.#ready && Date.now() > deadline) throw new WaitTimeout(`no script debugger session within ${BACKGROUND_WAIT_MS / 60_000} min`);
     }
   }
@@ -1275,7 +1310,7 @@ export class ClientBridge {
    * Wait for the game process, then for the world (each up to `timeoutMs`), counting helper prints after `since`.
    * Rejects with "the game stopped" once `signal` aborts.
    */
-  async #finishStart(timeoutMs: number, since: number, signal: AbortSignal): Promise<void> {
+  async #finishStart(timeoutMs: number, since: number, signal: AbortSignal, foreground = false): Promise<void> {
     let gamePid: number;
     try {
       gamePid = await untilStopped(waitForGame(this.install as ClientInstall, timeoutMs, signal), signal);
@@ -1284,7 +1319,7 @@ export class ClientBridge {
       throw new WaitTimeout(errorMessage(e));
     }
     if (this.launchState) this.launchState.gamePid = gamePid;
-    const atFirstLook = await untilStopped(this.#waitForWorld(timeoutMs, since, signal), signal);
+    const atFirstLook = await untilStopped(this.#waitForWorld(timeoutMs, since, signal, foreground), signal);
     // Windows mutes the game's audio sessions, which exist once it plays sound: by now it surely opened its device.
     if (this.launchState?.muteRequested && process.platform === "win32") {
       const note = await muteWindowsGame(this.launchState, gamePid);
@@ -1294,22 +1329,56 @@ export class ClientBridge {
       }
     }
     this.#ready = true;
+    // The world is in: a recovery that ran on the way counts as recovered, whatever it still read when it stopped.
+    if (this.#joinRecovery && !this.#joinRecovery.recovered) this.#joinRecovery = { ...this.#joinRecovery, recovered: true };
     const by: WorldEntry["by"] = this.#walks.walked ? "auto-enter" : atFirstLook ? "already-open" : this.install?.launch ? "launch" : "manual";
     this.#entry = { by, seconds: Math.round((Date.now() - this.#startedAt) / 100) / 10, ...(this.#walks.walked ? { clicks: this.#walks.clicks } : {}) };
-    this.#manual = this.#manual.filter((m) => !m.startsWith(START_YOURSELF) && !m.startsWith(WORLD_NOT_LOADED) && !m.startsWith(OPEN_YOURSELF));
+    this.#manual = this.#manual.filter(
+      (m) => !m.startsWith(START_YOURSELF) && !m.startsWith(WORLD_NOT_LOADED) && !m.startsWith(OPEN_YOURSELF) && !m.startsWith(WORLD_DIALOG),
+    );
+    this.#userStep = undefined;
     await this.#attachConnect();
-    // After /connect: on a game with host input it was typed into the chat, which the lock would keep out.
+    // After /connect: on a game with host input it was typed into the chat, which the lock would keep out. A walk into
+    // the world already set it as soon as the agent was attached, unless a step handed to the user released it.
     await this.#lockInput(signal);
   }
 
   /**
-   * Apply game_launch `inputLock` now that sculkwire has the game. Fails open: the reason goes to `lockNote`, and a
-   * `stop` that ran meanwhile gets no lock left behind. `agentError`: the attach already failed (attach mode), so it is
-   * not tried twice.
+   * Hand a step in the game to the user (`manualSteps`) and release the session lock while they take it, as `stop`
+   * does, so they are not locked out of the very menu they are asked to use; `lockNote` says so. The lock is taken
+   * again once sculkwire has the game back (`#lockInput`: the world is in, or an attached game needs nothing more).
    */
-  async #lockInput(signal: AbortSignal, agentError?: string): Promise<void> {
+  async #handOver(step: string): Promise<void> {
+    if (!this.#manual.includes(step)) this.#manual.push(step);
+    this.#userStep = step;
+    if (!this.#lockHeld) return;
+    this.#lockHeld = false;
+    this.#lockTried = false;
+    await inputProvider()?.releaseSessionLock?.();
+    this.#lockNote = "input lock released so the user can take the step in manualSteps in the game; sculkwire takes it again once it has the game back";
+  }
+
+  /** An attached game: release the lock while a step is the user's (`manualSteps`, the /connect step), take it again after. */
+  async #lockForSteps(): Promise<void> {
+    const step = this.#manual[0] ?? this.#connectStep;
+    if (step !== undefined) {
+      if (this.#lockHeld) await this.#handOver(step);
+      return;
+    }
+    this.#userStep = undefined;
+    await this.#lockInput();
+  }
+
+  /**
+   * Apply game_launch `inputLock` now that sculkwire has the game: as soon as the agent is attached (attach mode, or a
+   * walk into the world from the start or Play screen), else once the world is loaded. Runs once per `start`. Fails
+   * open: the reason goes to `lockNote`, and a `stop` that ran meanwhile gets no lock left behind. `agentError`: the
+   * attach already failed (attach mode), so it is not tried twice.
+   */
+  async #lockInput(signal: AbortSignal | undefined = this.#startAbort?.signal, agentError?: string): Promise<void> {
     const mode = this.#inputLock;
-    if (mode === undefined || mode === "off" || signal.aborted) return;
+    if (mode === undefined || !signal || signal.aborted || this.#lockTried) return;
+    this.#lockTried = true;
     const provider = inputProvider();
     const why = !provider?.sessionLock
       ? NO_INPUT_PROVIDER
@@ -1318,6 +1387,16 @@ export class ClientBridge {
         : await provider.sessionLock(mode);
     if (signal.aborted) await provider?.releaseSessionLock?.();
     else if (why) this.#lockNote = `input lock ${mode} not set, so the user's keyboard and mouse still reach the game: ${why}`;
+    else {
+      // Only the opt-in session lock stands between calls; `auto` locks per action and `off` never.
+      this.#lockHeld = mode === "on";
+      this.#lockNote = undefined;
+    }
+  }
+
+  /** Run `body` (menu input through the agent) under the input lock for its duration, when the agent is attached. */
+  #acting<T>(body: () => Promise<T>): Promise<T> {
+    return withInputLock(engine.attached ? inputProvider() : undefined, body);
   }
 
   /**
@@ -1332,7 +1411,7 @@ export class ClientBridge {
    *
    * True when the world was already ready at the first look. Rejects once `signal` aborts (`stop`).
    */
-  async #waitForWorld(timeoutMs: number, since: number, signal: AbortSignal): Promise<boolean> {
+  async #waitForWorld(timeoutMs: number, since: number, signal: AbortSignal, foreground = false): Promise<boolean> {
     const printed = (mark: string) => this.#prints.some((p) => p.seq > since && p.message.includes(mark));
     let deadline = Date.now() + timeoutMs;
     const auto: AutoEnter = { since: Date.now(), attachTried: false, attempts: 0, lastAt: 0 };
@@ -1340,6 +1419,14 @@ export class ClientBridge {
       signal.throwIfAborted();
       if (printed(HELPER_MARK.ready) && printed(HELPER_MARK.spawned)) return first;
       await this.#readJoinLog();
+      if (this.#userStep !== undefined) {
+        // The user has a step in the game: nothing is pressed or clicked until the world is in.
+        if (foreground) throw new NeedsUser(this.#userStep);
+        if (Date.now() > deadline) throw new WaitTimeout(`timed out after ${timeoutMs} ms waiting for the user's step: ${this.#userStep}`);
+        if (this.launchState && !(await launchStateExists())) throw new Error("the game stopped");
+        await sleep(500, undefined, { signal });
+        continue;
+      }
       if (this.#joinState.failed) {
         if (!this.#canWalkMenus()) await this.#attachForEntry(auto);
         if (!this.#canWalkMenus()) {
@@ -1360,8 +1447,14 @@ export class ClientBridge {
           }
           throw new Error(this.#joinNoInputMessage());
         }
+        // The walk goes through the agent: lock first, so a game in the background takes its clicks.
+        if (engine.attached) await this.#lockInput(signal);
         const result = await this.#walkIn();
-        if (!result.recovered) throw new Error(this.#joinFailureMessage(result));
+        if (!result.recovered) {
+          // A step handed to the user (a dialog, a tile that cannot be told apart): wait for them, never press on.
+          if (this.#userStep !== undefined) continue;
+          throw new Error(this.#joinFailureMessage(result));
+        }
         // The world loads again from the start: give the rejoin its own window, then wait for ready and spawn.
         deadline = Date.now() + timeoutMs;
         continue;
@@ -1398,8 +1491,10 @@ export class ClientBridge {
     try {
       await provider.attach();
     } catch (e) {
-      this.#manual.push(`${OPEN_YOURSELF}: sculkwire could not attach its in-game agent (${errorMessage(e)}). In the game choose Play, then "${name}"`);
+      await this.#handOver(`${OPEN_YOURSELF}: sculkwire could not attach its in-game agent (${errorMessage(e)}). In the game choose Play, then "${name}"`);
+      return;
     }
+    await this.#lockInput();
   }
 
   /**
@@ -1410,7 +1505,7 @@ export class ClientBridge {
    */
   async #autoEnter(auto: AutoEnter): Promise<boolean> {
     const world = this.world;
-    if (!world || !this.launchState || auto.attempts >= AUTO_ENTER_ATTEMPTS) return false;
+    if (!world || !this.launchState || auto.attempts >= AUTO_ENTER_ATTEMPTS || this.#userStep !== undefined) return false;
     const menu = (kind: string) => kind === "start" || kind === "play";
     if (!engine.attached) {
       if (this.install?.launch || auto.attachTried) return false;
@@ -1418,6 +1513,7 @@ export class ClientBridge {
       await this.#attachForEntry(auto);
       if (!engine.attached) return false;
     }
+    await this.#lockInput();
     const screen = await agentUi((ms) => sleep(ms))?.screen().catch(() => undefined);
     if (screen) this.#screens = screensFromUi(screen, this.#screens);
     const kind = currentScreen(this.#screens);
@@ -1444,7 +1540,7 @@ export class ClientBridge {
       auto.idle = undefined;
     }
     if (auto.attempts >= AUTO_ENTER_ATTEMPTS) {
-      this.#manual.push(`${OPEN_YOURSELF}: sculkwire tried ${auto.attempts} times and could not (${why}). In the game choose Play, then "${world.name}"`);
+      await this.#handOver(`${OPEN_YOURSELF}: sculkwire tried ${auto.attempts} times and could not (${why}). In the game choose Play, then "${world.name}"`);
     }
     return false;
   }
@@ -1540,7 +1636,7 @@ export class ClientBridge {
       if (!revived.respawned) return { saved: false, detail: `the player is dead and did not respawn: ${revived.detail}` };
     }
     try {
-      const result = await leaveWorld(this.#recoveryIO(state), { screens: this.#screens, join: this.#joinState, timeoutMs: LEAVE_TIMEOUT_MS });
+      const result = await this.#acting(() => leaveWorld(this.#recoveryIO(state), { screens: this.#screens, join: this.#joinState, timeoutMs: LEAVE_TIMEOUT_MS }));
       this.#screens = result.screens;
       this.#joinState = result.join;
       const via = result.steps.join(" → ");
@@ -1596,7 +1692,9 @@ export class ClientBridge {
       return { respawned: false, via: "none", detail: "the player is dead, and no input route reaches the death screen (no in-game agent attached, no background input): press RESPAWN in the game" };
     }
     await this.#controller?.releaseAll().catch(() => undefined);
-    const result = await respawn(this.#recoveryIO(state), { health: () => this.#freshHealth(), screens: this.#screens, join: this.#joinState, timeoutMs });
+    const result = await this.#acting(() =>
+      respawn(this.#recoveryIO(state), { health: () => this.#freshHealth(), screens: this.#screens, join: this.#joinState, timeoutMs }),
+    );
     this.#screens = result.screens;
     this.#joinState = result.join;
     const how = result.steps.join(" → ");
@@ -1623,15 +1721,26 @@ export class ClientBridge {
       (jpeg) => decodeJpeg(jpeg),
       () => undefined,
     );
-    const result = await recoverJoin(this.#recoveryIO(state), {
-      levelId: world.levelId,
-      ...(thumbnail ? { thumbnail } : {}),
-      timeoutMs,
-      screens: this.#screens,
-      join: this.#joinState,
-    });
-    if (result.needsUser && !this.#manual.some((m) => m.startsWith(OPEN_YOURSELF))) {
-      this.#manual.push(`${OPEN_YOURSELF}: ${result.reason ?? "sculkwire cannot tell its tile apart"}. In the game choose Play, then "${world.name}"`);
+    // The helper pack answering from a world since the walk began means the world is in, whatever the screens read.
+    const since = this.#printSeq;
+    const inWorld = () => this.#prints.some((p) => p.seq > since && (p.message.includes(HELPER_MARK.ready) || p.message.includes(HELPER_MARK.spawned)));
+    const result = await this.#acting(() =>
+      recoverJoin({ ...this.#recoveryIO(state), inWorld }, {
+        levelId: world.levelId,
+        ...(thumbnail ? { thumbnail } : {}),
+        timeoutMs,
+        screens: this.#screens,
+        join: this.#joinState,
+      }),
+    );
+    if (result.stuck) {
+      await this.#handOver(
+        `${WORLD_DIALOG} or ignored the click on "${world.name}" (${result.reason ?? "the world did not open"}). If it asks to update ` +
+          `"${world.name}" (for example to the new world height), confirm it yourself (it can make a backup copy first); otherwise open ` +
+          `"${world.name}" yourself. sculkwire never confirms it for you and continues once the world is loaded`,
+      );
+    } else if (result.needsUser && !this.#manual.some((m) => m.startsWith(OPEN_YOURSELF))) {
+      await this.#handOver(`${OPEN_YOURSELF}: ${result.reason ?? "sculkwire cannot tell its tile apart"}. In the game choose Play, then "${world.name}"`);
     }
     this.#screens = result.screens;
     this.#joinState = result.join;
@@ -1674,9 +1783,11 @@ export class ClientBridge {
   }
 
   /**
-   * Get a `/connect` client. First wait briefly in case the game dialled in by itself; otherwise, where input reaches
-   * the game, wait until the player has spawned (keys sent during the loading screen land as debug keybinds) and type
-   * `/connect` (gamescope's display on Linux, SendInput on Windows). Elsewhere the user types it.
+   * Get a `/connect` client. First wait briefly in case the game dialled in by itself (the launch's automation options).
+   * Otherwise only with game_launch `connect: true`: where input reaches the game, wait until the player has spawned
+   * (keys sent during the loading screen land as debug keybinds) and type `/connect` (gamescope's display on Linux,
+   * SendInput on Windows); elsewhere the user is asked to type it. Without `connect` nothing is typed and nothing is
+   * asked: commands go through the script debugger.
    */
   async #attachConnect(): Promise<void> {
     const connect = this.#connect;
@@ -1689,6 +1800,7 @@ export class ClientBridge {
     } catch {
       // not dialled in by itself
     }
+    if (!this.#connectWanted) return;
     const line = `connect localhost:${connect.port}`;
     if (!hasInput(state)) {
       this.#connectStep = `type "/${line}" in the game chat to enable /connect (commands still work through the script debugger)`;
@@ -2221,6 +2333,8 @@ export class ClientBridge {
     // Save & Quit below may need the pause menu.
     await inputProvider()?.releaseSessionLock?.();
     this.#lockNote = undefined;
+    this.#lockHeld = false;
+    this.#userStep = undefined;
     const install = this.install ?? (await findInstall());
     const game = this.#attached;
     const attached = game !== undefined || (this.launchState === undefined && (await readLaunchState())?.attached === true);
@@ -2242,9 +2356,15 @@ export class ClientBridge {
         if (mutedPid && isAlive(mutedPid)) await windowsMute([mutedPid], false, 0).catch(() => undefined);
       }
     }
-    // Only a game sculkwire launched is stopped: this process's launch, or one a launch state file records. With
-    // neither (a process that never launched, or an attach whose state is gone) any running game is the user's.
-    const launched = !attached && (this.launchState !== undefined || (await readLaunchState()) !== undefined);
+    // Only a game sculkwire launched is stopped: this process's launch, or one a launch state file records whose game
+    // (or spawned launcher) is still running. With neither (a process that never launched, an attach whose state is
+    // gone, or a stale state left by a crash while the user started their own game since) the running game is the
+    // user's: it is left alone and the stale state is dropped.
+    const recorded = !attached && this.launchState === undefined ? await readLaunchState() : undefined;
+    const running = recorded ? await gamePids(install) : [];
+    const stillOurs = recorded !== undefined && ((recorded.gamePid !== undefined && running.includes(recorded.gamePid)) || (recorded.pid > 0 && isAlive(recorded.pid)));
+    const launched = !attached && (this.launchState !== undefined || stillOurs);
+    if (recorded && !stillOurs) await detachState();
     const result = attached
       ? { stopped: true, message: "detached from the game you opened; it keeps running" }
       : launched

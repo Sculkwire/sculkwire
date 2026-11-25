@@ -720,6 +720,36 @@ describe("engine reconnect", () => {
   });
 });
 
+describe("engine per-call input lock", () => {
+  it("holds the lock only for the call, types nothing to take it, and sends a quiet command when asked", async () => {
+    const agent = await makeAgent();
+    const session = makeSession(agent);
+    agent.handler = (request) =>
+      request.method === "input.lock"
+        ? reply(request, { locked: (request.params as { active?: boolean }).active === true, mode: "auto", by: "agent", user: false })
+        : reply(request, { success: true, message: "" });
+    const result = await session.locked(async () => {
+      expect(session.lock.state?.locked).toBe(true);
+      return session.command("script debugger connect localhost 1", { quiet: true });
+    });
+    expect(result.ok).toBe(true);
+    expect(session.lock.state?.locked).toBe(false);
+    expect(agent.requests.map((r) => [r.method, r.params])).toEqual([
+      ["input.lock", { active: true }],
+      ["command", { command: "script debugger connect localhost 1", quiet: true }],
+      ["input.lock", { active: false }],
+    ]);
+  });
+
+  it("lets go of the lock when the call fails", async () => {
+    const agent = await makeAgent();
+    const session = makeSession(agent);
+    agent.handler = (request) => reply(request, { locked: false, mode: "auto", by: "agent", user: false });
+    await expect(session.locked(async () => Promise.reject(new Error("the screen closed")))).rejects.toThrow("the screen closed");
+    expect(agent.requests.map((r) => r.params)).toEqual([{ active: true }, { active: false }]);
+  });
+});
+
 function tickParams(tick: number, yaw = 0) {
   return { tick, position: [1, 64, 2], rotation: [10, yaw], velocity: [0, -0.08, 0], onGround: true, health: 20, selectedSlot: 3 };
 }

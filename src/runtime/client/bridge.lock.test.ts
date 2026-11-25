@@ -5,7 +5,7 @@
  * game process is looked up, started or stopped.
  */
 import { createConnection, type Socket } from "node:net";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -152,16 +152,43 @@ describe("game_launch inputLock", () => {
       runningPids = [process.pid];
     });
 
-    it("holds the session lock, and the detach ends it before it lets go", async () => {
+    it("releases the session lock while the user has a step in the game, takes it again once the channels are up, and the detach ends it", async () => {
+      // The user's game has a world open.
+      const world = join(install.userComMojang, "minecraftWorlds", "Ab+c=");
+      await mkdir(world, { recursive: true });
+      await writeFile(join(world, "levelname.txt"), "Steve's Base");
+      await mkdir(install.logsDir, { recursive: true });
+      await writeFile(
+        join(install.logsDir, "Debug_Log_2026.txt"),
+        `[2026-11-08 20:49:12:490 INFO CLIENT 1 2] Opening level '${world.replaceAll("\\", "/")}/db'\n` +
+          "[2026-11-08 20:49:15:100 INFO CLIENT 1 2] Player Spawned: Steve\n",
+      );
       const bridge = new ClientBridge();
       const status = await bridge.start({ ...opts, inputLock: "on" });
-      expect(status.inputLock).toEqual({ mode: "auto", locked: true, user: false, session: true });
-      expect(status.lockNote).toBeUndefined();
-      const r = await bridge.stop();
-      expect(r.detached).toBe(true);
-      expect(provider.calls).toEqual(["stopped", "attach", "lock on", "release (on)", "stopped"]);
+      let game: Socket | undefined;
+      let connect: WebSocket | undefined;
+      try {
+        // The fake agent drives no chat, so the user is asked to type the channel commands: the lock is let go for that.
+        expect(status.manualSteps.length).toBeGreaterThan(0);
+        expect(status.inputLock).toMatchObject({ locked: false, session: false });
+        expect(status.lockNote).toMatch(/^input lock released so the user can take the step in manualSteps in the game/);
+        expect(provider.calls).toEqual(["stopped", "attach", "lock on", "release (on)"]);
+        // The user types them: the debugger and /connect dial in, nothing is left for the user, and the lock comes back.
+        game = gameInWorld(status.debugger.port ?? 0);
+        connect = new WebSocket(`ws://127.0.0.1:${status.connect.port ?? 0}`);
+        await vi.waitFor(() => expect(bridge.status().inputLock).toMatchObject({ locked: true, session: true }), { timeout: 15_000, interval: 200 });
+        expect(bridge.status().manualSteps).toEqual([]);
+        expect(bridge.status().lockNote).toBeUndefined();
+        expect(provider.calls.slice(-1)).toEqual(["lock on"]);
+      } finally {
+        const r = await bridge.stop();
+        game?.destroy();
+        connect?.close();
+        expect(r.detached).toBe(true);
+      }
+      expect(provider.calls.slice(-2)).toEqual(["release (on)", "stopped"]);
       expect(stopGame).not.toHaveBeenCalled();
-    });
+    }, 30_000);
 
     it("still attaches when the agent cannot, and says why the lock is not set", async () => {
       provider.attachError = "the agent DLL could not be built";
@@ -181,15 +208,18 @@ describe("game_launch inputLock", () => {
       expect(bridge.status().lockNote).toBeUndefined();
     });
 
-    it("sets nothing with inputLock off, or without inputLock (the bench and the CLI)", async () => {
-      for (const inputLock of ["off", undefined] as const) {
+    it("holds no session lock with inputLock auto (the default) or off, and sets nothing without inputLock (the bench and the CLI)", async () => {
+      for (const inputLock of ["auto", "off", undefined] as const) {
+        const from = provider.calls.length;
         const bridge = new ClientBridge();
         const status = await bridge.start({ ...opts, ...(inputLock ? { inputLock } : {}) });
         await bridge.stop();
         expect(status.lockNote).toBeUndefined();
-        expect(status.inputLock).toEqual({ mode: "auto", locked: false, user: false, session: false });
+        // Between calls nothing is locked: auto locks per action, off never.
+        expect(status.inputLock).toMatchObject({ locked: false });
+        const locks = provider.calls.slice(from).filter((c) => c.startsWith("lock"));
+        expect(locks).toEqual(inputLock ? [`lock ${inputLock}`] : []);
       }
-      expect(provider.calls.some((c) => c.startsWith("lock"))).toBe(false);
     });
   });
 
@@ -204,6 +234,8 @@ describe("game_launch inputLock", () => {
       const game = gameInWorld(status.debugger.port ?? 0);
       try {
         await vi.waitFor(() => expect(bridge.status().inputLock).toMatchObject({ locked: true, session: true }), { timeout: 12_000, interval: 200 });
+        // /connect is opt-in (connect: true): the game did not dial in by itself, and nothing is asked of the user for it.
+        expect(bridge.status().manualSteps.some((m) => m.includes("/connect"))).toBe(false);
         let callsAtStop: string[] = [];
         stopGame.mockImplementationOnce(async () => {
           callsAtStop = [...provider.calls];
@@ -217,4 +249,24 @@ describe("game_launch inputLock", () => {
     },
     20_000,
   );
+
+  it("locks as soon as the walk into the world attaches the agent on the start screen, before the world loads", async () => {
+    await userWorld();
+    // The engine log of the game the user starts: empty at the launch, then the start screen comes up.
+    await mkdir(install.logsDir, { recursive: true });
+    const log = join(install.logsDir, "Debug_Log_2026.txt");
+    await writeFile(log, "");
+    const bridge = new ClientBridge();
+    await bridge.start({ ...opts, userWorld: "Steve's Base", inputLock: "on" });
+    try {
+      expect(provider.calls).not.toContain("lock on");
+      await appendFile(log, "[2026-11-25 08:13:37:407 INFO GUI 320 316] Created 'start.start_screen' screen in 0.855900ms\n");
+      await vi.waitFor(() => expect(provider.calls).toContain("lock on"), { timeout: 5_000, interval: 100 });
+      expect(provider.calls.slice(-2)).toEqual(["attach", "lock on"]);
+      expect(bridge.status().inputLock).toMatchObject({ locked: true, session: true });
+    } finally {
+      await bridge.stop();
+    }
+    expect(provider.calls.slice(-2)).toEqual(["release (on)", "stopped"]);
+  });
 });

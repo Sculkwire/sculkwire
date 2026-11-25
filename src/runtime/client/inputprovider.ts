@@ -107,17 +107,17 @@ export interface InputProvider {
   /** The input lock's last known state, or undefined before one was read. Optional: a provider without it has no lock. */
   lockStatus?(): InputLockStatus | undefined;
   /**
-   * Keep the input lock in `mode` while sculkwire has the game (game_launch `inputLock`), attaching the provider first
-   * when it is not attached. Never throws: resolves to why the lock could not be set (the user's input then still
-   * reaches the game), or undefined once it is set.
+   * Set the input lock for the session sculkwire has the game (game_launch `inputLock`): `on` a session lock, `auto`
+   * the per-action default, `off` nothing locks. Attaches the provider first when it is not attached. Never throws:
+   * resolves to why the lock could not be set (the user's input then still reaches the game), or undefined once it is.
    */
-  sessionLock?(mode: Exclude<LockMode, "off">): Promise<string | undefined>;
+  sessionLock?(mode: LockMode): Promise<string | undefined>;
   /**
    * The game is about to be released (game_stop): leave no lock behind, so a game the user keeps playing after a detach
    * is never locked. Never attaches and never throws.
    */
   releaseSessionLock?(): Promise<void>;
-  /** Make the engine route usable before a bench run. Throws when it cannot be. */
+  /** Attach the engine route (and hold the game's focus for the connection). Throws when it cannot be. */
   attach(): Promise<void>;
   /** The bridge launched a game. Never throws. */
   launched(game: ProviderGame): Promise<void>;

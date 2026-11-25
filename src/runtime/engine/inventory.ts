@@ -620,7 +620,8 @@ export function registerInventoryTools(server: McpServer, script: ScriptRoute): 
         return ok(craftMatchText(result.value), { ok: true, action, ...result.value });
       }
       if (!recipe) return invalidParamsResult("run needs the recipe id craft match returned");
-      const result = await craftRun(recipe, times);
+      // Crafting moves items through the open screen: the lock keeps the user's input out for this call only.
+      const result = await engine.locked(() => craftRun(recipe, times));
       if (!result.ok) {
         const missing = result.reason === "not_attached" ? { ...result, message: `${result.message}. Crafting needs the agent (engine_attach)` } : result;
         return failureResult(missing);

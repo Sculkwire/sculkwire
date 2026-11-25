@@ -137,7 +137,7 @@ describe("attaching with the in-game agent", () => {
 
   it("cancels a confirmation a live setting opened, never sets websocket_encryption, and asks the user to turn encryption off", async () => {
     const bridge = new ClientBridge();
-    const status = await bridge.start({ debuggerPort: 0, connectPort: 0 });
+    const status = await bridge.start({ debuggerPort: 0, connectPort: 0, connect: true });
     try {
       const sets = agent.requests.filter((r) => r.method === "settings.set").map((r) => r.params?.id);
       expect(sets).toEqual(["websockets_enabled", "content_log_file"]);
