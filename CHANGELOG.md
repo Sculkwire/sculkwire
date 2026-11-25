@@ -2,7 +2,7 @@
 
 Release notes for sculkwire. Each `## vX.Y.Z` section becomes the GitHub release text when its tag is pushed.
 
-## Unreleased
+## v0.1.5
 
 - Your own dev world: choose one of your worlds once with `game_worlds` `action: "use"` (or `sculk game worlds --use <name or level id>`, `--clear-default` to forget it), and `game_launch` and `sculk game check` enter it instead of a throwaway `sculkwire-` world. `userWorld` enters another one for one launch, `fresh: true` (`--fresh`) a test world. Before each launch writes to it, sculkwire backs up its `level.dat`, pack lists and icon (the newest 10 per world, `worldBackup`); it then adds the helper pack and the project's packs to its pack lists (other packs stay, and they stay after `game_stop`), turns cheats on when they are off (the world then awards no achievements; `worldNote` says so), and turns Beta APIs on or sets the difficulty only when asked. The world is never deleted or replaced, and the launch is refused while the game runs.
 - `game_stop` in a dev world first tries Save & Quit through the pause menu (up to 45 s), puts the world's own icon back, and keeps the project's development pack folders the world names. `savedAndQuit`, `stopNote` and `keptPackFolders` report it.
