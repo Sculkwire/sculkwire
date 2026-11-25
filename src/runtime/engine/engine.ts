@@ -1101,13 +1101,24 @@ export class EngineSession {
     return watcher ? watcher.stop() : Promise.resolve();
   }
 
-  /** Every connection receives `lock` notifications, and learns the watched host focus. */
+  /**
+   * Every connection receives `lock` notifications, learns the watched host focus, and declares again the session lock
+   * and running action this process held: the agent dropped them with the old connection, so a silent reconnect would
+   * otherwise leave the game unlocked for the rest of the session.
+   */
   #adopt(client: AgentClient): AgentClient {
     client.on("lock", (params) => {
       const state = parseLockState(params);
       if (state) this.lock.update(state);
     });
     if (this.#hostFocused !== undefined) void client.call("input.focus" satisfies MethodName, { focused: this.#hostFocused }, { timeoutMs: METHODS["input.focus"].timeoutMs }).catch(() => undefined);
+    const held = this.lock.reassert();
+    if (held) {
+      void client
+        .call("input.lock" satisfies MethodName, held, { timeoutMs: METHODS["input.lock"].timeoutMs })
+        .then(parseLockState, () => undefined)
+        .then((state) => state && this.lock.update(state));
+    }
     return client;
   }
 
@@ -1217,11 +1228,14 @@ export class EngineSession {
     return result.ok ? { ok: true, value: normalizeWorld(result.value) } : result;
   }
 
-  /** `world.set`: difficulty, game type, game time, weather or game rules, applied the way the game applies them. */
-  async worldSet(change: WorldChange): Promise<EngineResult<WorldState>> {
+  /**
+   * `world.set`: difficulty, game type, game time, weather or game rules, applied the way the game applies them, in
+   * the loaded world only when its level name is `world` (the agent refuses any other).
+   */
+  async worldSet(change: WorldChange, world: string): Promise<EngineResult<WorldState>> {
     const params = worldChangeParams(change);
     if (typeof params === "string") return invalid(params);
-    const result = await this.#call<unknown>("world.set", params);
+    const result = await this.#call<unknown>("world.set", { world, ...params });
     return result.ok ? { ok: true, value: normalizeWorld(result.value) } : result;
   }
 

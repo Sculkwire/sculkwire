@@ -87,6 +87,24 @@ describe("InputLock", () => {
     expect(sent).toEqual([{ active: true }, { active: false }]);
   });
 
+  it("holds a session lock that a new connection declares again with a running action, until it ends or the session closes", async () => {
+    const { lock, sent } = fakeLock();
+    expect(lock.reassert()).toBeUndefined();
+    expect((await lock.session(true)).ok).toBe(true);
+    expect(sent).toEqual([{ session: true }]);
+    expect(lock.reassert()).toEqual({ session: true });
+    const release = await lock.hold();
+    expect(lock.reassert()).toEqual({ session: true, active: true });
+    await release();
+    await lock.session(false);
+    expect(lock.reassert()).toBeUndefined();
+    await lock.session(true);
+    // Closed on purpose (game_stop or shutdown): nothing is declared again.
+    lock.reset();
+    expect(lock.sessionHeld).toBe(false);
+    expect(lock.reassert()).toBeUndefined();
+  });
+
   it("fires takeover listeners on the user's F9 and waits for control to come back", async () => {
     const { lock } = fakeLock();
     let takeovers = 0;

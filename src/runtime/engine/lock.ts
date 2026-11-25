@@ -28,6 +28,11 @@ export interface LockState {
   user: boolean;
   /** Some connection declared an action or play job running (what `auto` locks for). */
   active: boolean;
+  /**
+   * Some connection holds a session lock (game_launch `inputLock: on`), which locks in `auto` until that connection
+   * ends it or closes. Undefined: the loaded agent predates session locks.
+   */
+  session?: boolean;
   /** The game window is hooked. False until the first frame after injection. */
   window: boolean;
   /** User input events dropped since injection. */
@@ -93,6 +98,7 @@ export function parseLockState(raw: unknown): LockState | undefined {
     keysHidden: finiteOrZero(r.keysHidden),
     hostFocused: r.hostFocused !== false,
     pad: { hooked: finiteOrZero(padOf(r).hooked), reads: finiteOrZero(padOf(r).reads), active: finiteOrZero(padOf(r).active), hidden: finiteOrZero(padOf(r).hidden) },
+    ...(typeof r.session === "boolean" ? { session: r.session } : {}),
     camera: r.camera === "disabled" || r.camera === "enabled" ? r.camera : null,
   };
 }
@@ -106,10 +112,13 @@ export function lockText(s: LockState): string {
       : "unlocked: the user's input reaches the game";
   const window = s.window ? "" : ". The game window is not hooked yet (it is, from the first frame after injection)";
   const host = s.hostFocused ? "" : ". The game window is not focused on the desktop, so its controller and polled keys are kept out";
-  return `${now}. mode ${s.mode}${window}${host}`;
+  const session = s.session ? " (game_launch holds the lock for its session)" : "";
+  return `${now}. mode ${s.mode}${session}${window}${host}`;
 }
 
-type Send = (params: { mode?: LockMode; active?: boolean }) => Promise<EngineResult<unknown>>;
+/** One `input.lock` call's parameters. `active` and `session` belong to the calling connection and end with it. */
+export type LockParams = { mode?: LockMode; active?: boolean; session?: boolean };
+type Send = (params: LockParams) => Promise<EngineResult<unknown>>;
 /**
  * Runs before the lock may turn on (mode on or auto, or the first hold): the engine makes sure the agent has a player
  * command to replay, so the lock's camera gate and badge (quiet commands) can run. Failures are ignored: the lock
@@ -124,6 +133,8 @@ export class InputLock {
   #takeover = new Set<() => void>();
   #change = new Set<(s: LockState) => void>();
   #holds = 0;
+  /** This process holds a session lock, which a new connection declares again (`reassert`). */
+  #session = false;
 
   readonly #prepare: Prepare | undefined;
 
@@ -211,8 +222,38 @@ export class InputLock {
     if (state) this.update(state);
   }
 
-  /** Forget the reported state (the connection closed). Holds and listeners stay. */
+  /**
+   * Hold (true) or end (false) a session lock on this connection: locked in `auto` until it ends or the connection
+   * closes, so a host that dies never leaves the lock on. A new connection declares it again (`reassert`).
+   */
+  async session(on: boolean): Promise<EngineResult<LockState>> {
+    if (on) await this.#prepared();
+    const result = await this.#send({ session: on });
+    if (!result.ok) return result;
+    const state = parseLockState(result.value);
+    if (!state) return malformed("input.lock", result.value);
+    this.#session = on;
+    this.update(state);
+    return { ok: true, value: state };
+  }
+
+  /** This process holds a session lock. */
+  get sessionHeld(): boolean {
+    return this.#session;
+  }
+
+  /**
+   * What a new connection to the same agent must declare again, because the agent dropped the old connection's bits
+   * when it closed: the session lock and a running action. Undefined when nothing is held.
+   */
+  reassert(): LockParams | undefined {
+    if (!this.#session && this.#holds === 0) return undefined;
+    return { ...(this.#session ? { session: true } : {}), ...(this.#holds > 0 ? { active: true } : {}) };
+  }
+
+  /** Forget the reported state and the session lock (the connection was closed on purpose). Holds and listeners stay. */
   reset(): void {
     this.#state = undefined;
+    this.#session = false;
   }
 }

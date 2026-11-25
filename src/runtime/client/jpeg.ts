@@ -1,159 +1,350 @@
 /**
- * A baseline JPEG encoder for pictures made of flat 8x8 blocks, which is all sculkwire draws (the world icon in
- * icon.ts). A flat block has only a DC coefficient, so each block of each component is its DC difference and an
- * end-of-block code: no DCT, no image dependency. YCbCr without subsampling, one quantisation table of ones (the DC
- * value survives exactly), and the standard Huffman tables of the JPEG specification (Annex K.3).
+ * A baseline JPEG decoder for a world's own `world_icon.jpeg` (the picture the game shows as the world's thumbnail on
+ * the Play screen), which the join recovery compares with the screenshot to find the world's tile (thumbnail.ts).
+ *
+ * Sequential Huffman JPEG only (SOF0 and SOF1, 8-bit samples), one component (grey) or three (YCbCr), any sampling
+ * factors, interleaved or one scan per component, restart intervals. A progressive, arithmetic-coded or lossless file
+ * is not decoded (undefined): the recovery then has no picture to match and leaves opening the world to the user.
  */
+import type { Pixels } from "./png.ts";
 
-export type Rgb = readonly [number, number, number];
+/** Natural-order index of each zig-zag position. */
+const ZIGZAG = [
+  0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36,
+  29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+];
 
-export interface HuffmanSpec {
-  /** Number of codes of each length 1..16. */
-  bits: readonly number[];
-  /** Symbols in code order. */
-  values: readonly number[];
+/** `COS[x * 8 + u]` = C(u) cos((2x + 1) u pi / 16) / 2, the 1-D inverse DCT basis. */
+const COS = Float64Array.from({ length: 64 }, (_, i) => {
+  const x = Math.floor(i / 8);
+  const u = i % 8;
+  return ((u === 0 ? Math.SQRT1_2 : 1) * Math.cos(((2 * x + 1) * u * Math.PI) / 16)) / 2;
+});
+
+interface Huffman {
+  /** Largest code of each length (1-16), -1 when none. */
+  maxCode: Int32Array;
+  /** Index into `values` of the first code of each length, minus that code. */
+  offset: Int32Array;
+  values: Uint8Array;
 }
 
-/** Every AC symbol (run << 4 | size, plus EOB 0x00 and ZRL 0xf0) after `head`, in ascending order as Annex K lists them. */
-function acValues(head: readonly number[]): number[] {
-  const all = [0x00, 0xf0];
-  for (let run = 0; run < 16; run++) for (let size = 1; size <= 10; size++) all.push((run << 4) | size);
-  const rest = all.filter((v) => !head.includes(v)).sort((a, b) => a - b);
-  return [...head, ...rest];
-}
-
-const DC_VALUES = Array.from({ length: 12 }, (_, i) => i);
-
-export const DC_LUMINANCE: HuffmanSpec = { bits: [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0], values: DC_VALUES };
-export const DC_CHROMINANCE: HuffmanSpec = { bits: [0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0], values: DC_VALUES };
-export const AC_LUMINANCE: HuffmanSpec = {
-  bits: [0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 0x7d],
-  values: acValues([
-    0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07, 0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xa1, 0x08,
-    0x23, 0x42, 0xb1, 0xc1, 0x15, 0x52, 0xd1, 0xf0, 0x24, 0x33, 0x62, 0x72, 0x82,
-  ]),
-};
-export const AC_CHROMINANCE: HuffmanSpec = {
-  bits: [0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 0x77],
-  values: acValues([
-    0x00, 0x01, 0x02, 0x03, 0x11, 0x04, 0x05, 0x21, 0x31, 0x06, 0x12, 0x41, 0x51, 0x07, 0x61, 0x71, 0x13, 0x22, 0x32, 0x81, 0x08, 0x14, 0x42, 0x91,
-    0xa1, 0xb1, 0xc1, 0x09, 0x23, 0x33, 0x52, 0xf0, 0x15, 0x62, 0x72, 0xd1, 0x0a, 0x16, 0x24, 0x34, 0xe1, 0x25, 0xf1,
-  ]),
-};
-
-export interface HuffmanCode {
-  code: number;
-  length: number;
-}
-
-/** The canonical codes of a table (Annex C), by symbol. */
-export function huffmanCodes(spec: HuffmanSpec): Map<number, HuffmanCode> {
-  const codes = new Map<number, HuffmanCode>();
+function buildHuffman(counts: Uint8Array, values: Uint8Array): Huffman {
+  const maxCode = new Int32Array(18).fill(-1);
+  const offset = new Int32Array(18);
   let code = 0;
   let k = 0;
   for (let length = 1; length <= 16; length++) {
-    for (let i = 0; i < (spec.bits[length - 1] ?? 0); i++) codes.set(spec.values[k++] as number, { code: code++, length });
-    code <<= 1;
+    const n = counts[length - 1] ?? 0;
+    offset[length] = k - code;
+    if (n > 0) maxCode[length] = code + n - 1;
+    code = (code + n) << 1;
+    k += n;
   }
-  return codes;
+  return { maxCode, offset, values };
 }
 
-/** Entropy-coded bits, with a 0x00 stuffed after every 0xff byte. */
-class BitWriter {
-  readonly bytes: number[] = [];
-  #acc = 0;
-  #n = 0;
-  write(value: number, length: number): void {
-    for (let i = length - 1; i >= 0; i--) {
-      this.#acc = (this.#acc << 1) | ((value >> i) & 1);
-      if (++this.#n === 8) this.#flushByte();
-    }
-  }
-  #flushByte(): void {
-    this.bytes.push(this.#acc);
-    if (this.#acc === 0xff) this.bytes.push(0);
-    this.#acc = 0;
-    this.#n = 0;
-  }
-  /** Pad the last byte with ones. */
-  end(): void {
-    while (this.#n !== 0) this.write(1, 1);
-  }
+interface Component {
+  id: number;
+  h: number;
+  v: number;
+  quant: number;
+  /** Blocks per line and per column in the component's padded plane. */
+  blocksWide: number;
+  blocksHigh: number;
+  plane: Uint8ClampedArray;
+  dc: number;
+  dcTable: number;
+  acTable: number;
 }
 
-function segment(marker: number, body: readonly number[]): number[] {
-  const length = body.length + 2;
-  return [0xff, marker, length >> 8, length & 0xff, ...body];
-}
-
-/** JFIF's RGB to YCbCr. */
-export function toYCbCr([r, g, b]: Rgb): [number, number, number] {
-  return [0.299 * r + 0.587 * g + 0.114 * b, -0.168736 * r - 0.331264 * g + 0.5 * b + 128, 0.5 * r - 0.418688 * g - 0.081312 * b + 128];
-}
-
-/** Bit length of |v| (the JPEG magnitude category). */
-function category(v: number): number {
-  let a = Math.abs(v);
-  let n = 0;
-  while (a > 0) {
-    n++;
-    a >>= 1;
+class Bits {
+  readonly data: Uint8Array;
+  #at: number;
+  #buffer = 0;
+  #count = 0;
+  /** A marker ended the entropy-coded data: the rest reads as zero bits. */
+  #marker = false;
+  constructor(data: Uint8Array, at: number) {
+    this.data = data;
+    this.#at = at;
   }
-  return n;
-}
-
-/**
- * Encode a `width` x `height` picture (both multiples of 8) whose 8x8 block at block column `bx`, row `by` is the flat
- * colour `block(bx, by)`.
- */
-export function encodeFlatJpeg(width: number, height: number, block: (bx: number, by: number) => Rgb): Buffer {
-  if (width <= 0 || height <= 0 || width % 8 || height % 8 || width > 0xffff || height > 0xffff) {
-    throw new Error(`a flat-block JPEG needs a size in multiples of 8 up to 65535, not ${width}x${height}`);
+  get at(): number {
+    return this.#at;
   }
-  const tables: [number, HuffmanSpec][] = [
-    [0x00, DC_LUMINANCE],
-    [0x10, AC_LUMINANCE],
-    [0x01, DC_CHROMINANCE],
-    [0x11, AC_CHROMINANCE],
-  ];
-  const dc = [huffmanCodes(DC_LUMINANCE), huffmanCodes(DC_CHROMINANCE), huffmanCodes(DC_CHROMINANCE)];
-  const eob = [huffmanCodes(AC_LUMINANCE).get(0), huffmanCodes(AC_CHROMINANCE).get(0), huffmanCodes(AC_CHROMINANCE).get(0)] as HuffmanCode[];
-  const bits = new BitWriter();
-  const previous = [0, 0, 0];
-  for (let by = 0; by < height / 8; by++) {
-    for (let bx = 0; bx < width / 8; bx++) {
-      const ycc = toYCbCr(block(bx, by));
-      for (let c = 0; c < 3; c++) {
-        // A flat block's DC coefficient is 8 times its level-shifted sample; with a quantiser of 1 it stays exact.
-        const level = Math.min(255, Math.max(0, Math.round(ycc[c] as number)));
-        const coefficient = 8 * (level - 128);
-        const diff = coefficient - (previous[c] as number);
-        previous[c] = coefficient;
-        const size = category(diff);
-        const code = dc[c]?.get(size) as HuffmanCode;
-        bits.write(code.code, code.length);
-        if (size > 0) bits.write(diff > 0 ? diff : diff + (1 << size) - 1, size);
-        const end = eob[c] as HuffmanCode;
-        bits.write(end.code, end.length);
+  bit(): number {
+    if (this.#count === 0) {
+      if (this.#marker || this.#at >= this.data.length) return 0;
+      let byte = this.data[this.#at++] as number;
+      if (byte === 0xff) {
+        const next = this.data[this.#at] ?? 0;
+        if (next === 0) this.#at++;
+        else {
+          this.#marker = true;
+          this.#at--;
+          return 0;
+        }
+        byte = 0xff;
       }
+      this.#buffer = byte;
+      this.#count = 8;
+    }
+    this.#count--;
+    return (this.#buffer >> this.#count) & 1;
+  }
+  receive(n: number): number {
+    let v = 0;
+    for (let i = 0; i < n; i++) v = (v << 1) | this.bit();
+    return v;
+  }
+  decode(table: Huffman): number {
+    let code = 0;
+    for (let length = 1; length <= 16; length++) {
+      code = (code << 1) | this.bit();
+      if (code <= (table.maxCode[length] as number)) return table.values[code + (table.offset[length] as number)] as number;
+    }
+    throw new Error("bad Huffman code");
+  }
+  /** Skip to just after the next RSTn marker, dropping buffered bits. */
+  restart(): void {
+    this.#count = 0;
+    this.#marker = false;
+    while (this.#at + 1 < this.data.length) {
+      if (this.data[this.#at] === 0xff && (this.data[this.#at + 1] as number) >= 0xd0 && (this.data[this.#at + 1] as number) <= 0xd7) {
+        this.#at += 2;
+        return;
+      }
+      this.#at++;
     }
   }
-  bits.end();
-  const jfif = [0x4a, 0x46, 0x49, 0x46, 0x00, 1, 1, 0, 0, 1, 0, 1, 0, 0];
-  const dqt = [0x00, ...new Array<number>(64).fill(1)];
-  const sof = [8, height >> 8, height & 0xff, width >> 8, width & 0xff, 3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0];
-  const dht = tables.flatMap(([id, spec]) => [id, ...spec.bits, ...spec.values]);
-  const sos = [3, 1, 0x00, 2, 0x11, 3, 0x11, 0, 63, 0];
-  return Buffer.from([
-    0xff,
-    0xd8,
-    ...segment(0xe0, jfif),
-    ...segment(0xdb, dqt),
-    ...segment(0xc0, sof),
-    ...segment(0xc4, dht),
-    ...segment(0xda, sos),
-    ...bits.bytes,
-    0xff,
-    0xd9,
-  ]);
+}
+
+const extend = (v: number, n: number): number => (n === 0 ? 0 : v < 1 << (n - 1) ? v - (1 << n) + 1 : v);
+
+/** Decode one 8x8 block into `out` (natural order, level-shifted samples). */
+function readBlock(bits: Bits, c: Component, dc: Huffman, ac: Huffman, quant: Uint16Array, coef: Float64Array): void {
+  coef.fill(0);
+  const t = bits.decode(dc);
+  c.dc += t === 0 ? 0 : extend(bits.receive(t), t);
+  coef[0] = c.dc * (quant[0] as number);
+  for (let k = 1; k < 64; ) {
+    const rs = bits.decode(ac);
+    const r = rs >> 4;
+    const s = rs & 15;
+    if (s === 0) {
+      if (r !== 15) break;
+      k += 16;
+      continue;
+    }
+    k += r;
+    if (k > 63) break;
+    coef[ZIGZAG[k] as number] = extend(bits.receive(s), s) * (quant[k] as number);
+    k++;
+  }
+}
+
+/** Inverse DCT of `coef` into the component's plane at block column `bx`, row `by`. */
+function storeBlock(c: Component, bx: number, by: number, coef: Float64Array, tmp: Float64Array): void {
+  for (let y = 0; y < 8; y++) {
+    for (let u = 0; u < 8; u++) {
+      let sum = 0;
+      for (let v = 0; v < 8; v++) sum += (COS[y * 8 + v] as number) * (coef[v * 8 + u] as number);
+      tmp[y * 8 + u] = sum;
+    }
+  }
+  const stride = c.blocksWide * 8;
+  for (let y = 0; y < 8; y++) {
+    const row = (by * 8 + y) * stride + bx * 8;
+    for (let x = 0; x < 8; x++) {
+      let sum = 0;
+      for (let u = 0; u < 8; u++) sum += (COS[x * 8 + u] as number) * (tmp[y * 8 + u] as number);
+      c.plane[row + x] = Math.round(sum + 128);
+    }
+  }
+}
+
+function decode(data: Uint8Array): Pixels | undefined {
+  if (data[0] !== 0xff || data[1] !== 0xd8) return undefined;
+  const quants: Uint16Array[] = [];
+  const dcTables: Huffman[] = [];
+  const acTables: Huffman[] = [];
+  let components: Component[] = [];
+  let width = 0;
+  let height = 0;
+  let hMax = 1;
+  let vMax = 1;
+  let restartInterval = 0;
+  let at = 2;
+  let scanned = false;
+  while (at + 4 <= data.length) {
+    if (data[at] !== 0xff) {
+      at++;
+      continue;
+    }
+    const marker = data[at + 1] as number;
+    if (marker === 0xff) {
+      at++;
+      continue;
+    }
+    if (marker === 0xd9) break;
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      at += 2;
+      continue;
+    }
+    const length = ((data[at + 2] as number) << 8) | (data[at + 3] as number);
+    const body = at + 4;
+    const end = at + 2 + length;
+    if (end > data.length) return undefined;
+    if (marker === 0xdb) {
+      for (let p = body; p < end; ) {
+        const pq = (data[p] as number) >> 4;
+        const id = (data[p] as number) & 15;
+        p++;
+        const table = new Uint16Array(64);
+        for (let k = 0; k < 64; k++) {
+          table[k] = pq ? ((data[p] as number) << 8) | (data[p + 1] as number) : (data[p] as number);
+          p += pq ? 2 : 1;
+        }
+        quants[id] = table;
+      }
+    } else if (marker === 0xc4) {
+      for (let p = body; p < end; ) {
+        const kind = (data[p] as number) >> 4;
+        const id = (data[p] as number) & 15;
+        const counts = data.subarray(p + 1, p + 17);
+        const total = counts.reduce((a, b) => a + b, 0);
+        const table = buildHuffman(counts, data.subarray(p + 17, p + 17 + total));
+        if (kind === 0) dcTables[id] = table;
+        else acTables[id] = table;
+        p += 17 + total;
+      }
+    } else if (marker === 0xc0 || marker === 0xc1) {
+      if (data[body] !== 8) return undefined;
+      height = ((data[body + 1] as number) << 8) | (data[body + 2] as number);
+      width = ((data[body + 3] as number) << 8) | (data[body + 4] as number);
+      const n = data[body + 5] as number;
+      if ((n !== 1 && n !== 3) || width === 0 || height === 0) return undefined;
+      components = [];
+      for (let i = 0; i < n; i++) {
+        const p = body + 6 + i * 3;
+        const sampling = data[p + 1] as number;
+        components.push({
+          id: data[p] as number,
+          h: sampling >> 4 || 1,
+          v: sampling & 15 || 1,
+          quant: data[p + 2] as number,
+          blocksWide: 0,
+          blocksHigh: 0,
+          plane: new Uint8ClampedArray(0),
+          dc: 0,
+          dcTable: 0,
+          acTable: 0,
+        });
+      }
+      hMax = Math.max(...components.map((c) => c.h));
+      vMax = Math.max(...components.map((c) => c.v));
+      const mcusWide = Math.ceil(width / (8 * hMax));
+      const mcusHigh = Math.ceil(height / (8 * vMax));
+      for (const c of components) {
+        c.blocksWide = mcusWide * c.h;
+        c.blocksHigh = mcusHigh * c.v;
+        c.plane = new Uint8ClampedArray(c.blocksWide * c.blocksHigh * 64);
+      }
+    } else if (marker >= 0xc2 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      // Progressive, lossless or arithmetic coding.
+      return undefined;
+    } else if (marker === 0xdd) {
+      restartInterval = ((data[body] as number) << 8) | (data[body + 1] as number);
+    } else if (marker === 0xda) {
+      if (components.length === 0) return undefined;
+      const n = data[body] as number;
+      const scan: Component[] = [];
+      for (let i = 0; i < n; i++) {
+        const c = components.find((x) => x.id === data[body + 1 + i * 2]);
+        if (!c) return undefined;
+        const tables = data[body + 2 + i * 2] as number;
+        c.dcTable = tables >> 4;
+        c.acTable = tables & 15;
+        c.dc = 0;
+        scan.push(c);
+      }
+      const bits = new Bits(data, end);
+      const coef = new Float64Array(64);
+      const tmp = new Float64Array(64);
+      const block = (c: Component, bx: number, by: number) => {
+        const dc = dcTables[c.dcTable];
+        const ac = acTables[c.acTable];
+        const quant = quants[c.quant];
+        if (!dc || !ac || !quant) throw new Error("missing table");
+        readBlock(bits, c, dc, ac, quant, coef);
+        storeBlock(c, bx, by, coef, tmp);
+      };
+      let units = 0;
+      const nextUnit = () => {
+        if (restartInterval > 0 && units > 0 && units % restartInterval === 0) {
+          bits.restart();
+          for (const c of scan) c.dc = 0;
+        }
+        units++;
+      };
+      if (scan.length === 1) {
+        const c = scan[0] as Component;
+        const wide = Math.ceil(Math.ceil((width * c.h) / hMax) / 8);
+        const high = Math.ceil(Math.ceil((height * c.v) / vMax) / 8);
+        for (let by = 0; by < high; by++) {
+          for (let bx = 0; bx < wide; bx++) {
+            nextUnit();
+            block(c, bx, by);
+          }
+        }
+      } else {
+        const mcusWide = Math.ceil(width / (8 * hMax));
+        const mcusHigh = Math.ceil(height / (8 * vMax));
+        for (let my = 0; my < mcusHigh; my++) {
+          for (let mx = 0; mx < mcusWide; mx++) {
+            nextUnit();
+            for (const c of scan) {
+              for (let v = 0; v < c.v; v++) for (let h = 0; h < c.h; h++) block(c, mx * c.h + h, my * c.v + v);
+            }
+          }
+        }
+      }
+      scanned = true;
+      at = bits.at;
+      continue;
+    }
+    at = end;
+  }
+  if (!scanned) return undefined;
+  const out = new Uint8Array(width * height * 3);
+  const sample = (c: Component, x: number, y: number) =>
+    c.plane[Math.floor((y * c.v) / vMax) * c.blocksWide * 8 + Math.floor((x * c.h) / hMax)] as number;
+  const [first, second, third] = components as [Component, Component?, Component?];
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const o = (y * width + x) * 3;
+      const luma = sample(first, x, y);
+      if (!second || !third) {
+        out[o] = out[o + 1] = out[o + 2] = luma;
+        continue;
+      }
+      const cb = sample(second, x, y) - 128;
+      const cr = sample(third, x, y) - 128;
+      out[o] = clamp(luma + 1.402 * cr);
+      out[o + 1] = clamp(luma - 0.344136 * cb - 0.714136 * cr);
+      out[o + 2] = clamp(luma + 1.772 * cb);
+    }
+  }
+  return { width, height, channels: 3, data: out };
+}
+
+const clamp = (v: number): number => (v < 0 ? 0 : v > 255 ? 255 : Math.round(v));
+
+/** Decode a baseline JPEG to 8-bit RGB, or undefined for a file this decoder does not read (see the module comment). */
+export function decodeJpeg(data: Uint8Array): Pixels | undefined {
+  try {
+    return decode(data);
+  } catch {
+    return undefined;
+  }
 }

@@ -85,6 +85,7 @@ export function schemas() {
     by: z.enum(["agent", "user"]).optional(),
     user: z.boolean().optional(),
     active: z.boolean().optional(),
+    session: z.boolean().optional(),
     window: z.boolean().optional(),
     dropped: z.number().optional(),
     focusLost: z.number().optional(),
@@ -384,10 +385,14 @@ export function register(server: McpServer, deps: EngineDeps): void {
         "Keep the user's own keyboard and mouse out of the game while sculkwire plays through the injected agent, so a " +
         "click or key in the game window cannot disturb an action. While locked, the game also does not pause when " +
         "its window loses focus, and the action bar shows a badge. F9 in the game always works: it hands control to " +
-        "the user (a running player_act action stops, a play job pauses) and gives it back. mode on locks now, off " +
-        "never locks, auto (the default) locks while a player_act action or play job runs. Without mode it reports the " +
-        "state. Needs engine_attach. The keyboard route cannot be locked, because its input arrives the same way as " +
-        "the user's: use the engine route or launch with display: headless.",
+        "the user (a running player_act action stops, a play job pauses) and gives it back; the user keeps control until " +
+        "F9 again or until sculkwire changes the lock (a mode set here, or the start of a new player_act action or play " +
+        "job). mode on locks now, off never locks, auto (the agent's default) locks while a player_act action or play " +
+        "job runs, or while game_launch holds its session lock (session: true; inputLock, default on). That session lock " +
+        "belongs to the sculkwire process's connection: game_stop ends it, and the agent ends it by itself when the " +
+        "process exits or dies, so the game is never left locked. Without mode it reports the state. Needs " +
+        "engine_attach. The keyboard route cannot be locked, because its input arrives the same way as the user's, and " +
+        "while locked it is kept out with the user's: use the engine route, or launch with inputLock auto or off.",
       inputSchema: {
         mode: z.enum(LOCK_MODES).optional().describe("on, off or auto. Omit to read the state"),
       },
@@ -462,13 +467,15 @@ export function register(server: McpServer, deps: EngineDeps): void {
     {
       title: "World settings",
       description:
-        "Read or change a test world: game rules, difficulty, game type, time and weather. Through the running game " +
-        "when the agent is attached, applied the way the game applies its own command; otherwise sculkwire reads and " +
-        "rewrites level.dat, and only for a sculkwire-* world no game has loaded. Only sculkwire-* worlds are ever " +
-        "changed. World changes need no restore: a test world is disposable and the next launch replaces it.",
+        "Read or change the world sculkwire entered or attached to: game rules, difficulty, game type, time and " +
+        "weather. Through the running game when the agent is attached, applied the way the game applies its own " +
+        "command, and only in the world sculkwire entered or attached to or the user's saved dev world (any other loaded " +
+        "world is refused, by sculkwire and by the agent). Without the agent sculkwire reads level.dat (any world by " +
+        "name), and rewrites it only for the saved dev world while the game is closed. The world is the user's: a " +
+        "change stays in it, so set back what a test changed.",
       inputSchema: {
         action: z.enum(["get", "set"]).describe("read the world's settings, or change them"),
-        world: z.string().optional().describe("get/set without an agent: world name, sculkwire- added when missing"),
+        world: z.string().optional().describe("get without an agent: any world by level name or level id (default the loaded world, else the saved dev world). set: must name the loaded world, or without an agent the saved dev world"),
         gamerules: z.record(z.string(), z.union([z.boolean(), z.number()])).optional().describe("set: game rule values, e.g. { keepinventory: true }"),
         difficulty: z.enum(Object.keys(DIFFICULTIES) as [Difficulty, ...Difficulty[]]).optional(),
         gameType: z.enum(GAME_TYPES).optional(),
@@ -483,7 +490,7 @@ export function register(server: McpServer, deps: EngineDeps): void {
     async ({ action, world, gamerules, difficulty, gameType, time, weather }) => {
       try {
         if (action === "get") {
-          const result = await getWorldSettings(world, { loaded: deps.script.loadedWorld });
+          const result = await getWorldSettings(world, deps.script);
           if (!result.ok) return failureResult(result);
           return ok(worldText(result.value.settings, result.value.source), { ok: true, ...result.value });
         }
@@ -494,7 +501,7 @@ export function register(server: McpServer, deps: EngineDeps): void {
           ...(time !== undefined ? { time } : {}),
           ...(weather !== undefined ? { weather } : {}),
         };
-        const result = await setWorldSettings(change, world, { loaded: deps.script.loadedWorld });
+        const result = await setWorldSettings(change, world, deps.script);
         if (!result.ok) return failureResult(result);
         return ok(worldText(result.value.settings, result.value.source), { ok: true, ...result.value });
       } catch (err) {

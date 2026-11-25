@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { drawIcon, fill, frame, png } from "../../testing/screenshots.ts";
+import { drawPicture, fill, frame, png, testPicture } from "../../testing/screenshots.ts";
 import type { UiControl } from "../engine/ui.ts";
 import { decodePng, type Pixels } from "./png.ts";
 import {
@@ -23,8 +23,8 @@ import {
 } from "./screens.ts";
 
 /**
- * A 1280x668 RGB PNG of the Play screen as the game draws it: each tile's thumbnail (a `sculkwire-` world's icon,
- * another picture for any other world or a featured server), and its name row with, on local worlds, the light divider
+ * A 1280x668 RGB PNG of the Play screen as the game draws it: each tile's thumbnail (a made-up picture per world name,
+ * a flat blue one for a featured server), and its name row with, on local worlds, the light divider
  * before the edit button. Only the first 8 tiles are visible.
  */
 function playScreen(tiles: readonly string[], shift = 0): Buffer {
@@ -37,8 +37,8 @@ function playScreen(tiles: readonly string[], shift = 0): Buffer {
     const w = width * 0.2;
     const h = (w * 9) / 16;
     const thumb = { x: centre.x * width - w / 2, y: centre.y * height - h / 2 - shift, width: w, height: h };
-    if (tile.startsWith("sculkwire-")) drawIcon(image, thumb, tile);
-    else fill(image, thumb, tile === "LAN" ? [30, 90, 160] : [120, 160, 60]);
+    if (tile === "LAN") fill(image, thumb, [30, 90, 160]);
+    else drawPicture(image, thumb, testPicture(tile));
     if (tile === "LAN") return;
     const x = Math.round((0.1992 + (slot % 4) * 0.2375) * width);
     fill(image, { x, y: Math.round((slot < 4 ? 0.4985 : 0.864) * height) - shift, width: 1, height: 59 }, [90, 90, 90]);
@@ -456,7 +456,7 @@ class FakeGame {
 
 async function recover(game: FakeGame, extra: { timeoutMs?: number } = {}) {
   const screens = screensInLog(game.history());
-  return recoverJoin(game.io(), { levelId: "sculkwire-bridge", screens, ...extra });
+  return recoverJoin(game.io(), { levelId: "sculkwire-bridge", thumbnail: testPicture("sculkwire-bridge"), screens, ...extra });
 }
 
 /** The one double-click the recovery sent, as fractions of the frame, checked to be on the tile in `slot`. */
@@ -470,17 +470,17 @@ function expectTileClick(input: string | undefined, slot: number, ui = false): v
 }
 
 describe("join recovery state machine", () => {
-  it("presses Back to menu with Return and opens the tile showing the test world's icon", async () => {
+  it("presses Back to menu with Return and opens the tile showing the world's own picture", async () => {
     const game = new FakeGame({ start: "disconnect", afterBackToMenu: "play" });
     const result = await recover(game);
     expect(result.recovered).toBe(true);
     expect(game.world).toBe("sculkwire-bridge");
-    // Slots 1 and 2 are featured servers: the test world's icon is on slot 3.
+    // Slots 1 and 2 are featured servers: the world's picture is on slot 3.
     expect(game.inputs).toHaveLength(2);
     expect(game.inputs[0]).toBe("Return");
     expectTileClick(game.inputs[1], 2);
     expect(game.joinedServer).toBe(false);
-    expect(result).toMatchObject({ foundByIcon: true, presses: 2, scrolls: 0, opened: ["sculkwire-bridge"] });
+    expect(result).toMatchObject({ foundByThumbnail: true, presses: 2, scrolls: 0, opened: ["sculkwire-bridge"] });
     expect(result.steps[0]).toBe("disconnect: Return");
   });
 
@@ -512,7 +512,7 @@ describe("join recovery state machine", () => {
     expect((await recover(new FakeGame({ start: "options" }))).recovered).toBe(true);
   });
 
-  it("opens the test world's tile, not the look-alike sculkwire world played after it", async () => {
+  it("opens the world's tile, not another world played after it", async () => {
     const game = new FakeGame({ start: "play", tiles: ["sculkwire-other", "LAN", "other-world", "sculkwire-bridge"] });
     const result = await recover(game);
     expect(result.recovered).toBe(true);
@@ -529,6 +529,38 @@ describe("join recovery state machine", () => {
     expect(game.opened).toEqual([]);
     expect(game.joinedServer).toBe(false);
     expect(result.steps.some((s) => s.includes("leave the Play screen once"))).toBe(true);
+  });
+
+  it("never clicks when two tiles show the world's picture, or when the world has no picture", async () => {
+    const twins = new FakeGame({ start: "play", tiles: ["sculkwire-bridge", "LAN", "sculkwire-bridge"] });
+    const twin = await recover(twins);
+    expect(twin.recovered).toBe(false);
+    expect(twin.reason).toMatch(/2 tiles on the Play screen show the picture of sculkwire-bridge/);
+    expect(twins.playClicks).toEqual([]);
+    const plain = new FakeGame({ start: "play" });
+    const none = await recoverJoin(plain.io(), { levelId: "sculkwire-bridge", screens: screensInLog(plain.history()) });
+    expect(none.recovered).toBe(false);
+    expect(none.reason).toMatch(/has no world_icon\.jpeg sculkwire can read/);
+    expect(plain.playClicks).toEqual([]);
+  });
+
+  it("never opens a featured server's tile, even one showing the same picture", async () => {
+    const game = new FakeGame({ start: "play", tiles: ["LAN", "other-world"] });
+    const io = game.io();
+    const screenshot = io.screenshot;
+    // The featured server in slot 0 shows the world's picture; slot 0 has no edit-button divider, so it is not a local world.
+    io.screenshot = async (label) => {
+      const shot = await screenshot(label);
+      if (!shot) return shot;
+      const image = decodePng(shot.png) as Pixels;
+      const c = LAYOUT.worldTile(0);
+      drawPicture(image, { x: c.x * 1280 - 128, y: c.y * 668 - 72, width: 256, height: 144 }, testPicture("sculkwire-bridge"));
+      return { path: shot.path, png: png(image) };
+    };
+    const result = await recoverJoin(io, { levelId: "sculkwire-bridge", thumbnail: testPicture("sculkwire-bridge"), screens: screensInLog(game.history()), timeoutMs: 60_000 });
+    expect(result.recovered).toBe(false);
+    expect(game.playClicks).toEqual([]);
+    expect(game.joinedServer).toBe(false);
   });
 
   it("leaves a world that opened instead of the test world through Save & Quit, then opens the tile again", async () => {
@@ -617,7 +649,7 @@ describe("screens from the agent's UI", () => {
 describe("join recovery through the agent's UI", () => {
   /** A game whose log names no screens at all: only `ui.screen` can tell where it is. */
   const uiOnly = (opts: FakeGameOptions) => new FakeGame({ ui: true, quiet: true, ...opts });
-  const start = { levelId: "sculkwire-bridge", timeoutMs: 60_000 };
+  const start = { levelId: "sculkwire-bridge", thumbnail: testPicture("sculkwire-bridge"), timeoutMs: 60_000 };
 
   it("reads the screen from ui.screen and presses the named control", async () => {
     const game = uiOnly({ start: "disconnect", afterBackToMenu: "rejoin" });
@@ -628,7 +660,7 @@ describe("join recovery through the agent's UI", () => {
     expect(result.steps[0]).toBe("disconnect: Return (or press Back to menu)");
   });
 
-  it("presses Play by name wherever the button is drawn, then opens the tile showing the icon", async () => {
+  it("presses Play by name wherever the button is drawn, then opens the tile showing the world's picture", async () => {
     const game = uiOnly({ start: "start", playButton: { x: 0.9, y: 0.9 } });
     const result = await recoverJoin(game.io(), start);
     expect(result.recovered).toBe(true);
@@ -649,10 +681,10 @@ describe("join recovery through the agent's UI", () => {
     expect(game.inputs.slice(0, scrolled).some((entry) => entry.startsWith("ui:click"))).toBe(false);
     // One row down: the test world is the sixth visible tile.
     expectTileClick(game.inputs.at(-1), 5, true);
-    expect(result).toMatchObject({ foundByIcon: true, scrolls: 1 });
+    expect(result).toMatchObject({ foundByThumbnail: true, scrolls: 1 });
   });
 
-  it("never clicks when no tile shows the icon: it scrolls, reopens once, then stops", async () => {
+  it("never clicks when no tile shows the world's picture: it scrolls, reopens once, then stops", async () => {
     const tiles = ["LAN", "sculkwire-other", ...Array.from({ length: 10 }, (_, i) => `sculkwire-w${i}`)];
     const game = uiOnly({ start: "play", tiles });
     const result = await recoverJoin(game.io(), start);
@@ -661,7 +693,7 @@ describe("join recovery through the agent's UI", () => {
     expect(game.playClicks).toEqual([]);
     expect(game.opened).toEqual([]);
     expect(result.scrolls).toBeGreaterThan(0);
-    expect(result.foundByIcon).toBe(false);
+    expect(result.foundByThumbnail).toBe(false);
   });
 
   it("selects the Worlds tab by its name, never presses or clicks another tab, and never clicks the tab strip", async () => {

@@ -43,7 +43,7 @@ describe("default dev world", () => {
     expect(JSON.parse(await readFile(config, "utf8")).update).toEqual({ channel: "main" });
   });
 
-  it("refuses a name several worlds share, a missing world and a sculkwire test world", async () => {
+  it("refuses a name several worlds share and a missing world, and takes a sculkwire- world the user names", async () => {
     const target = await install();
     const config = join(target.sharedComMojang, "..", "config.json");
     await world(target, "one", "Twins");
@@ -52,7 +52,7 @@ describe("default dev world", () => {
     await expect(useDevWorld(target, "Twins", config)).rejects.toThrow('2 worlds are named "Twins"; pass the level id of one');
     expect(await useDevWorld(target, "two", config)).toEqual({ levelId: "two", name: "Twins" });
     await expect(useDevWorld(target, "Nowhere", config)).rejects.toThrow('no world named or with level id "Nowhere"');
-    await expect(useDevWorld(target, "sculkwire-bridge", config)).rejects.toThrow("is a sculkwire test world");
     expect(await readDevWorld(target, config)).toEqual({ levelId: "two", name: "Twins" });
+    expect(await useDevWorld(target, "sculkwire-bridge", config)).toEqual({ levelId: "sculkwire-bridge", name: "sculkwire-bridge" });
   });
 });

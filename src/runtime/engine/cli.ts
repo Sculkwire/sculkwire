@@ -231,7 +231,7 @@ function worldSettingsCommand(deps: EngineDeps): CliCommand {
   return {
     name: "world settings",
     summary:
-      "Read or change a test world: world settings [get] [--world name] | world settings set [--world name] [--difficulty d] " +
+      "Read or change the world sculkwire entered or attached to, or the saved dev world: world settings [get] [--world name] | world settings set [--world name] [--difficulty d] " +
       "[--game-type t] [--time n] [--gamerule k=v]... [--weather clear|rain|thunder]",
     async run(args) {
       return oneShot(async () => {
@@ -251,7 +251,7 @@ function worldSettingsCommand(deps: EngineDeps): CliCommand {
           return ExitCode.usage;
         }
         if (action === "get") {
-          const result = await attempt(() => getWorldSettings(worldFlag, { loaded: deps.script.loadedWorld }));
+          const result = await attempt(() => getWorldSettings(worldFlag, deps.script));
           if ("code" in result) return result.code;
           printJson(result.value);
           return ExitCode.ok;
@@ -306,7 +306,7 @@ function worldSettingsCommand(deps: EngineDeps): CliCommand {
           err("give at least one of --difficulty, --game-type, --time, --gamerule or --weather");
           return ExitCode.usage;
         }
-        const result = await attempt(() => setWorldSettings(change, worldFlag, { loaded: deps.script.loadedWorld }));
+        const result = await attempt(() => setWorldSettings(change, worldFlag, deps.script));
         if ("code" in result) return result.code;
         printJson(result.value);
         return ExitCode.ok;

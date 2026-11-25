@@ -1,12 +1,14 @@
 /**
- * The bench runner: launch a sculkwire world (waiting for the user on an install they start by hand), attach the
- * input provider when one is installed, set the camera for each `--view`, then for every `--stance`, scenario and run
- * clear and build its arena, set the player up, spawn the mobs (before the action, or during it with
- * `spawnAfterMs`), run the action or `play` goal (with the stance and, for a scenario with `goals`, the run's
- * phrasing) with the fight's per-tick trace on, measure, and reset. Ends with the camera put back
- * and the game stopped (unless asked to keep it). The report says how the world was reached (`entry`).
+ * The bench runner: launch the game into a fresh scratch world `sculkwire-bench` (waiting for the user on an install
+ * they start by hand), attach the input provider when one is installed, set the camera for each `--view`, then for
+ * every `--stance`, scenario and run clear and build its arena, set the player up, spawn the mobs (before the action,
+ * or during it with `spawnAfterMs`), run the action or `play` goal (with the stance and, for a scenario with `goals`,
+ * the run's phrasing) with the fight's per-tick trace on, measure, and reset. Ends with the camera put back, the game
+ * stopped and the scratch world deleted (unless asked to keep the game). The bench never runs in a user's world: it
+ * builds arenas, sets game rules and summons mobs. The report says how the world was reached (`entry`).
  */
 import { readdir } from "node:fs/promises";
+import { findInstall } from "../../../gamefiles/install.ts";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -34,6 +36,7 @@ import { withStance, type BenchStance } from "./stance.ts";
 import { liveTaskEnv } from "../tasks/live.ts";
 import type { BenchContext, Hurt, Metric, RunOutcome, Scenario } from "./types.ts";
 import { VIEW_OPTION, viewValue, type BenchView } from "./view.ts";
+import { deleteWorld } from "../worldstore.ts";
 
 const SCENARIO_DIR = join(dirname(fileURLToPath(import.meta.url)), "scenarios");
 
@@ -69,6 +72,8 @@ export interface BenchOptions {
   log?: (line: string) => void;
 }
 
+/** The scratch world the bench plays in (`sculkwire-bench`), created fresh by each run and deleted at its end. */
+const BENCH_WORLD = "bench";
 /** Seconds `sculk bench` waits for a world the user opens by hand. */
 export const DEFAULT_WAIT_S = 900;
 
@@ -471,8 +476,20 @@ export async function runBench(opts: BenchOptions): Promise<BenchReport> {
   }
   const startedAt = new Date().toISOString();
   log(`launching the game (${opts.display ?? "window"}, muted, difficulty normal)`);
-  // The bench plays in its own test world: a game the user already opened is refused, never attached.
-  const started = await bridge.start({ mode: opts.display ?? "window", mute: true, difficulty: "normal", world: "bench", attach: false });
+  // The bench plays in a scratch world of its own, never in a user's world: a game the user already opened is refused,
+  // never attached. A world it cannot create stops the bench.
+  const removeScratch = async () => {
+    const install = bridge.install ?? (await findInstall());
+    await deleteWorld(install, BENCH_WORLD).then(
+      (r) => r.existed && log(`deleted the scratch world ${r.world}`),
+      (e: unknown) => log(`deleting the scratch world ${BENCH_WORLD} failed (delete it with sculk game worlds --delete ${BENCH_WORLD}): ${errorMessage(e)}`),
+    );
+  };
+  const started = await bridge.start({ mode: opts.display ?? "window", mute: true, difficulty: "normal", scratchWorld: BENCH_WORLD, attach: false }).catch(async (e: unknown) => {
+    // Only a world this start created: a refused start (the game already runs) leaves the folders alone.
+    if (bridge.world?.how === "created") await removeScratch();
+    throw e;
+  });
   const reports: ScenarioReport[] = [];
   const traces: BenchTrace[] = [];
   let originalView: GameSetting | undefined;
@@ -553,7 +570,10 @@ export async function runBench(opts: BenchOptions): Promise<BenchReport> {
         (err: unknown) => log(`restoring ${VIEW_OPTION} failed (game_stop restores it): ${errorMessage(err)}`),
       );
     }
-    if (!opts.keep) await bridge.stop().catch((err: unknown) => log(`stopping the game failed: ${errorMessage(err)}`));
+    if (!opts.keep) {
+      await bridge.stop().catch((err: unknown) => log(`stopping the game failed: ${errorMessage(err)}`));
+      await removeScratch();
+    } else log(`--keep: the game keeps running in the scratch world; once it is stopped, delete the world with sculk game worlds --delete ${BENCH_WORLD}`);
   }
   const table = `${markdownTable(reports)}\n\n${entry.footer}`;
   const stamp = startedAt.replace(/[:.]/g, "-");

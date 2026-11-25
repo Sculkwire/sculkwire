@@ -14,7 +14,7 @@ import type { ClientInstall } from "../../gamefiles/install.ts";
 
 type Handler = (args: Record<string, unknown>) => Promise<{ structuredContent?: Record<string, unknown>; isError?: boolean }>;
 interface Tool {
-  config: { outputSchema?: z.ZodRawShape };
+  config: { inputSchema?: z.ZodRawShape | z.ZodType; outputSchema?: z.ZodRawShape };
   handler: Handler;
 }
 
@@ -102,5 +102,16 @@ describe("game_worlds", () => {
       bridge.world = undefined;
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("game_launch", () => {
+  it("refuses the removed test world inputs instead of ignoring them", () => {
+    const schema = tools().get("game_launch")?.config.inputSchema;
+    if (!(schema instanceof z.ZodType)) throw new Error("game_launch takes a zod object schema");
+    for (const removed of [{ fresh: true }, { world: "bench" }, { keep: true }, { copyFrom: "My Base" }]) {
+      expect(schema.safeParse(removed).success, JSON.stringify(removed)).toBe(false);
+    }
+    expect(schema.safeParse({ project: "/tmp/addon", userWorld: "My Base", inputLock: "on" }).success).toBe(true);
   });
 });

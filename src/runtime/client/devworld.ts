@@ -1,6 +1,6 @@
 /**
- * The user's default dev world: one of their own worlds they chose (game_worlds `use`), which game_launch then enters
- * instead of a `sculkwire-` test world. Saved in the `devWorlds` section of `config.json`, one per game user folder
+ * The user's default dev world: one of their worlds they chose (game_worlds `use`), which game_launch then enters when
+ * no `userWorld` is given. Saved in the `devWorlds` section of `config.json`, one per game user folder
  * (`install.userComMojang`), as `{ "devWorlds": { "<userComMojang>": { "levelId": "…", "name": "…" } } }`. Other
  * sections of the file are kept as they are.
  */
@@ -62,9 +62,10 @@ export async function saveDevWorld(install: Pick<ClientInstall, "userComMojang">
 }
 
 /**
- * Save `wanted` (level name or level id of one of the user's own worlds; a name several worlds share is refused) as the
- * game user's dev world, or forget the saved one when `wanted` is undefined. A `sculkwire-` test world is refused.
- * Returns the saved world, or undefined after forgetting. Nothing is written into the world.
+ * Save `wanted` (level name or level id of one of the user's worlds; a name several worlds share is refused) as the
+ * game user's dev world, or forget the saved one when `wanted` is undefined. A `sculkwire-` world an earlier version
+ * made (a copy of one of the user's worlds, say) may be chosen too; the next launches then never remove it. Returns the
+ * saved world, or undefined after forgetting. Nothing is written into the world.
  */
 export async function useDevWorld(install: ClientInstall, wanted: string | undefined, path = configPath()): Promise<DevWorld | undefined> {
   if (wanted === undefined) {
@@ -72,7 +73,6 @@ export async function useDevWorld(install: ClientInstall, wanted: string | undef
     return undefined;
   }
   const world = await findWorld(install, wanted);
-  if (world.sculkwire) throw new Error(`${world.name} is a sculkwire test world; a dev world is one of your own worlds (game_launch world and keep enter a test world)`);
   const saved = { levelId: world.levelId, name: world.name };
   await saveDevWorld(install, saved, path);
   return saved;

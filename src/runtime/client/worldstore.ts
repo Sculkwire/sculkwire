@@ -1,25 +1,25 @@
 /**
- * The worlds of the active user and the life of sculkwire's test worlds: the kept marker, removal of stale ones,
- * deletion of one, and a test world copied from one of the user's worlds.
+ * The worlds of the active user: listing them, finding one by name or level id, finding the user's worlds that use a
+ * project's packs, and the `sculkwire-` worlds earlier versions made as test worlds (and `sculk bench` still makes as
+ * scratch worlds): their kept marker, removal of stale ones, deletion of one.
  *
- * Only a folder whose name AND level name both start with `sculkwire-` is ever written or deleted here (the live-game
- * rule: never touch the user's own worlds). A user's world is read to copy it, and only when the user picked it; the one
- * world the user chose as their dev world is entered by `enterUserWorld` (world.ts), never deleted.
+ * Only a folder whose name AND level name both start with `sculkwire-` is ever deleted here (the live-game rule: never
+ * touch the user's own worlds), and one marked kept or copied (it can hold the user's work) never automatically. The
+ * user's own worlds are only read here; the one a launch enters is written by `enterUserWorld` (world.ts).
  */
-import { cp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { exists, readJsonOr, writeJsonAtomic } from "../../core/fs.ts";
+import { readJsonOr } from "../../core/fs.ts";
 import type { ClientInstall } from "../../gamefiles/install.ts";
-import { readLevelDat, tagNumber, TAG, writeLevelDat, type LevelDat } from "../../gamefiles/nbt.ts";
-import { gameTypeOf, levelIdFor, setCheats, setSinglePlayer, WORLD_PREFIX, worldName, type GameType } from "../../gamefiles/worlds.ts";
-import { ICON_FILE, worldIcon } from "./icon.ts";
+import { readLevelDat, tagNumber, type LevelDat } from "../../gamefiles/nbt.ts";
+import { gameTypeOf, levelIdFor, WORLD_PREFIX, worldName, type GameType } from "../../gamefiles/worlds.ts";
 
-/** A test world not played for this many days is removed by the next launch, unless it is kept. */
+/** A `sculkwire-` world not played for this many days is removed by the next launch, unless it is kept. */
 export const STALE_WORLD_DAYS = 3;
-/** The largest world `copyWorld` copies. */
-export const COPY_LIMIT_BYTES = 4 * 1024 ** 3;
-/** The kept marker in a test world's folder. */
+/** The kept marker earlier versions wrote into a `sculkwire-` world's folder. */
 export const WORLD_MARKER = "sculkwire-world.json";
+/** The picture of a world the game shows as its tile's thumbnail on the Play screen; the game writes it. */
+export const ICON_FILE = "world_icon.jpeg";
 
 export interface WorldMarker {
   /** Never removed automatically. */
@@ -34,10 +34,11 @@ export interface WorldInfo {
   /** Level name (`levelname.txt`). */
   name: string;
   dir: string;
-  /** Both the folder and the level name start with `sculkwire-`: the only worlds sculkwire writes or deletes. */
+  /** Both the folder and the level name start with `sculkwire-`: the only worlds sculkwire deletes. */
   sculkwire: boolean;
-  /** A test world with the kept marker: never removed automatically. */
+  /** A `sculkwire-` world with the kept marker: never removed automatically. */
   kept: boolean;
+  /** The level name of the user's world a `sculkwire-` world was copied from by an earlier version. */
   copiedFrom?: string;
   /** `LastPlayed` of `level.dat`, else the folder's modification time. */
   lastPlayed: Date;
@@ -114,36 +115,30 @@ async function scanWorlds(install: ClientInstall, size: boolean): Promise<WorldI
   return out.sort((a, b) => b.lastPlayed.getTime() - a.lastPlayed.getTime());
 }
 
-/** Every world in the active user's minecraftWorlds, played last first, with its size. */
-export function listAllWorlds(install: ClientInstall): Promise<WorldInfo[]> {
-  return scanWorlds(install, true);
-}
-
-/** The test world in folder `levelId`, or undefined when there is none (or the folder holds another world). */
-export async function testWorldAt(install: ClientInstall, levelId: string): Promise<WorldInfo | undefined> {
-  const world = await readWorld(worldsDir(install), levelId, false);
-  return world?.sculkwire ? world : undefined;
-}
-
-/** The kept marker of a test world folder, or undefined. */
-export async function readMarker(dir: string): Promise<WorldMarker | undefined> {
-  const marker = await readJsonOr<Partial<WorldMarker>>(join(dir, WORLD_MARKER));
-  if (!marker || typeof marker !== "object") return undefined;
-  return { keep: marker.keep === true, ...(typeof marker.copiedFrom === "string" ? { copiedFrom: marker.copiedFrom } : {}) };
-}
-
-export async function writeMarker(world: { levelId: string; dir: string }, marker: WorldMarker): Promise<void> {
-  if (!world.levelId.startsWith(WORLD_PREFIX)) throw new WorldRefused(`refusing to write into world folder ${world.levelId}`);
-  await writeJsonAtomic(join(world.dir, WORLD_MARKER), marker);
+/** Every world in the active user's minecraftWorlds, played last first, with its size unless `size` is false. */
+export function listAllWorlds(install: ClientInstall, size = true): Promise<WorldInfo[]> {
+  return scanWorlds(install, size);
 }
 
 /**
- * Write sculkwire's icon into a `sculkwire-` world (createWorld does). The game replaces `world_icon.jpeg` with a
- * picture of the world when it saves and quits it, so the join recovery writes the icon again before it looks for it.
+ * The user's own worlds (never a `sculkwire-` one) whose behavior or resource pack list names one of `uuids`, played
+ * last first.
  */
-export async function writeWorldIcon(world: { levelId: string; dir: string }): Promise<void> {
-  if (!world.levelId.startsWith(WORLD_PREFIX)) throw new Error(`refusing to write into world folder ${world.levelId}`);
-  await writeFile(join(world.dir, ICON_FILE), worldIcon(world.levelId));
+export async function worldsWithPacks(install: ClientInstall, uuids: readonly string[]): Promise<WorldInfo[]> {
+  const wanted = new Set(uuids);
+  const out: WorldInfo[] = [];
+  for (const world of await scanWorlds(install, false)) {
+    if (world.sculkwire) continue;
+    for (const kind of ["behavior", "resource"]) {
+      const list = await readJsonOr<unknown>(join(world.dir, `world_${kind}_packs.json`));
+      const usesPack = (e: unknown) => typeof e === "object" && e !== null && "pack_id" in e && typeof e.pack_id === "string" && wanted.has(e.pack_id);
+      if (Array.isArray(list) && list.some(usesPack)) {
+        out.push(world);
+        break;
+      }
+    }
+  }
+  return out;
 }
 
 /** Delete one listed world, after checking once more that both its folder and its level name are sculkwire's. */
@@ -155,18 +150,18 @@ async function removeTestWorld(world: WorldInfo): Promise<void> {
 }
 
 export interface PruneOptions {
-  /** Level id of the world about to be launched: never removed. */
-  except?: string;
+  /** Level ids never removed: the world about to be launched, the user's saved dev world. */
+  except?: readonly string[];
   now?: Date;
   maxAgeDays?: number;
 }
 
-/** Remove test worlds that are not kept and were last played more than `maxAgeDays` ago. Returns their names. */
+/** Remove `sculkwire-` worlds that are not kept and were last played more than `maxAgeDays` ago. Returns their names. */
 export async function pruneWorlds(install: ClientInstall, opts: PruneOptions = {}): Promise<string[]> {
   const cutoff = (opts.now ?? new Date()).getTime() - (opts.maxAgeDays ?? STALE_WORLD_DAYS) * 86_400_000;
   const removed: string[] = [];
   for (const world of await scanWorlds(install, false)) {
-    if (!world.sculkwire || world.kept || world.levelId === opts.except || world.lastPlayed.getTime() >= cutoff) continue;
+    if (!world.sculkwire || world.kept || opts.except?.includes(world.levelId) || world.lastPlayed.getTime() >= cutoff) continue;
     try {
       await removeTestWorld(world);
       removed.push(world.name);
@@ -212,26 +207,6 @@ export async function deleteWorld(install: ClientInstall, name: string, opts: { 
   return { world: wanted, existed: true, levelIds: hits.map((w) => w.levelId) };
 }
 
-const gib = (bytes: number): string => (bytes / 1024 ** 3).toFixed(1);
-
-/** Name the copy, and make it a test world: single player, cheats on. Every other tag stays as the source had it. */
-async function patchCopiedLevel(file: string, name: string): Promise<void> {
-  const level = readLevelDat(new Uint8Array(await readFile(file)));
-  level.root.set("LevelName", { type: TAG.String, value: name });
-  setSinglePlayer(level.root);
-  setCheats(level.root);
-  await writeFile(file, writeLevelDat(level));
-}
-
-export interface CopyOptions {
-  /** Level name or level id of the world to copy (an exact match). */
-  from: string;
-  /** Name of the copy; `sculkwire-` is added when missing. */
-  name: string;
-  /** Largest source accepted (default `COPY_LIMIT_BYTES`). */
-  limitBytes?: number;
-}
-
 /**
  * The one world whose level id, else whose level name, is `wanted`. Throws when none is, and when several share the
  * name (pass the level id of one).
@@ -248,39 +223,13 @@ export async function findWorld(install: ClientInstall, wanted: string): Promise
 }
 
 /**
- * Copy one of the user's worlds (or a test world) to the test world `sculkwire-<name>`, replacing an older one. The
- * source is only read. The copy gets the new name, single player with cheats on, the icon and the kept marker.
- */
-export async function copyWorld(install: ClientInstall, opts: CopyOptions): Promise<{ levelId: string; name: string; dir: string }> {
-  const source = await findWorld(install, opts.from);
-  const name = worldName(opts.name);
-  const levelId = levelIdFor(name);
-  if (!levelId.startsWith(WORLD_PREFIX)) throw new WorldRefused(`refusing to write world folder ${levelId}`);
-  if (source.levelId === levelId) throw new Error(`${source.name} is ${name} itself; launch it with keep: true to continue in it`);
-  const size = await folderSize(source.dir);
-  const limit = opts.limitBytes ?? COPY_LIMIT_BYTES;
-  if (size > limit) throw new Error(`${source.name} is ${gib(size)} GiB; sculkwire copies worlds up to ${gib(limit)} GiB`);
-  const dir = join(worldsDir(install), levelId);
-  await rm(dir, { recursive: true, force: true });
-  await cp(source.dir, dir, { recursive: true });
-  await patchCopiedLevel(join(dir, "level.dat"), name);
-  // The game's backup of level.dat would bring the original name and multiplayer back if the game ever fell back to it.
-  const backup = join(dir, "level.dat_old");
-  if (await exists(backup)) await patchCopiedLevel(backup, name).catch(() => rm(backup, { force: true }));
-  await writeFile(join(dir, "levelname.txt"), name);
-  const world = { levelId, name, dir };
-  await writeWorldIcon(world);
-  await writeMarker(world, { keep: true, copiedFrom: source.name });
-  return world;
-}
-
-/**
  * One line of a world list: name, folder, mode, last played, size, and what sculkwire may do with it. `devWorld` is
  * the level id of the user's saved dev world.
  */
 export function worldLine(w: WorldInfo, loaded?: string, devWorld?: string): string {
   const tags = [
-    w.sculkwire ? "sculkwire" : w.levelId === devWorld ? "yours, your default dev world" : "yours, never changed",
+    w.sculkwire ? "sculkwire" : "yours",
+    ...(w.levelId === devWorld ? ["your default dev world"] : []),
     ...(w.kept ? ["kept"] : []),
     ...(w.copiedFrom ? [`copy of ${w.copiedFrom}`] : []),
     ...(w.levelId === loaded ? ["loaded"] : []),

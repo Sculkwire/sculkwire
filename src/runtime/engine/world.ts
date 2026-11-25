@@ -1,14 +1,14 @@
 /**
- * World settings of a test world: live through the agent when it is attached, else the `level.dat` of a `sculkwire-*`
- * world that no game has loaded.
+ * World settings: live through the agent when it is attached, else the `level.dat` of a world no game has loaded.
  *
  * Weather is in level.dat too (`rainLevel`/`rainTime`, `lightningLevel`/`lightningTime`), so a file edit can set it
  * for a world no game has loaded.
  *
- * Changes are only ever made in worlds named `sculkwire-*` (the live-game rule: never touch the user's own worlds).
- * The agent refuses on its own; here the loaded level's name and, for a file edit, both the level name and the folder
- * are checked first. World changes need no restore, because a test world is disposable: it is created by `game_launch`
- * and replaced by the next launch.
+ * Changes are only ever made in the world the user chose or opened (the live-game rule: never touch the user's other
+ * worlds). Live: the loaded world must be the one sculkwire entered or attached to, or the user's saved dev world; the
+ * host checks its name and passes it to the agent, which refuses any other loaded world on its own. A file edit only
+ * ever writes the saved dev world, and only while the game does not run (it would overwrite the file and keep its own
+ * value). A change stays in the world: it is the user's, so set back what a test changed.
  */
 import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { writeFileAtomic } from "../../core/fs.ts";
 import { findInstall, type ClientInstall } from "../../gamefiles/install.ts";
 import { readLevelDat, tagNumber, writeLevelDat, TAG, type LevelDat, type NbtTag } from "../../gamefiles/nbt.ts";
-import { DIFFICULTIES, GAME_TYPES, GAMERULES, WORLD_PREFIX, difficultyOf, gameTypeOf, worldName } from "../../gamefiles/worlds.ts";
+import { DIFFICULTIES, GAME_TYPES, GAMERULES, difficultyOf, gameTypeOf } from "../../gamefiles/worlds.ts";
 import type { ScriptRoute } from "./deps.ts";
 import { engine, type EngineSession, type WorldChange, type WorldState } from "./engine.ts";
 import { invalid, type EngineFailure, type EngineResult } from "./failure.ts";
@@ -31,12 +31,13 @@ export interface WorldView {
   settings: WorldState;
 }
 
-/** What the tools and the tests hand in; `session` and `install` default to the real thing. */
-export interface WorldDeps {
+/**
+ * What the tools and the tests hand in: the client's view of the game (`loadedWorld`, the saved `devWorld`,
+ * `gameRunning`; the `ScriptRoute` itself in the tools). `session` and `install` default to the real thing.
+ */
+export interface WorldDeps extends Pick<ScriptRoute, "loadedWorld" | "devWorld" | "gameRunning"> {
   session?: EngineSession;
   install?: ClientInstall;
-  /** The world the running game has loaded, or undefined when none runs. */
-  loaded: ScriptRoute["loadedWorld"];
 }
 
 /** How long a weather change set in level.dat holds: five in-game days, well past a test session. */
@@ -162,36 +163,33 @@ async function worldsOnDisk(install: ClientInstall): Promise<WorldOnDisk[]> {
   return out;
 }
 
-/**
- * The world a file read or edit means: the named one, else the game's loaded one, else the newest `sculkwire-*` world.
- * A name is prefixed with `sculkwire-` like every other world name sculkwire takes.
- */
-async function pickWorld(install: ClientInstall, name: string | undefined, deps: WorldDeps): Promise<WorldOnDisk | EngineFailure> {
-  const worlds = await worldsOnDisk(install);
-  if (worlds.length === 0) {
-    return invalid(`no world folder with a level.dat in ${join(install.userComMojang, "minecraftWorlds")}; game_launch creates one`);
-  }
-  if (name) {
-    const wanted = worldName(name);
-    const hit = worlds.find((w) => (stateFromLevel(w.level).name ?? "") === wanted);
-    if (!hit) return invalid(`no world named ${wanted} in ${install.label}`);
-    return hit;
-  }
-  const loaded = deps.loaded();
-  if (loaded) {
-    const hit = worlds.find((w) => w.levelId === loaded.levelId);
-    if (hit) return hit;
-  }
-  const test = worlds.filter((w) => (stateFromLevel(w.level).name ?? "").startsWith(WORLD_PREFIX));
-  if (test.length === 0) return invalid(`no ${WORLD_PREFIX}* world in ${install.label}; game_launch creates one`);
-  // The world played last is the one the bridge most likely means.
-  const [newest] = test.sort((a, b) => (tagNumber(b.level.root.get("LastPlayed")) ?? 0) - (tagNumber(a.level.root.get("LastPlayed")) ?? 0));
-  return newest ?? invalid(`no ${WORLD_PREFIX}* world in ${install.label}; game_launch creates one`);
+/** The one world whose level id, else whose level name, is `wanted`. */
+function findOnDisk(worlds: readonly WorldOnDisk[], wanted: string, install: ClientInstall): WorldOnDisk | EngineFailure {
+  const byId = worlds.filter((w) => w.levelId === wanted);
+  const matches = byId.length ? byId : worlds.filter((w) => stateFromLevel(w.level).name === wanted);
+  if (matches.length === 1) return matches[0] as WorldOnDisk;
+  if (matches.length === 0) return invalid(`no world named or with level id "${wanted}" in ${install.label}; game_worlds lists them`);
+  return invalid(`${matches.length} worlds are named "${wanted}"; pass the level id of one: ${matches.map((w) => w.levelId).join(", ")}`);
 }
 
 /**
- * The settings of a test world: the running level's when an agent is attached, else `level.dat`.
- * `name` selects a world for the file read; the live read always answers for the loaded one.
+ * The world a file read means: the named one (level name or level id), else the game's loaded one, else the user's
+ * saved dev world.
+ */
+async function pickWorld(install: ClientInstall, name: string | undefined, deps: WorldDeps): Promise<WorldOnDisk | EngineFailure> {
+  const worlds = await worldsOnDisk(install);
+  if (name) return findOnDisk(worlds, name, install);
+  const loaded = deps.loadedWorld();
+  const loadedHit = loaded && worlds.find((w) => w.levelId === loaded.levelId);
+  if (loadedHit) return loadedHit;
+  const saved = await deps.devWorld();
+  if (!saved) return invalid(`no world given, none loaded and no default dev world saved for ${install.label}: pass world, or save one with game_worlds action use`);
+  return findOnDisk(worlds, saved.levelId, install);
+}
+
+/**
+ * The settings of a world: the running level's when an agent is attached, else `level.dat`. `name` selects a world
+ * for the file read; the live read always answers for the loaded one. Reading changes nothing.
  */
 export async function getWorldSettings(name: string | undefined, deps: WorldDeps): Promise<EngineResult<WorldView>> {
   const session = deps.session ?? engine;
@@ -211,33 +209,42 @@ export async function getWorldSettings(name: string | undefined, deps: WorldDeps
 }
 
 /**
- * Change a test world. Through an agent the game applies it; otherwise `level.dat` is rewritten, and only for a
- * `sculkwire-*` world that is not loaded (the running game would overwrite the file and keep its own value).
+ * Change the world the user chose or opened. Through an agent the game applies it, in the loaded world only when it is
+ * the one sculkwire entered or attached to or the saved dev world; otherwise `level.dat` of the saved dev world is
+ * rewritten, only while the game does not run.
  */
 export async function setWorldSettings(change: WorldChange, name: string | undefined, deps: WorldDeps): Promise<EngineResult<WorldView>> {
   const session = deps.session ?? engine;
+  const saved = await deps.devWorld();
   if (await session.reachable()) {
     const current = await session.worldGet();
     if (!current.ok) return current;
     const loadedName = current.value.name;
-    if (loadedName === null || !loadedName.startsWith(WORLD_PREFIX)) {
+    const allowed = [deps.loadedWorld()?.name, saved?.name].filter((n) => n !== undefined);
+    if (loadedName === null || !allowed.includes(loadedName)) {
+      const which = allowed.length ? allowed.map((n) => `"${n}"`).join(" or ") : "none (no world entered or attached, no default dev world saved)";
       return invalid(
-        `the loaded world is ${loadedName === null ? "not named by the engine" : loadedName}, and only ${WORLD_PREFIX}* worlds are changed`,
+        `the loaded world is ${loadedName === null ? "not named by the engine" : `"${loadedName}"`}; world_settings changes only the world ` +
+          `sculkwire entered or attached to, or your saved dev world: ${which}`,
       );
     }
-    const result = await session.worldSet(change);
+    const loadedIds = [loadedName, deps.loadedWorld()?.levelId, ...(saved && saved.name === loadedName ? [saved.levelId] : [])];
+    if (name !== undefined && !loadedIds.includes(name)) {
+      return invalid(`world "${name}" is not the loaded world "${loadedName}"; through the agent only the loaded world is changed`);
+    }
+    const result = await session.worldSet(change, loadedName);
     return result.ok ? { ok: true, value: { source: "engine", world: { name: loadedName }, settings: result.value } } : result;
   }
   const install = deps.install ?? (await findInstall());
-  const picked = await pickWorld(install, name, deps);
+  if (!saved) return invalid("without an attached agent world_settings changes only your saved dev world's level.dat, and none is saved: game_worlds action use");
+  const picked = findOnDisk(await worldsOnDisk(install), saved.levelId, install);
   if ("ok" in picked) return picked;
-  const levelName = stateFromLevel(picked.level).name;
-  if (!picked.levelId.startsWith(WORLD_PREFIX) || levelName === null || !levelName.startsWith(WORLD_PREFIX)) {
-    return invalid(`${picked.dir} holds ${levelName ?? "an unnamed world"}, and only ${WORLD_PREFIX}* worlds are changed`);
+  const levelName = stateFromLevel(picked.level).name ?? saved.name;
+  if (name !== undefined && name !== picked.levelId && name !== levelName) {
+    return invalid(`"${name}" is not your saved dev world ${saved.name} [${saved.levelId}]: without an attached agent only that world's level.dat is changed`);
   }
-  const loaded = deps.loaded();
-  if (loaded && loaded.levelId === picked.levelId) {
-    return invalid(`${levelName} is loaded by the running game: attach the agent to change it live, or stop the game first`);
+  if (deps.loadedWorld() !== undefined || (await deps.gameRunning())) {
+    return invalid(`the game is running: attach the agent (engine_attach) to change ${levelName} live, or stop the game first`);
   }
   const error = applyToLevel(picked.level, change);
   if (error) return invalid(error);

@@ -16,8 +16,10 @@
 //! 4. **The camera permission** of the local player follows the lock through the engine's own
 //!    `inputpermission` command, with an action-bar badge that says who has control.
 //!
-//! `auto` (the default) locks while any connection declares an action running; each connection owns
-//! one bit of `active`, cleared when it disconnects. A hook that cannot be installed leaves the user's
+//! `auto` (the default) locks while any connection declares an action running or holds a session
+//! lock (`session`, game_launch's lock for the whole time the host has the game); each connection
+//! owns one bit of `active` and one of `session`, both cleared when it disconnects, so a host that
+//! dies never leaves the lock on through them. A hook that cannot be installed leaves the user's
 //! input untouched: the lock degrades to fewer gates, never to a stuck keyboard.
 
 use core::ffi::c_void;
@@ -27,6 +29,7 @@ use serde_json::{json, Value};
 
 use crate::engine::RpcError;
 use crate::import;
+use crate::lockbits::{self, MODE_AUTO, MODE_OFF, MODE_ON};
 use crate::{hook, log, win, Core};
 
 /* ------------------------------------------------------------------------------------------------
@@ -38,14 +41,12 @@ static WINDOW: AtomicIsize = AtomicIsize::new(0);
 /// The window's previous procedure.
 static PREVIOUS: AtomicUsize = AtomicUsize::new(0);
 
-const MODE_OFF: i32 = 0;
-const MODE_ON: i32 = 1;
-const MODE_AUTO: i32 = 2;
-
 /// Lock mode.
 static MODE: AtomicI32 = AtomicI32::new(MODE_AUTO);
 /// One bit per connection that declared an action running.
 static ACTIVE: AtomicU32 = AtomicU32::new(0);
+/// One bit per connection that holds a session lock.
+static SESSION: AtomicU32 = AtomicU32::new(0);
 /// The last change came from F9.
 static BY_USER: AtomicBool = AtomicBool::new(false);
 /// Bumped for every state change; the stream thread watches it.
@@ -108,8 +109,11 @@ static BADGE_SEQUENCE: AtomicU32 = AtomicU32::new(u32::MAX);
  * ---------------------------------------------------------------------------------------------- */
 
 fn wanted() -> bool {
-    let mode = MODE.load(Ordering::Acquire);
-    mode == MODE_ON || (mode == MODE_AUTO && ACTIVE.load(Ordering::Acquire) != 0)
+    lockbits::wanted(MODE.load(Ordering::Acquire), ACTIVE.load(Ordering::Acquire), SESSION.load(Ordering::Acquire))
+}
+
+fn nothing_held() -> bool {
+    lockbits::nothing_held(MODE.load(Ordering::Acquire), ACTIVE.load(Ordering::Acquire), SESSION.load(Ordering::Acquire))
 }
 
 /// True while the user's input is being kept out of the game.
@@ -799,11 +803,13 @@ pub fn frame(core: &'static Core) {
  * Requests
  * ---------------------------------------------------------------------------------------------- */
 
-/// `input.lock {mode?: "on"|"off"|"auto", active?: bool}`; no params reads the state. `active` belongs
-/// to the calling connection (bit `conn`). `on` and `off` take control back from the user.
+/// `input.lock {mode?: "on"|"off"|"auto", active?: bool, session?: bool}`; no params reads the state.
+/// `active` and `session` belong to the calling connection (bit `conn`) and end with it. `on` and
+/// `off` take control back from the user.
 pub fn request(conn: usize, params: &Value) -> Result<Value, RpcError> {
     let mode = params.get("mode").and_then(Value::as_str);
     let active = params.get("active").and_then(Value::as_bool);
+    let session = params.get("session").and_then(Value::as_bool);
     let mut set_mode = -1i32;
     if let Some(mode) = mode {
         set_mode = match mode {
@@ -819,7 +825,10 @@ pub fn request(conn: usize, params: &Value) -> Result<Value, RpcError> {
     if params.get("active").is_some() && active.is_none() {
         return Err(RpcError::invalid_params("active must be a boolean"));
     }
-    if set_mode >= 0 || active.is_some() {
+    if params.get("session").is_some() && session.is_none() {
+        return Err(RpcError::invalid_params("session must be a boolean"));
+    }
+    if set_mode >= 0 || active.is_some() || session.is_some() {
         let was = on();
         if set_mode >= 0 {
             if set_mode != MODE_AUTO {
@@ -828,15 +837,23 @@ pub fn request(conn: usize, params: &Value) -> Result<Value, RpcError> {
             MODE.store(set_mode, Ordering::Release);
         }
         if let Some(active) = active {
-            let bit = 1u32 << conn.min(31);
+            let bit = lockbits::bit(conn);
             if active {
                 ACTIVE.fetch_or(bit, Ordering::AcqRel);
             } else {
                 ACTIVE.fetch_and(!bit, Ordering::AcqRel);
             }
         }
-        // Nothing runs any more in auto: there is no control left to give back.
-        if MODE.load(Ordering::Acquire) == MODE_AUTO && ACTIVE.load(Ordering::Acquire) == 0 {
+        if let Some(session) = session {
+            let bit = lockbits::bit(conn);
+            if session {
+                SESSION.fetch_or(bit, Ordering::AcqRel);
+            } else {
+                SESSION.fetch_and(!bit, Ordering::AcqRel);
+            }
+        }
+        // Nothing runs or is held any more in auto: there is no control left to give back.
+        if nothing_held() {
             BY_USER.store(false, Ordering::Release);
         }
         changed(was, false);
@@ -854,15 +871,16 @@ pub fn focus(params: &Value) -> Result<Value, RpcError> {
     Ok(json())
 }
 
-/// The connection closed: its `active` bit ends with it.
+/// The connection closed: its `active` and `session` bits end with it.
 pub fn connection_closed(conn: usize) {
-    let bit = 1u32 << conn.min(31);
-    if ACTIVE.load(Ordering::Acquire) & bit == 0 {
+    let bit = lockbits::bit(conn);
+    if (ACTIVE.load(Ordering::Acquire) | SESSION.load(Ordering::Acquire)) & bit == 0 {
         return;
     }
     let was = on();
     ACTIVE.fetch_and(!bit, Ordering::AcqRel);
-    if MODE.load(Ordering::Acquire) == MODE_AUTO && ACTIVE.load(Ordering::Acquire) == 0 {
+    SESSION.fetch_and(!bit, Ordering::AcqRel);
+    if nothing_held() {
         BY_USER.store(false, Ordering::Release);
     }
     changed(was, false);
@@ -881,6 +899,7 @@ pub fn json() -> Value {
         "by": if BY_USER.load(Ordering::Acquire) { "user" } else { "agent" },
         "user": user_has_control(),
         "active": ACTIVE.load(Ordering::Acquire) != 0,
+        "session": SESSION.load(Ordering::Acquire) != 0,
         "window": WINDOW.load(Ordering::Acquire) != 0,
         "dropped": DROPPED.load(Ordering::Relaxed),
         "focusLost": FOCUS_LOST.load(Ordering::Relaxed),

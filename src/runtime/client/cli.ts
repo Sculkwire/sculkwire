@@ -8,7 +8,6 @@ import { bridge, WORLD_WAIT_MAX_S } from "./bridge.ts";
 import { clientDiagnostics, indexProjectPacks, readSince } from "./contentlog.ts";
 import { findInstall, findInstalls, pickInstall, type ClientInstall } from "../../gamefiles/install.ts";
 import { gamePids, readLaunchState } from "./launcher.ts";
-import { listWorlds } from "./world.ts";
 import { deleteWorld, listAllWorlds, WorldRefused, worldLine } from "./worldstore.ts";
 import { readDevWorld, useDevWorld, type DevWorld } from "./devworld.ts";
 
@@ -18,14 +17,14 @@ function print(json: boolean, value: unknown, text: string): void {
 
 const status: CliCommand = {
   name: "game status",
-  summary: "Client installs found (launcher, version), whether the game runs, sculkwire test worlds, the default dev world",
+  summary: "Client installs found (launcher, version), whether the game runs, the default dev world, sculkwire- worlds left on disk",
   async run(args) {
     const { values } = parseArgs({ args, options: { json: { type: "boolean" } } });
     const installs = await findInstalls();
     const install = pickInstall(installs);
     const state = await readLaunchState();
     const pids = await gamePids(install);
-    const worlds = await listWorlds(install);
+    const worlds = (await listAllWorlds(install, false)).filter((w) => w.sculkwire);
     const devWorld = await readDevWorld(install);
     const value = { install, installs, running: pids.length > 0, pids, launch: state, worlds: worlds.map((w) => w.name), defaultWorld: devWorld ?? null };
     const describe = (i: ClientInstall) =>
@@ -35,8 +34,8 @@ const status: CliCommand = {
       `using ${describe(install)}`,
       ...installs.filter((i) => i.appData !== install.appData).map((i) => `also found ${describe(i)}`),
       `running: ${pids.length > 0 ? `yes (pid ${pids.join(", ")}${state ? `, ${state.mode}` : ""})` : "no"}`,
-      `test worlds: ${worlds.map((w) => w.name).join(", ") || "none"}`,
-      `default dev world: ${devWorld ? `${devWorld.name} [${devWorld.levelId}]` : "none (game check uses sculkwire- test worlds)"}`,
+      `default dev world: ${devWorld ? `${devWorld.name} [${devWorld.levelId}]` : "none (game check enters the one of your worlds that uses the project's packs)"}`,
+      `sculkwire- worlds: ${worlds.map((w) => w.name).join(", ") || "none"}`,
     ].join("\n"));
     return ExitCode.ok;
   },
@@ -60,7 +59,7 @@ const log: CliCommand = {
 const check: CliCommand = {
   name: "game check",
   summary:
-    "Load a project in the real client, collect errors, optional screenshot: game check <dir> [--display window|headless|desktop] [--mute] [--seconds 10] [--screenshot out.png] [--beta-apis] [--world-wait 180] [--fresh | --user-world <name>]. Without --fresh or --user-world it enters the saved default dev world when there is one",
+    "Load a project in the real client, collect errors, optional screenshot: game check <dir> [--display window|headless|desktop] [--mute] [--seconds 10] [--screenshot out.png] [--beta-apis] [--world-wait 180] [--user-world <name>]. The world is --user-world, else the saved default dev world (game worlds --use), else the one of your worlds whose pack lists name the project's packs; sculkwire never creates one",
   async run(args) {
     const { values, positionals } = parseArgs({
       args,
@@ -73,7 +72,6 @@ const check: CliCommand = {
         mute: { type: "boolean" },
         "beta-apis": { type: "boolean" },
         "world-wait": { type: "string" },
-        fresh: { type: "boolean" },
         "user-world": { type: "string" },
       },
     });
@@ -95,7 +93,6 @@ const check: CliCommand = {
         ...(values.mute ? { mute: true } : {}),
         betaApis: !!values["beta-apis"],
         ...(worldWait !== undefined ? { timeoutMs: worldWait * 1000 } : {}),
-        ...(values.fresh ? { fresh: true } : {}),
         ...(values["user-world"] !== undefined ? { userWorld: values["user-world"] } : {}),
       });
       err(

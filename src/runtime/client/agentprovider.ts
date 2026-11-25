@@ -9,11 +9,12 @@
  * nothing has to be registered for the agent to be the default route.
  */
 import { setTimeout as sleep } from "node:timers/promises";
-import { setBuiltinInputProvider, type EngineInput, type InputProvider, type ProviderGame, type ProviderMotion } from "./inputprovider.ts";
+import { errorMessage } from "../../core/errors.ts";
+import { setBuiltinInputProvider, type EngineInput, type InputLockStatus, type InputProvider, type ProviderGame, type ProviderMotion } from "./inputprovider.ts";
 import { engine, type EngineSession, type EngineTick } from "../engine/engine.ts";
 import type { EngineResult } from "../engine/failure.ts";
 import { HostFocus } from "../engine/focus.ts";
-import { KEYBOARD_LOCK_NOTE } from "../engine/lock.ts";
+import { KEYBOARD_LOCK_NOTE, type LockMode } from "../engine/lock.ts";
 
 /** A tick older than this no longer counts as a running stream (a missed tick is 50 ms). */
 const TICK_FRESH_MS = 250;
@@ -35,6 +36,8 @@ export class AgentInputProvider implements InputProvider {
   #tickOff?: () => Promise<void>;
   /** The game to watch, kept from `launched` until an engine call starts the watcher. */
   #gamePid?: number;
+  /** The mode `releaseSessionLock` puts back after `sessionLock("auto")` changed it (`on` becomes `auto`). */
+  #restoreMode?: LockMode;
   readonly #platform: NodeJS.Platform;
 
   constructor(session: EngineSession = engine, platform: NodeJS.Platform = process.platform) {
@@ -101,6 +104,59 @@ export class AgentInputProvider implements InputProvider {
     return this.#session.lock.hold();
   }
 
+  lockStatus(): InputLockStatus | undefined {
+    const s = this.#session.lock.state;
+    return s ? { mode: s.mode, locked: s.locked, user: s.user, ...(s.session !== undefined ? { session: s.session } : {}) } : undefined;
+  }
+
+  /**
+   * `on` is a session lock on this provider's connection, not mode `on`: the agent drops it when the connection
+   * closes, so a sculkwire process that dies never leaves the game locked, and the engine session declares it again
+   * on its own reconnect. `auto` makes sure the mode is `auto` (the agent's default), which locks only while an
+   * action or play job runs.
+   */
+  async sessionLock(mode: Exclude<LockMode, "off">): Promise<string | undefined> {
+    if (!this.#session.attached) {
+      try {
+        await this.attach();
+      } catch (e) {
+        return `the in-game agent could not be attached (${errorMessage(e)})`;
+      }
+    }
+    const lock = this.#session.lock;
+    if (mode === "on") {
+      const held = await lock.session(true);
+      if (!held.ok) return `the agent refused the session lock (${held.message})`;
+      if (held.value.session === undefined) {
+        return "the in-game agent loaded in the game predates session locks: restart the game so the next attach loads the current agent";
+      }
+      if (held.value.mode === "off") return "game_input_lock set mode off, which never locks: set mode auto to let the session lock apply";
+      return undefined;
+    }
+    const before = await lock.request();
+    if (!before.ok) return `the agent did not report its lock (${before.message})`;
+    if (before.value.mode === "auto") return undefined;
+    const set = await lock.request("auto");
+    if (!set.ok) return `the agent refused mode auto (${set.message})`;
+    // An `on` found here would lock with nobody to release it: never put that back.
+    this.#restoreMode ??= before.value.mode === "on" ? "auto" : before.value.mode;
+    return undefined;
+  }
+
+  /**
+   * End the session lock and put back a mode `sessionLock("auto")` changed, so the lock never outlives sculkwire's
+   * hold on the game. A mode `on` set some other way (game_input_lock) becomes `auto` too. Only while connected: a
+   * closed connection already released the session lock, and a stopped game needs nothing.
+   */
+  async releaseSessionLock(): Promise<void> {
+    const lock = this.#session.lock;
+    const mode = this.#restoreMode ?? (lock.state?.mode === "on" ? "auto" : undefined);
+    this.#restoreMode = undefined;
+    if (!this.#session.attached) return;
+    if (lock.sessionHeld) await lock.session(false).catch(() => undefined);
+    if (mode !== undefined && mode !== lock.state?.mode) await lock.request(mode).catch(() => undefined);
+  }
+
   async attach(): Promise<void> {
     await this.#session.attach();
     await this.#watch();
@@ -134,7 +190,7 @@ export class AgentInputProvider implements InputProvider {
   async stopped(): Promise<void> {
     await this.#session.stopFocusWatcher();
     this.#gamePid = undefined;
-    await this.#session.setHostFocus(undefined);
+    this.#restoreMode = undefined;
     this.#session.close();
     this.#tick = undefined;
     this.#tickOff = undefined;

@@ -16,7 +16,7 @@
 import { errorMessage } from "../../core/errors.ts";
 import { isStoreScreen, type UiControl, type UiScreen } from "../engine/ui.ts";
 import { CLIENT_JOINED, joinStateInLog, NO_JOIN_YET, type JoinState } from "./contentlog.ts";
-import { findIconTile, iconCells } from "./icon.ts";
+import { findThumbnailTiles, thumbnailTemplate, type TileMatch } from "./thumbnail.ts";
 import { DEFAULT_FRAME } from "./launcher.ts";
 import { decodePng, pngSize, type Pixels } from "./png.ts";
 
@@ -212,7 +212,7 @@ export const LAYOUT = {
   /**
    * Play screen, Worlds tab: 4 columns by 2 visible rows of tiles. Featured servers come first as "LAN world" tiles,
    * then the local worlds, most recently played first. `slot` is the tile's place in reading order. The recovery
-   * opens a tile only by its thumbnail (icon.ts), never by its slot.
+   * opens a tile only by its thumbnail (thumbnail.ts), never by its slot.
    */
   worldTile: (slot: number) => ({ x: 0.137 + (slot % 4) * 0.2375, y: slot < 4 ? 0.374 : 0.74 }),
   /** Play screen: where the world list is scrolled, the middle of the tile grid (below the tab strip). */
@@ -246,6 +246,21 @@ export function localWorldTiles(image: Pixels): number[] {
     if (hits >= 4) out.push(slot);
   }
   return out;
+}
+
+/**
+ * Whether a matched tile may be opened: false only when its middle sits on a slot of `LAYOUT.worldTile` that
+ * `localWorldTiles` does not list as a local world (a featured server). A tile the 4-column layout does not place
+ * (another layout, a tile scrolled half out of view) is judged by its picture alone.
+ */
+function onLocalTile(image: Pixels, tile: TileMatch, locals: readonly number[]): boolean {
+  const x = (tile.rect.x + tile.rect.width / 2) / image.width;
+  const y = (tile.rect.y + tile.rect.height / 2) / image.height;
+  for (let slot = 0; slot < 8; slot++) {
+    const c = LAYOUT.worldTile(slot);
+    if (Math.abs(c.x - x) < 0.03 && Math.abs(c.y - y) < 0.03) return locals.includes(slot);
+  }
+  return true;
 }
 
 /** The death screen's RESPAWN button green (about 42,100,28; lighter when hovered), never "Game menu"'s grey. */
@@ -332,8 +347,13 @@ export interface RecoveryIO {
 }
 
 export interface RecoveryOptions {
-  /** Level id (folder under minecraftWorlds) of the test world; its icon (icon.ts) identifies its tile. */
+  /** Level id (folder under minecraftWorlds) of the world to open. */
   levelId: string;
+  /**
+   * The world's own `world_icon.jpeg`, decoded: the picture its tile shows on the Play screen. Without it (no icon, a
+   * picture sculkwire cannot read or too plain to tell apart) the recovery opens no tile and stops at the Play screen.
+   */
+  thumbnail?: Pixels;
   /** Give up after this long (default 3 minutes). */
   timeoutMs?: number;
   /** State of the reads before the recovery started. */
@@ -353,14 +373,16 @@ export interface RecoveryResult {
   presses: number;
   /** Times the world list was scrolled looking for the tile. */
   scrolls: number;
-  /** A tile was opened because its thumbnail showed the world's icon. */
-  foundByIcon: boolean;
+  /** A tile was opened because its thumbnail showed the world's own picture. */
+  foundByThumbnail: boolean;
   /** Level ids the game opened during the recovery, in order. */
   opened: string[];
   /** The screens seen during the recovery, in order: the game's name, and the OreUI route when the agent read one. */
   seen: string[];
   /** Why it stopped without the world. */
   reason?: string;
+  /** It stopped on the Play screen because the world's tile cannot be told apart: only the user can open the world. */
+  needsUser?: boolean;
 }
 
 /** How long a screen must stay unchanged before acting on it: the game may still move on by itself. */
@@ -390,13 +412,12 @@ const MAX_SCROLLS = 3;
 const SCROLL_NOTCHES = 5;
 const LOOK_PATIENCE_MS = 1500;
 /**
- * A tile whose visible cells match but whose others are cut off by the list's edge is scrolled into view, at most this
- * many times by these notches; then it is opened when at least `PARTIAL_CELLS` of its cells were seen and matched.
+ * A tile matched only by its visible half (the rest cut off by the list's edge or under the tab strip) is scrolled into
+ * view at most this many times by these notches; then its visible half is opened.
  */
 const MAX_NUDGES = 2;
 const NUDGE_NOTCHES = 2;
-const PARTIAL_CELLS = 4;
-/** Worlds other than the test world that may open (through a tile that showed its icon) before the recovery stops. */
+/** Worlds other than the wanted one that may open (through a tile that showed its picture) before the recovery stops. */
 const MAX_WRONG_WORLDS = 2;
 
 type Press = { label: string; run: () => Promise<void>; patienceMs?: number; /** False for a wait that sends nothing. */ input?: boolean };
@@ -494,18 +515,19 @@ function touchRoute(io: RecoveryIO, route: () => UiRecovery | undefined, frame: 
 }
 
 /**
- * Drive the game from wherever it is back into the test world, never relaunching it: the connection-error screen
- * gets "Back to menu", the start screen "Play", the Play screen a double-click on the tile whose thumbnail shows the
- * test world's icon (icon.ts), any other screen Escape until the start screen comes back; loading screens are waited
- * out. With the in-game agent attached the screen comes from `ui.screen` and every press goes through the agent, so
- * this works in the background; otherwise the engine log tells which screen is up and the keys are pressed on the
- * host. Either way the log says whether each press moved the game on.
+ * Drive the game from wherever it is back into the world, never relaunching it: the connection-error screen gets
+ * "Back to menu", the start screen "Play", the Play screen a double-click on the tile whose thumbnail shows the
+ * world's own picture (`world_icon.jpeg`, found by thumbnail.ts), any other screen Escape until the start screen comes
+ * back; loading screens are waited out. With the in-game agent attached the screen comes from `ui.screen` and every
+ * press goes through the agent, so this works in the background; otherwise the engine log tells which screen is up and
+ * the keys are pressed on the host. Either way the log says whether each press moved the game on.
  *
- * On the Play screen nothing is clicked but that one tile: never a tile by its place in the list, never the tab strip.
- * When the agent reports the Play screen's route, the Worlds tab is pressed by its exact name first, and a tab that
- * lists no local worlds (Realms, Servers) is left with Escape. A list without the tile is looked at again, reopened
- * once (it may hold thumbnails read before the icon was written again) and scrolled (through the agent); after that
- * the recovery stops and says the tile was not found. Through the agent, Save & Quit is pressed only by its name.
+ * On the Play screen nothing is clicked but that one tile: never a tile by its place in the list, never the tab strip,
+ * never a featured server's tile, and never a tile when two show the picture or the world has none. When the agent
+ * reports the Play screen's route, the Worlds tab is pressed by its exact name first, and a tab that lists no local
+ * worlds (Realms, Servers) is left with Escape. A list without the tile is looked at again, reopened once (it may
+ * hold thumbnails it read earlier) and scrolled (through the agent); after that the recovery stops and says the tile
+ * was not found. Through the agent, Save & Quit is pressed only by its name.
  */
 export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promise<RecoveryResult> {
   const deadline = io.now() + (opts.timeoutMs ?? 180_000);
@@ -529,7 +551,7 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
   /** On the way out of a world that is not the test world, and how many of those opened. */
   let wrongWorld = false;
   let wrongWorlds = 0;
-  const cells = iconCells(opts.levelId);
+  const template = opts.thumbnail ? thumbnailTemplate(opts.thumbnail) : undefined;
   /** The Play screen that is up: looks without the tile, scrolls, presses of the Worlds tab. A new one starts over. */
   let list = { looks: 0, scrolls: 0, worldsTab: 0, nudges: 0 };
   /** The Play screen was left once to reload its thumbnails. */
@@ -537,7 +559,7 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
   let presses = 0;
   let scrolls = 0;
   let looks = 0;
-  let foundByIcon = false;
+  let foundByThumbnail = false;
   const opened: string[] = [];
   let lastOpened = screens.opened;
   const seen: string[] = [];
@@ -548,7 +570,7 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
     if (shot) frame = pngSize(shot.png) ?? frame;
     return shot;
   };
-  const done = (recovered: boolean, reason?: string): RecoveryResult => ({
+  const done = (recovered: boolean, reason?: string, needsUser = false): RecoveryResult => ({
     recovered,
     steps,
     ...(evidence ? { screenshot: evidence } : {}),
@@ -556,10 +578,11 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
     join,
     presses,
     scrolls,
-    foundByIcon,
+    foundByThumbnail,
     opened,
     seen,
     ...(reason ? { reason } : {}),
+    ...(needsUser ? { needsUser } : {}),
   });
 
   for (;;) {
@@ -589,7 +612,7 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
     lastOpened = screens.opened;
     if (screens.inWorld && screens.opened === opts.levelId) return done(true);
     if (screens.inWorld && screens.opened !== undefined && screens.opened !== opts.levelId && !wrongWorld) {
-      // A safety net: the tile showed the icon but another world opened. Leave it through the pause menu.
+      // A safety net: the tile showed the world's picture but another world opened. Leave it through the pause menu.
       wrongWorld = true;
       wrongWorlds++;
       steps.push(`opened ${screens.opened} instead of ${opts.levelId}: leaving it`);
@@ -636,10 +659,28 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
       if (!press) {
         const shot = await shoot("play");
         const image = shot && decodePng(shot.png);
-        const tile = image ? findIconTile(image, cells) : undefined;
+        const locals = image ? localWorldTiles(image) : [];
+        const matches = image && template ? findThumbnailTiles(image, template) : [];
         looks++;
-        if (unnamedOre && (tile || (image && localWorldTiles(image).length))) known = "play";
+        if (unnamedOre && (matches.length || locals.length)) known = "play";
         if (known === "play") {
+          if (!template) {
+            return done(
+              false,
+              `${opts.levelId} has no world_icon.jpeg sculkwire can read (or its picture is too plain to tell apart), so its ` +
+                "tile cannot be told from the others on the Play screen; nothing was opened by guess",
+              true,
+            );
+          }
+          if (matches.length > 1) {
+            return done(
+              false,
+              `${matches.length} tiles on the Play screen show the picture of ${opts.levelId} (a copy of the world has the same ` +
+                "picture), so the tile is not known for sure; nothing was opened by guess",
+              true,
+            );
+          }
+          const tile = matches[0] && image && onLocalTile(image, matches[0], locals) ? matches[0] : undefined;
           const scroll = ui?.scroll?.bind(ui);
           const wheel = (label: string, notches: number): Press => ({
             label,
@@ -654,16 +695,16 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
             list.nudges++;
             scrolls++;
             press = wheel(`scroll the tile of ${opts.levelId} into view (its ${tile.hidden} is hidden)`, tile.hidden === "top" ? NUDGE_NOTCHES : -NUDGE_NOTCHES);
-          } else if (tile && image && (tile.whole || tile.visibleCells >= PARTIAL_CELLS)) {
-            foundByIcon = true;
+          } else if (tile && image) {
+            foundByThumbnail = true;
             const at = { x: tile.at.x / image.width, y: tile.at.y / image.height };
-            const what = tile.whole ? "the tile showing the icon" : `the visible part of the tile showing the icon (${tile.visibleCells} of 8 cells)`;
+            const what = tile.whole ? "the tile showing the world's picture" : `the visible half of the tile showing the world's picture (its ${tile.hidden} is hidden)`;
             press = touches.click(`${what} of ${opts.levelId}`, at, 2, OPEN_PATIENCE_MS);
           } else if (list.looks < THUMBNAIL_LOOKS) {
             list.looks++;
-            press = { label: "no tile shows the world's icon yet: looking again", run: async () => undefined, patienceMs: LOOK_PATIENCE_MS, input: false };
+            press = { label: "no tile shows the world's picture yet: looking again", run: async () => undefined, patienceMs: LOOK_PATIENCE_MS, input: false };
           } else if (!reopened) {
-            // The list may show thumbnails it read before sculkwire wrote the icon again: reopen it once first.
+            // The list may show thumbnails it read before: reopen it once first.
             reopened = true;
             press = { ...touches.key("Escape"), label: "Escape (leave the Play screen once, so it reloads the thumbnails)" };
           } else if (scroll && list.scrolls < MAX_SCROLLS) {
@@ -673,9 +714,9 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
           } else {
             return done(
               false,
-              `the tile of ${opts.levelId} was not found on the Play screen: no thumbnail showed its sculkwire icon in ${looks} looks ` +
-                `(the list reopened once, ${scrolls} scrolls). The game may not show the world's world_icon.jpeg as its thumbnail, ` +
-                "or may still show the picture it took when the world was last left; nothing was opened by guess",
+              `the tile of ${opts.levelId} was not found on the Play screen: no local world's thumbnail showed its world_icon.jpeg in ${looks} looks ` +
+                `(the list reopened once, ${scrolls} scrolls). The game may show a newer picture than the file holds; nothing was opened by guess`,
+              true,
             );
           }
         }
@@ -701,7 +742,7 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
  * The fixed ways to get past each screen, tried in turn (`n` counts the presses on that kind of screen so far).
  * A named control first where the button is what matters (through the agent's UI it is the button itself, not a
  * coordinate), the key next, the button's known place last. The Play screen's tile is not here: `recoverJoin` opens
- * it only by its icon.
+ * it only by its thumbnail.
  */
 function fixedPress(t: Touch, kind: ScreenKind, n: number, wrongWorld: boolean): Press {
   switch (kind) {

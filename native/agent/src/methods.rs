@@ -183,8 +183,8 @@ pub(crate) fn settings_set(core: &'static Core, params: &Value) -> Result<Value,
  *
  * Read from the loaded level's own data and applied the way the game applies it: the four changes
  * with a command (`/gamerule`, `/difficulty`, `/time set`, `/weather`) run as the local player on
- * the server thread. The level name is also what the host and this engine use to refuse a world that
- * is not `sculkwire-*`.
+ * the server thread. The level name is also what this engine checks before a change: `world.set`
+ * names the world the host allows changing, and any other loaded world is refused.
  * ---------------------------------------------------------------------------------------------- */
 
 /// `world.settings` → `{name, seed, gameType, difficulty, cheats, education, experiments, gamerules,
@@ -208,7 +208,11 @@ fn rule_value(name: &str, value: &Value) -> Result<String, RpcError> {
     }
 }
 
-/// `world.set {gamerules?, difficulty?, gameType?, time?, weather?}` → the new `world.settings`.
+/// `world.set {world, gamerules?, difficulty?, gameType?, time?, weather?}` → the new `world.settings`.
+///
+/// `world` is the level name of the one world the host allows changing (the world sculkwire entered
+/// or attached to, or the user's dev world); the change is refused when the loaded world has another
+/// name.
 ///
 /// Every change is one of the game's own commands, run as the local player on the server thread:
 /// `/gamerule`, `/difficulty`, `/defaultgamemode` plus `/gamemode … @s`, `/time set`, `/weather`.
@@ -274,7 +278,7 @@ pub(crate) fn world_set(core: &'static Core, params: &Value) -> Result<Value, Rp
         return Err(RpcError::invalid_params("give at least one of gamerules, difficulty, gameType, time or weather"));
     }
     live::require_world()?;
-    world_settings::changeable()?;
+    world_settings::changeable(text(params, "world")?)?;
     if anchors::command_execute().is_none() {
         return Err(RpcError::anchor("command.execute"));
     }

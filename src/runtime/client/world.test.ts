@@ -2,10 +2,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ICON_FILE, worldIcon } from "./icon.ts";
 import type { ClientInstall } from "../../gamefiles/install.ts";
-import { createWorld, enterUserWorld, HELPER_PACK_FOLDER, installHelperPack, restoreUserIcon, WORLD_BACKUPS_KEPT } from "./world.ts";
-import { listAllWorlds, pruneWorlds, WORLD_MARKER, writeWorldIcon } from "./worldstore.ts";
+import { createWorld, enterUserWorld, HELPER_PACK_FOLDER, installHelperPack, WORLD_BACKUPS_KEPT } from "./world.ts";
+import { ICON_FILE, listAllWorlds, pruneWorlds, WORLD_MARKER } from "./worldstore.ts";
 import { readLevelDat, TAG, writeLevelDat, type NbtCompound } from "../../gamefiles/nbt.ts";
 
 const dirs: string[] = [];
@@ -19,13 +18,15 @@ async function install(): Promise<ClientInstall> {
   return { userComMojang: dir, sharedComMojang: dir } as ClientInstall;
 }
 
-describe("test world icon", () => {
-  it("writes the world's own icon, and writes it again after the game replaced it", async () => {
-    const world = await createWorld(await install(), { name: "icon", helper: false });
-    expect(await readFile(join(world.dir, ICON_FILE))).toEqual(worldIcon("sculkwire-icon"));
-    await writeFile(join(world.dir, ICON_FILE), "a picture of the world");
-    await writeWorldIcon(world);
-    expect(await readFile(join(world.dir, ICON_FILE))).toEqual(worldIcon("sculkwire-icon"));
+describe("scratch world", () => {
+  it("is a fresh flat world with no icon and no marker, replaced on each call", async () => {
+    const target = await install();
+    const world = await createWorld(target, { name: "bench", helper: false });
+    expect(world).toMatchObject({ levelId: "sculkwire-bench", how: "created" });
+    expect((await readdir(world.dir)).sort()).toEqual(["db", "level.dat", "levelname.txt", "world_behavior_packs.json", "world_resource_packs.json"]);
+    await writeFile(join(world.dir, "db", "000001.ldb"), "an arena");
+    await createWorld(target, { name: "bench", helper: false });
+    await expect(readFile(join(world.dir, "db", "000001.ldb"))).rejects.toThrow();
   });
 });
 
@@ -39,57 +40,7 @@ describe("helper pack install", () => {
   });
 });
 
-describe("kept and copied test worlds", () => {
-  const pack = (uuid: string, version: number[]) => ({ uuid, version, kind: "behavior" as const });
-
-  it("enters an existing world as it is and merges its pack lists", async () => {
-    const target = await install();
-    const first = await createWorld(target, { name: "keep", helper: false, difficulty: "hard", packs: [pack("project", [1, 0, 0])] });
-    await writeFile(join(first.dir, "db", "000001.ldb"), "the player's build");
-    await writeFile(
-      join(first.dir, "world_behavior_packs.json"),
-      JSON.stringify([{ pack_id: "foreign", version: [2, 0, 0] }, { pack_id: "project", version: [1, 0, 0] }]),
-    );
-    const level = await readFile(join(first.dir, "level.dat"));
-    const again = await createWorld(target, { name: "keep", keep: true, helper: false, difficulty: "peaceful", packs: [pack("project", [1, 1, 0])] });
-    expect(again).toMatchObject({ levelId: "sculkwire-keep", how: "kept" });
-    expect(await readFile(join(again.dir, "level.dat"))).toEqual(level);
-    expect(await readFile(join(again.dir, "db", "000001.ldb"), "utf8")).toBe("the player's build");
-    expect(JSON.parse(await readFile(join(again.dir, "world_behavior_packs.json"), "utf8"))).toEqual([
-      { pack_id: "project", version: [1, 1, 0] },
-      { pack_id: "foreign", version: [2, 0, 0] },
-    ]);
-    expect(JSON.parse(await readFile(join(again.dir, WORLD_MARKER), "utf8"))).toEqual({ keep: true });
-    // A launch without keep replaces the world again.
-    expect((await createWorld(target, { name: "keep", helper: false })).how).toBe("created");
-    await expect(readFile(join(again.dir, "db", "000001.ldb"))).rejects.toThrow();
-  });
-
-  it("creates a missing world when asked to keep it, and marks it kept", async () => {
-    const target = await install();
-    const world = await createWorld(target, { name: "new", keep: true, helper: false });
-    expect(world.how).toBe("created");
-    expect(JSON.parse(await readFile(join(world.dir, WORLD_MARKER), "utf8"))).toEqual({ keep: true });
-    expect((await listAllWorlds(target))[0]).toMatchObject({ name: "sculkwire-new", kept: true });
-  });
-
-  it("starts from a copy, and with keep enters the existing copy without copying again", async () => {
-    const target = await install();
-    const source = await createWorld(target, { name: "source", helper: false });
-    await writeFile(join(source.dir, "db", "000001.ldb"), "version 1");
-    const copy = await createWorld(target, { name: "copy", copyFrom: "sculkwire-source", helper: false, packs: [pack("project", [1, 0, 0])] });
-    expect(copy.how).toBe("copied");
-    expect(await readFile(join(copy.dir, "db", "000001.ldb"), "utf8")).toBe("version 1");
-    expect(JSON.parse(await readFile(join(copy.dir, WORLD_MARKER), "utf8"))).toEqual({ keep: true, copiedFrom: "sculkwire-source" });
-    await writeFile(join(source.dir, "db", "000001.ldb"), "version 2");
-    const entered = await createWorld(target, { name: "copy", copyFrom: "sculkwire-source", keep: true, helper: false });
-    expect(entered.how).toBe("kept");
-    expect(await readFile(join(entered.dir, "db", "000001.ldb"), "utf8")).toBe("version 1");
-    expect(JSON.parse(await readFile(join(entered.dir, WORLD_MARKER), "utf8"))).toEqual({ keep: true, copiedFrom: "sculkwire-source" });
-  });
-});
-
-describe("the user's dev world", () => {
+describe("the user's world", () => {
   const pack = (uuid: string, version: number[], kind: "behavior" | "resource" = "behavior") => ({ uuid, version, kind });
 
   /** One of the user's own worlds as the game leaves it: cheats off, a build, a foreign pack, its own icon. */
@@ -126,8 +77,7 @@ describe("the user's dev world", () => {
     });
     const backup = join(backups, "Xy+z=", "2026-11-25T10-00-00.000Z");
     expect(world).toEqual({ levelId: "Xy+z=", name: "Steve's Base", dir, how: "user", backup });
-    expect((await readdir(backup)).sort()).toEqual([ICON_FILE, "level.dat", "world_behavior_packs.json"].sort());
-    expect(await readFile(join(backup, ICON_FILE), "utf8")).toBe("the user's picture");
+    expect((await readdir(backup)).sort()).toEqual(["level.dat", "world_behavior_packs.json"].sort());
     expect((await level(join(backup, "level.dat"))).get("cheatsEnabled")?.value).toBe(0);
     expect(notes).toEqual(["turned cheats on in Steve's Base (sculkwire's commands need them); the game awards no achievements in it from now on"]);
     const root = await level(join(dir, "level.dat"));
@@ -140,9 +90,9 @@ describe("the user's dev world", () => {
       { pack_id: "foreign", version: [2, 0, 0] },
     ]);
     expect(JSON.parse(await readFile(join(dir, "world_resource_packs.json"), "utf8"))).toEqual([{ pack_id: "project-rp", version: [1, 0, 0] }]);
-    expect(await readFile(join(dir, ICON_FILE))).toEqual(worldIcon("Xy+z="));
-    // A user's world never gets the test world marker, and is not listed as sculkwire's.
-    expect(await readdir(dir)).not.toContain(WORLD_MARKER);
+    // Nothing else is written into it: its own picture stays, and it never gets the scratch world marker.
+    expect(await readFile(join(dir, ICON_FILE), "utf8")).toBe("the user's picture");
+    expect((await readdir(dir)).sort()).toEqual([ICON_FILE, "db", "level.dat", "levelname.txt", "world_behavior_packs.json", "world_resource_packs.json"].sort());
     expect((await listAllWorlds(target)).find((w) => w.levelId === "Xy+z=")?.sculkwire).toBe(false);
     // The next launch finds cheats on already: no note, level.dat untouched.
     const before = await readFile(join(dir, "level.dat"));
@@ -176,34 +126,17 @@ describe("the user's dev world", () => {
     expect(kept[0]).toBe("2026-11-25T10-02-00.000Z");
   });
 
-  it("refuses a sculkwire test world and a name several worlds share", async () => {
+  it("enters a sculkwire- world the user chose, and refuses a name several worlds share", async () => {
     const target = await install();
     await userWorld(target);
     await createWorld(target, { name: "bridge", helper: false });
+    const backupRoot = join(target.userComMojang, "b");
+    expect((await enterUserWorld(target, { world: "sculkwire-bridge", helper: false, backupRoot })).world).toMatchObject({ levelId: "sculkwire-bridge", how: "user" });
     const twin = join(target.userComMojang, "minecraftWorlds", "twin");
     await mkdir(twin, { recursive: true });
     await writeFile(join(twin, "level.dat"), await readFile(join(target.userComMojang, "minecraftWorlds", "Xy+z=", "level.dat")));
     await writeFile(join(twin, "levelname.txt"), "Steve's Base");
-    const backupRoot = join(target.userComMojang, "b");
-    await expect(enterUserWorld(target, { world: "sculkwire-bridge", helper: false, backupRoot })).rejects.toThrow("is a sculkwire test world");
     await expect(enterUserWorld(target, { world: "Steve's Base", helper: false, backupRoot })).rejects.toThrow('2 worlds are named "Steve\'s Base"');
-  });
-
-  it("gives the world its own icon back unless the game took a new picture, and removes sculkwire's when it had none", async () => {
-    const target = await install();
-    const dir = await userWorld(target);
-    const backupRoot = join(target.userComMojang, "b");
-    const first = await enterUserWorld(target, { world: "Xy+z=", helper: false, backupRoot, now: new Date("2026-11-25T10:00:00Z") });
-    expect(await restoreUserIcon(first.world)).toBe("restored");
-    expect(await readFile(join(dir, ICON_FILE), "utf8")).toBe("the user's picture");
-    const second = await enterUserWorld(target, { world: "Xy+z=", helper: false, backupRoot, now: new Date("2026-11-25T11:00:00Z") });
-    await writeFile(join(dir, ICON_FILE), "a picture the game took on Save & Quit");
-    expect(await restoreUserIcon(second.world)).toBe("game's own");
-    expect(await readFile(join(dir, ICON_FILE), "utf8")).toBe("a picture the game took on Save & Quit");
-    await rm(join(dir, ICON_FILE));
-    const third = await enterUserWorld(target, { world: "Xy+z=", helper: false, backupRoot, now: new Date("2026-11-25T12:00:00Z") });
-    expect(await restoreUserIcon(third.world)).toBe("removed");
-    expect(await readdir(dir)).not.toContain(ICON_FILE);
   });
 
   it("is never pruned, however long ago it was played", async () => {

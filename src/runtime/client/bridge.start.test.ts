@@ -21,9 +21,8 @@ import type * as Launcher from "./launcher.ts";
 import type { LaunchState } from "./launcher.ts";
 import { readLevelDat, TAG, writeLevelDat, type NbtCompound } from "../../gamefiles/nbt.ts";
 import { createWorld, HELPER_PACK_DIR, HELPER_PACK_FOLDER } from "./world.ts";
-import { listAllWorlds } from "./worldstore.ts";
+import { ICON_FILE, listAllWorlds } from "./worldstore.ts";
 import { useDevWorld } from "./devworld.ts";
-import { ICON_FILE } from "./icon.ts";
 import { FakePactl } from "../../testing/fakepactl.ts";
 import { MUTE_SINK } from "./mute.ts";
 
@@ -114,6 +113,7 @@ describe("client bridge start", () => {
   });
 
   it("ends the background wait for the world when the session stops", async () => {
+    await savedUserWorld();
     const bridge = new ClientBridge();
     const status = await bridge.start({ mode: "desktop", debuggerPort: 0, connectPort: 0 });
     expect(status.ready).toBe(false);
@@ -128,6 +128,7 @@ describe("client bridge start", () => {
 
   it("fails a launch that waits for the game with \"the game stopped\" when the session stops, stopping once", async () => {
     install = { ...install, launch: ["launcher", "{uri}"] };
+    await savedUserWorld();
     let waiting!: () => void;
     const entered = new Promise<void>((resolve) => {
       waiting = resolve;
@@ -146,36 +147,45 @@ describe("client bridge start", () => {
     expect(stopGame).toHaveBeenCalledTimes(1);
   });
 
-  it("removes stale test worlds but not the one it launches, and says a kept world keeps its own settings", async () => {
+  it("removes stale sculkwire worlds, but never kept ones or the saved dev world", async () => {
+    await savedUserWorld();
     const old = await createWorld(install, { name: "old", helper: false });
-    const bridgeWorld = await createWorld(install, { name: "bridge", helper: false });
+    const kept = await createWorld(install, { name: "kept", helper: false });
+    await writeFile(join(kept.dir, "sculkwire-world.json"), JSON.stringify({ keep: true, copiedFrom: "Steve's Base" }));
     const longAgo = BigInt(Math.floor(Date.now() / 1000) - 10 * 86_400);
-    for (const world of [old, bridgeWorld]) {
+    for (const world of [old, kept]) {
       const level = readLevelDat(new Uint8Array(await readFile(join(world.dir, "level.dat"))));
       level.root.set("LastPlayed", { type: TAG.Long, value: longAgo });
       await writeFile(join(world.dir, "level.dat"), writeLevelDat(level));
     }
     const bridge = new ClientBridge();
-    const status = await bridge.start({ mode: "desktop", debuggerPort: 0, connectPort: 0, keep: true, difficulty: "hard" });
+    const status = await bridge.start({ mode: "desktop", debuggerPort: 0, connectPort: 0 });
     await bridge.stop();
     expect(status.prunedWorlds).toEqual(["sculkwire-old"]);
-    expect(status.worldNote).toBe("sculkwire-bridge was entered as it is and keeps its own difficulty and experiments: difficulty hard not applied");
-    expect((await listAllWorlds(install)).map((w) => w.name)).toEqual(["sculkwire-bridge"]);
+    expect((await listAllWorlds(install)).map((w) => w.name).sort()).toEqual(["Steve's Base", "sculkwire-kept"]);
   });
 
-  /** One of the user's own worlds, cheats off, with a foreign pack and its own icon; saved as the dev world. */
-  async function savedUserWorld(): Promise<string> {
-    const world = join(install.userComMojang, "minecraftWorlds", "Xy+z=");
+  /** One of the user's own worlds, cheats off, with a foreign pack (and `packs`) and its own icon. */
+  async function userWorld(levelId: string, name: string, opts: { packs?: string[]; lastPlayed?: number } = {}): Promise<string> {
+    const world = join(install.userComMojang, "minecraftWorlds", levelId);
     await mkdir(join(world, "db"), { recursive: true });
     const root: NbtCompound = new Map();
-    root.set("LevelName", { type: TAG.String, value: "Steve's Base" });
+    root.set("LevelName", { type: TAG.String, value: name });
     root.set("cheatsEnabled", { type: TAG.Byte, value: 0 });
     root.set("commandsEnabled", { type: TAG.Byte, value: 0 });
+    if (opts.lastPlayed !== undefined) root.set("LastPlayed", { type: TAG.Long, value: BigInt(opts.lastPlayed) });
     await writeFile(join(world, "level.dat"), writeLevelDat({ storageVersion: 10, rootName: "", root }));
-    await writeFile(join(world, "levelname.txt"), "Steve's Base");
+    await writeFile(join(world, "levelname.txt"), name);
     await writeFile(join(world, "db", "000001.ldb"), "the player's build");
-    await writeFile(join(world, "world_behavior_packs.json"), JSON.stringify([{ pack_id: "foreign", version: [2, 0, 0] }]));
+    const packs = ["foreign", ...(opts.packs ?? [])].map((pack_id) => ({ pack_id, version: [2, 0, 0] }));
+    await writeFile(join(world, "world_behavior_packs.json"), JSON.stringify(packs));
     await writeFile(join(world, ICON_FILE), "the user's picture");
+    return world;
+  }
+
+  /** `userWorld` Steve's Base, saved as the dev world. */
+  async function savedUserWorld(): Promise<string> {
+    const world = await userWorld("Xy+z=", "Steve's Base");
     await useDevWorld(install, "Steve's Base");
     return world;
   }
@@ -194,6 +204,7 @@ describe("client bridge start", () => {
         { id: 8, sink: "1", pid: 999 },
       ];
       const bridge = new ClientBridge();
+      await savedUserWorld();
       await bridge.start(launchOpts);
       // The game process appears after the launch; the next sweep finds its stream.
       runningPids = [GAME];
@@ -222,6 +233,7 @@ describe("client bridge start", () => {
       launched = { muteRequested: true };
       pactl.missing = true;
       const bridge = new ClientBridge();
+      await savedUserWorld();
       const status = await bridge.start(launchOpts);
       await bridge.stop();
       expect(status).toMatchObject({ muted: false, muteNote: "could not create the silent sink (pactl is not installed); the game's sound plays normally" });
@@ -229,6 +241,7 @@ describe("client bridge start", () => {
 
     it("leaves the sound of a launch without mute alone", async () => {
       const bridge = new ClientBridge();
+      await savedUserWorld();
       const status = await bridge.start(launchOpts);
       await bridge.stop();
       expect(status.muted).toBe(false);
@@ -270,7 +283,7 @@ describe("client bridge start", () => {
     expect(r.savedAndQuit).toBeUndefined();
     expect(r.keptPackFolders?.length).toBeGreaterThan(0);
     for (const folder of r.keptPackFolders ?? []) await access(folder);
-    expect(r.stopNote).toContain("own icon was put back");
+    expect(r.stopNote).not.toContain("icon");
     const packs = JSON.parse(await readFile(join(world, "world_behavior_packs.json"), "utf8")) as { pack_id: string }[];
     expect(packs[0]?.pack_id).toBe(helper);
     expect(packs.map((p) => p.pack_id)).toContain("foreign");
@@ -280,23 +293,47 @@ describe("client bridge start", () => {
     expect(readLevelDat(new Uint8Array(await readFile(join(world, "level.dat")))).root.get("cheatsEnabled")?.value).toBe(1);
   });
 
-  it("launches a sculkwire test world with fresh, leaving the saved dev world untouched", async () => {
-    const world = await savedUserWorld();
-    const level = await readFile(join(world, "level.dat"));
+  /** The project's behavior pack uuid (test/fixtures/good_addon). */
+  const PROJECT_BP = "5b1c7a0e-2f1d-4c55-9a39-1e7d3b6a0001";
+
+  it("without a saved dev world enters the user's world that already uses the project's packs", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const world = await userWorld("Ab+c=", "Echo Lab", { packs: [PROJECT_BP], lastPlayed: now - 86_400 });
+    const other = await userWorld("Zz9==", "Survival", { lastPlayed: now });
+    const level = await readFile(join(other, "level.dat"));
     const bridge = new ClientBridge();
-    const status = await bridge.start({ ...launchOpts, fresh: true });
+    const status = await bridge.start({ ...launchOpts, project });
     await bridge.stop();
-    expect(status).toMatchObject({ world: "sculkwire-bridge", worldMode: "fresh" });
-    expect(await readFile(join(world, "level.dat"))).toEqual(level);
+    expect(status).toMatchObject({ world: "Echo Lab", worldMode: "user" });
+    expect(status.worldNote).toContain("Echo Lab is the one of your worlds whose pack lists name the project's packs");
     expect(await readFile(join(world, ICON_FILE), "utf8")).toBe("the user's picture");
+    expect(await readFile(join(other, "level.dat"))).toEqual(level);
+  });
+
+  it("of several worlds using the project's packs enters the one played last and says so", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    await userWorld("Ab+c=", "Echo Lab", { packs: [PROJECT_BP], lastPlayed: now - 86_400 });
+    await userWorld("De+f=", "Echo Lab 2", { packs: [PROJECT_BP], lastPlayed: now - 60 });
+    const bridge = new ClientBridge();
+    const status = await bridge.start({ ...launchOpts, project });
+    await bridge.stop();
+    expect(status).toMatchObject({ world: "Echo Lab 2", worldMode: "user" });
+    expect(status.worldNote).toContain("2 of your worlds use the project's packs (Echo Lab 2 [De+f=], Echo Lab [Ab+c=]); Echo Lab 2 was played last");
+  });
+
+  it("finds no world to use: fails at once listing the user's worlds and the next step, and creates none", async () => {
+    await userWorld("Zz9==", "Survival", { lastPlayed: 1_700_000_000 });
+    await createWorld(install, { name: "left-over", helper: false });
+    const bridge = new ClientBridge();
+    const failed = bridge.start({ ...launchOpts, project });
+    await expect(failed).rejects.toThrow(/no world to launch into: .*none of your worlds lists the project's packs\. Your worlds, played last first: "Survival" \[Zz9==\] last played 2023-11-14\. Ask the user which world/);
+    await expect(failed).rejects.toThrow(/game_worlds \{action: "use"/);
+    expect((await listAllWorlds(install)).map((w) => w.name).sort()).toEqual(["Survival", "sculkwire-left-over"]);
   });
 
   it("writes nothing into the saved dev world while the game runs: it attaches instead", async () => {
     const world = await savedUserWorld();
     const level = await readFile(join(world, "level.dat"));
-    await expect(new ClientBridge().start({ ...launchOpts, userWorld: "Steve's Base", world: "other" })).rejects.toThrow(
-      "userWorld enters one of your own worlds and cannot be combined with world",
-    );
     runningPids = [process.pid];
     const bridge = new ClientBridge();
     const status = await bridge.start(launchOpts);
@@ -359,9 +396,9 @@ describe("client bridge start", () => {
 
     it("names the fresh-start options it could not apply, and does not fail for them", async () => {
       const bridge = new ClientBridge();
-      const status = await bridge.start({ ...launchOpts, fresh: true, difficulty: "hard", width: 800, betaApis: false });
+      const status = await bridge.start({ ...launchOpts, userWorld: "Steve's Base", difficulty: "hard", width: 800, betaApis: false });
       await bridge.stop();
-      expect(status.worldNote).toContain("fresh, display, width, difficulty need the game closed first: not applied");
+      expect(status.worldNote).toContain("userWorld, display, width, difficulty need the game closed first: not applied");
       expect(stopGame).not.toHaveBeenCalled();
     });
 

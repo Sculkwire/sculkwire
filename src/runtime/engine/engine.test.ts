@@ -692,6 +692,32 @@ describe("engine reconnect", () => {
     expect(again.ok).toBe(true);
     expect(agent.connections).toBe(2);
   });
+
+  it("declares the session lock again on the new socket, since the agent ended it with the old one", async () => {
+    const agent = await makeAgent();
+    const session = makeSession(agent);
+    agent.handler = (request) =>
+      request.method === "input.lock"
+        ? reply(request, { locked: true, mode: "auto", by: "agent", user: false, session: true })
+        : reply(request, statusResult());
+    const held = await session.lock.session(true);
+    expect(held.ok).toBe(true);
+    agent.drop();
+    await waitFor(() => !session.attached);
+    const before = agent.requests.length;
+    expect((await session.status()).ok).toBe(true);
+    await waitFor(() => agent.requests.slice(before).some((r) => r.method === "input.lock"));
+    expect(agent.requests.slice(before).find((r) => r.method === "input.lock")?.params).toEqual({ session: true });
+
+    // Ended on purpose: a later connection declares nothing.
+    await session.lock.session(false);
+    agent.drop();
+    await waitFor(() => !session.attached);
+    const after = agent.requests.length;
+    expect((await session.status()).ok).toBe(true);
+    await sleep(50);
+    expect(agent.requests.slice(after).some((r) => r.method === "input.lock")).toBe(false);
+  });
 });
 
 function tickParams(tick: number, yaw = 0) {

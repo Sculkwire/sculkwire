@@ -401,13 +401,16 @@ fn game_type() -> Value {
     }
 }
 
-/// True when the loaded world is one the agent may change: its name starts with `sculkwire-`.
+/// Ok when the loaded world is the one the host allows changing: its name is exactly `allowed`, the
+/// world sculkwire entered or attached to, or the user's chosen dev world (the host decides which).
 ///
-/// An unreadable name is a refusal (`level.data`), never an allow.
-pub(crate) fn changeable() -> Result<(), RpcError> {
+/// An empty `allowed` and an unreadable name are refusals (`level.data`), never an allow.
+pub(crate) fn changeable(allowed: &str) -> Result<(), RpcError> {
     match name() {
-        Some(name) if name.starts_with("sculkwire-") => Ok(()),
-        Some(_) => Err(RpcError::invalid_params("only a world named sculkwire-* may be changed")),
+        Some(name) if !allowed.is_empty() && name == allowed => Ok(()),
+        Some(name) => Err(RpcError::invalid_params(alloc::format!(
+            "the loaded world is {name:?}, not {allowed:?}, the world sculkwire may change"
+        ))),
         None => Err(RpcError::anchor("level.data")),
     }
 }

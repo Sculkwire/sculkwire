@@ -1,10 +1,11 @@
 /**
- * Synthetic game screenshots for the join recovery's tests: a flat RGB frame, sculkwire world icons drawn into it the
- * way the game shows a thumbnail (scaled with bilinear filtering, optionally darkened), and the PNG the screenshot
- * routes return.
+ * Synthetic game screenshots for the join recovery's tests: a flat RGB frame, made-up world thumbnails drawn into it
+ * the way the game shows one (scaled with bilinear filtering, optionally darkened), and the PNG the screenshot routes
+ * return.
  */
 import { crc32, deflateSync } from "node:zlib";
-import { ICON_HEIGHT, ICON_WIDTH, iconCells, iconPixel, type Rect } from "../runtime/client/icon.ts";
+import { createHash } from "node:crypto";
+import type { Rect } from "../runtime/client/thumbnail.ts";
 import type { Pixels } from "../runtime/client/png.ts";
 
 /** A `width` x `height` RGB frame of one grey (the Play screen's dark background by default). */
@@ -24,16 +25,51 @@ export function fill(image: Pixels, rect: Rect, colour: readonly [number, number
   }
 }
 
-/** Draw a level's world icon into `rect`, bilinearly filtered, times `light` (1 = as drawn). */
-export function drawIcon(image: Pixels, rect: Rect, levelId: string, light = 1): void {
-  const cells = iconCells(levelId);
-  const at = (x: number, y: number) => iconPixel(cells, Math.min(ICON_WIDTH - 1, Math.max(0, x)), Math.min(ICON_HEIGHT - 1, Math.max(0, y)));
+/**
+ * A made-up world thumbnail for `seed`: a soft colour gradient with a few discs and bars placed and coloured by a hash
+ * of the seed, so every seed gives a picture no other seed matches.
+ */
+export function testPicture(seed: string, width = 160, height = 90): Pixels {
+  const hash = createHash("sha256").update(seed).digest();
+  const byte = (i: number) => hash[i % hash.length] as number;
+  const image = frame(width, height, 0);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const at = (y * width + x) * 3;
+      image.data[at] = (byte(0) + (x * byte(1)) / width) % 256;
+      image.data[at + 1] = (byte(2) + (y * byte(3)) / height) % 256;
+      image.data[at + 2] = (byte(4) + ((x + y) * byte(5)) / (width + height)) % 256;
+    }
+  }
+  for (let k = 0; k < 6; k++) {
+    const cx = (byte(6 + k * 5) / 255) * width;
+    const cy = (byte(7 + k * 5) / 255) * height;
+    const r = (0.1 + (byte(8 + k * 5) / 255) * 0.25) * height;
+    const colour = [byte(9 + k * 5), byte(10 + k * 5), byte(11 + k * 5)] as const;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const inside = k % 2 === 0 ? (x - cx) ** 2 + (y - cy) ** 2 < r * r : Math.abs(x - cx) < r * 1.6 && Math.abs(y - cy) < r * 0.5;
+        if (!inside) continue;
+        const at = (y * width + x) * 3;
+        image.data.set(colour, at);
+      }
+    }
+  }
+  return image;
+}
+
+/** Draw `picture` into `rect`, bilinearly filtered, times `light` (1 = as drawn): a thumbnail as the game shows it. */
+export function drawPicture(image: Pixels, rect: Rect, picture: Pixels, light = 1): void {
+  const at = (x: number, y: number) => {
+    const o = (Math.min(picture.height - 1, Math.max(0, y)) * picture.width + Math.min(picture.width - 1, Math.max(0, x))) * picture.channels;
+    return [picture.data[o] ?? 0, picture.data[o + 1] ?? 0, picture.data[o + 2] ?? 0];
+  };
   for (let y = Math.round(rect.y); y < Math.round(rect.y + rect.height); y++) {
     if (y < 0 || y >= image.height) continue;
     for (let x = Math.round(rect.x); x < Math.round(rect.x + rect.width); x++) {
       if (x < 0 || x >= image.width) continue;
-      const u = ((x - rect.x + 0.5) / rect.width) * ICON_WIDTH - 0.5;
-      const v = ((y - rect.y + 0.5) / rect.height) * ICON_HEIGHT - 0.5;
+      const u = ((x - rect.x + 0.5) / rect.width) * picture.width - 0.5;
+      const v = ((y - rect.y + 0.5) / rect.height) * picture.height - 0.5;
       const x0 = Math.floor(u);
       const y0 = Math.floor(v);
       const fx = u - x0;

@@ -55,7 +55,7 @@ export function registerPrompts(server: McpServer): void {
       return userText([
         `Playtest this feature of the add-on at ${project}: ${feature}`,
         "",
-        `1. game_launch {"project": ${JSON.stringify(project)}, "keep": true}: keeps the test world from earlier runs.`,
+        `1. game_launch {"project": ${JSON.stringify(project)}}: enters the user's world for this project (the saved dev world, or the one already using its packs). When it fails because no world is found, ask the user which of the listed worlds to use, game_worlds {"action": "use", "world": <their answer>}, and launch again.`,
         `2. Starting scene: scene_list shows the saved scenes. If ${name} is not among them, set the world up for the test (game_command for /setblock, /summon, /give …), then scene_save {"name": ${name}} once (it saves the blocks within "radius", default 8, of the player). On every later run call scene_reset {"name": ${name}} instead, so each run starts from the same state.`,
         '3. game_events {"since": "now"} and keep its `next` cursor, then exercise the feature: player_act (walk, look, attack, use items, mine) or game_command for what the player would do.',
         '4. Check the outcome: wait_until {"condition": {...}, "timeoutMs": …} for the condition the feature should cause (kind entity, block, score, event with "since": <cursor>, log, player or ticks); game_events {"since": <cursor>} for the in-world events it fired; game_query for entities, blocks, components, dynamic properties or scores.',

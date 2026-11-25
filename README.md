@@ -50,8 +50,8 @@ The [tool reference](docs/tools.md) explains each tool and its inputs, the MCP p
 
 | Mode | How | What happens |
 |---|---|---|
-| Test world (default until you choose a dev world) | `game_launch {project}` | A fresh `sculkwire-bridge` world each launch. On Linux the game runs in the background and muted; pass `display: "window"` to watch it |
-| Your own dev world | `game_worlds {action: "use", world}` once, then `game_launch` | Enters your world with the helper pack and your packs added, after backing up its settings files; Save & Quit before the stop. `fresh: true` goes back to a test world |
+| Your world for the project | `game_launch {project}` | Enters your saved dev world, else the one of your worlds that already uses the project's packs, with the helper pack and your packs added after backing up its settings files; Save & Quit before the stop. On Linux the game runs in the background and muted; pass `display: "window"` to watch it. When no world is found it lists your worlds and asks which one to use: sculkwire never creates one |
+| A world you choose | `game_worlds {action: "use", world}` once (or `userWorld` for one launch), then `game_launch` | The same, in the world you named |
 | A game you opened | `game_launch` while the game runs | Attaches without restarting it. Commands, the content log and world reads work; `game_stop` only detaches and the game keeps running with its sound |
 
 See [Game Client Setup](docs/client.md) for platforms and display modes.

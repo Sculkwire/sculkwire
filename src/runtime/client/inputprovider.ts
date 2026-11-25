@@ -1,8 +1,9 @@
 /**
  * The in-process input provider: the second input route next to the keyboard (`input: "engine"` in `player_act` and
  * `sculk bench`). The bridge hands its `input` to the controller, merges its motion stream over the helper's player
- * state, tells it when a game starts and stops, and `player_act` asks it whether the simulation is paused and holds its
- * input lock around actions and play jobs.
+ * state, tells it when a game starts and stops, keeps its input lock on for the session game_launch asked for
+ * (`inputLock`, put back by game_stop), and `player_act` asks it whether the simulation is paused and holds its input
+ * lock around actions and play jobs.
  *
  * sculkwire installs its own provider, the in-game agent (`agentprovider.ts`), as the built-in one from `wireFeatures()`
  * (`src/features.ts`). An extension may replace it through `registerInputProvider`; removing that one falls back to the
@@ -13,6 +14,7 @@
  * watched or closed.
  */
 import { onShutdown } from "../../core/shutdown.ts";
+import type { LockMode } from "../engine/lock.ts";
 import type { LaunchMode } from "./launcher.ts";
 import type { MoveVector } from "./input.ts";
 
@@ -78,6 +80,17 @@ export interface ProviderGame {
   pid: number;
 }
 
+/** The input lock as game_status reports it. */
+export interface InputLockStatus {
+  mode: LockMode;
+  /** The user's keyboard and mouse are kept out of the game right now. */
+  locked: boolean;
+  /** The user took control with F9 and has not given it back. */
+  user: boolean;
+  /** A game_launch session lock is held (it locks in mode `auto`); absent when the loaded agent predates session locks. */
+  session?: boolean;
+}
+
 export interface InputProvider {
   /** Shown in error messages. */
   readonly name: string;
@@ -91,6 +104,19 @@ export interface InputProvider {
   readonly keyboardNote?: string;
   /** Hold the input lock while an action or play job runs. Resolves to the function that releases it. Never throws. */
   hold(): Promise<() => Promise<void>>;
+  /** The input lock's last known state, or undefined before one was read. Optional: a provider without it has no lock. */
+  lockStatus?(): InputLockStatus | undefined;
+  /**
+   * Keep the input lock in `mode` while sculkwire has the game (game_launch `inputLock`), attaching the provider first
+   * when it is not attached. Never throws: resolves to why the lock could not be set (the user's input then still
+   * reaches the game), or undefined once it is set.
+   */
+  sessionLock?(mode: Exclude<LockMode, "off">): Promise<string | undefined>;
+  /**
+   * The game is about to be released (game_stop): leave no lock behind, so a game the user keeps playing after a detach
+   * is never locked. Never attaches and never throws.
+   */
+  releaseSessionLock?(): Promise<void>;
   /** Make the engine route usable before a bench run. Throws when it cannot be. */
   attach(): Promise<void>;
   /** The bridge launched a game. Never throws. */

@@ -14,6 +14,7 @@ import { EngineLogReader, engineQuery } from "./engineread.ts";
 import { entityPropertyIdsFor } from "./entityproperties.ts";
 import { inputProvider, withInputLock } from "./inputprovider.ts";
 import { engine } from "../engine/engine.ts";
+import { LOCK_MODES } from "../engine/lock.ts";
 import type { EngineResult } from "../engine/failure.ts";
 import type { EntityInfo, Loadout, PlayerAction } from "./types.ts";
 import { play, PLAY_DEFAULT_DURATION_MS, PLAY_DEFAULT_MAX_DEATHS, PLAY_DEFAULT_STEP_MS, PLAY_MAX_DURATION_MS, type Death, type PlayAction, type PlayResult } from "./skills/play.ts";
@@ -24,7 +25,7 @@ import { liveTaskEnv } from "./tasks/live.ts";
 import { pauseOnTakeover, playJobs, runActions, stepText, type PlayJobInfo } from "./jobs.ts";
 import { DIFFICULTIES, type Difficulty } from "../../gamefiles/worlds.ts";
 import { findInstall } from "../../gamefiles/install.ts";
-import { deleteWorld, listAllWorlds, readMarker, STALE_WORLD_DAYS, worldLine } from "./worldstore.ts";
+import { deleteWorld, listAllWorlds, STALE_WORLD_DAYS, worldLine } from "./worldstore.ts";
 import { readDevWorld, useDevWorld } from "./devworld.ts";
 import { FOREGROUND_MESSAGE } from "./windows.ts";
 import { deleteScene, listScenes, resetScene, saveScene, SCENE_DEFAULT_RADIUS, SCENE_MAX_RADIUS, SCENE_NAME } from "./scenes.ts";
@@ -65,7 +66,7 @@ const statusSchema = {
     .optional(),
   prunedWorlds: z.array(z.string()).optional(),
   worldNote: z.string().optional(),
-  worldMode: z.enum(["fresh", "kept", "copied", "user", "attached"]).optional(),
+  worldMode: z.enum(["user", "attached"]).optional(),
   attached: z.boolean().optional().describe("game_launch found the game already running and attached to it instead of starting one; game_stop only detaches"),
   inWorld: z.boolean().optional().describe("Attached game: whether it shows a world (false: it sits in a menu; the channels connect once a world is open)"),
   levelId: z.string().optional().describe("Attached game: the level id (folder under minecraftWorlds) of the world it opened"),
@@ -78,6 +79,11 @@ const statusSchema = {
   muteNote: z.string().optional().describe("Why the game's sound may reach the speakers although mute applies (pactl missing, a stream that would not move to the silent sink)"),
   worldBackup: z.string().optional(),
   defaultWorld: z.object({ levelId: z.string(), name: z.string() }).optional(),
+  inputLock: z
+    .object({ mode: z.enum(LOCK_MODES), locked: z.boolean(), user: z.boolean(), session: z.boolean().optional() })
+    .optional()
+    .describe("The input lock (game_input_lock): its mode, whether the user's keyboard and mouse are kept out right now, whether the user took control with F9, and whether game_launch holds its session lock (which locks in mode auto)"),
+  lockNote: z.string().optional().describe("Why the input lock game_launch asked for (inputLock) is not set: the user's keyboard and mouse still reach the game"),
 };
 const commandSchema = {
   command: z.string(),
@@ -152,6 +158,8 @@ function statusText(s: BridgeStatus): string {
     );
   }
   if (s.worldNote) parts.push(s.worldNote);
+  if (s.inputLock) parts.push(`input lock ${s.inputLock.mode}${s.inputLock.session ? " with the session lock" : ""}: ${s.inputLock.locked ? "the user's input is kept out (F9 hands control over)" : s.inputLock.user ? "the user took control with F9" : "the user's input reaches the game"}`);
+  if (s.lockNote) parts.push(s.lockNote);
   if (s.helperNote) parts.push(s.helperNote);
   if (s.prunedWorlds?.length) parts.push(`removed ${s.prunedWorlds.length} old test world(s): ${s.prunedWorlds.join(", ")}`);
   if (s.defaultWorld) parts.push(`default dev world ${s.defaultWorld.name} [${s.defaultWorld.levelId}]`);
@@ -222,14 +230,16 @@ export function register(server: McpServer): void {
       title: "Launch the Bedrock client",
       description:
         "Start the real Minecraft Bedrock client (any install sculkwire finds such as Windows, mcbe-gdk-installer, a Wine " +
-        "or Proton prefix like Flarial, or SCULKWIRE_MINECRAFT_DIR) in a world with the project's packs and the sculkwire " +
-        "helper pack active. The world is the user's saved dev world (game_worlds action use) when one is saved and no " +
-        "test world option (world, keep, copyFrom, fresh) is given, or userWorld; else a fresh `sculkwire-` test world: " +
-        "flat and creative, cheats on, time and " +
-        "weather frozen. In the user's dev world sculkwire backs up level.dat, the pack lists and the icon first (worldBackup), " +
-        "merges the packs into its pack lists (other packs stay), turns cheats on when they are off (the world then awards " +
-        "no achievements) and says so in worldNote; experiments only with betaApis, the difficulty only when given; the game " +
-        "must be closed for that. Attaches the script debugger automatically. Display modes: on Linux `headless` (the " +
+        "or Proton prefix like Flarial, or SCULKWIRE_MINECRAFT_DIR) in one of the user's own worlds with the project's " +
+        "packs and the sculkwire helper pack active. The world, in this order: userWorld (ONLY a world the user named); " +
+        "the user's saved dev world (game_worlds action use); the one of the user's worlds whose pack lists already name " +
+        "the project's packs (several: the one played last, and worldNote says so). sculkwire never creates or copies a " +
+        "world: when none is found the launch fails at once and lists the user's worlds; then ask the user which world to " +
+        "use, save it with game_worlds action use (or pass userWorld), and launch again. In that world sculkwire backs up " +
+        "level.dat and the pack lists first (worldBackup), merges the packs into its pack lists (other packs stay), turns " +
+        "cheats on when they are off (the world then awards no achievements) and says so in worldNote; experiments only " +
+        "with betaApis, the difficulty only when given; nothing else is written into it, and the game must be closed for " +
+        "that. Attaches the script debugger automatically. Display modes: on Linux `headless` (the " +
         "default) runs the game in the background, without a window and muted, so it never takes the user's screen; " +
         "`window` is a visible gamescope window, only when the user wants to watch. On Windows `window` (the default) is " +
         "the game's own window and `headless` runs the window too (the result says so). Screenshots, input and /connect " +
@@ -244,20 +254,28 @@ export function register(server: McpServer): void {
         "each deployed pack folder and its absolute path. Returns once the world is loaded, in 1-2 minutes (the call " +
         "blocks for the whole wait). If the world " +
         "join races Microsoft sign-in and the game stops on \"You need to authenticate to Microsoft services\", it " +
-        "walks the menus back into the test world without relaunching, and game_status reports joinRecovery. When sculkwire " +
+        "walks the menus back into the world without relaunching, and game_status reports joinRecovery: it opens only the " +
+        "tile showing the world's own picture (world_icon.jpeg); when no tile or several show it, nothing is clicked and " +
+        "manualSteps asks the user to open the world. When sculkwire " +
         "cannot start the game itself it returns right away with manualSteps for the user, and game_status shows when " +
         "the game is ready. When the world does not load within worldWaitSeconds the game is stopped, unless " +
         "keepOnTimeout is set: then the result is not ready, manualSteps says how to enter the world, and game_status " +
         "turns ready once it is in. When the install's game is already running (the user opened it) it attaches instead " +
         "of starting one (attached: true, worldMode attached): the game is never restarted and no world is written, so " +
-        "fresh, world, keep, copyFrom, userWorld, display, width, height, fps, difficulty and betaApis are not " +
+        "userWorld, display, width, height, fps, difficulty and betaApis are not " +
         "applied (worldNote names the ones given); its sound stays on unless mute is true. The in-game agent turns /connect and the content log on live and " +
         "types /script debugger connect and /connect into the open world (needs cheats on); without the agent, or in a " +
         "menu (inWorld false), manualSteps names the commands to type. ready means the script debugger is attached; " +
         "helperNote says when the world lacks the helper pack (game_query, wait_until, game_events and scene_* need it) " +
         "and when game_log has no content-log file. The project's packs load only in a world that already lists them, " +
-        "after a rejoin.",
-      inputSchema: {
+        "after a rejoin. inputLock (default on): once sculkwire has the game (the world loaded, or right after attaching) " +
+        "it attaches the in-game agent and keeps the user's keyboard and mouse out of the game until game_stop releases " +
+        "it; the lock belongs to this process's connection, so it also ends if sculkwire exits or dies. F9 in the game " +
+        "hands control to the user and back (game_input_lock). " +
+        "With the lock on, the keyboard route (player_act input keyboard, game_input move or a middle click) is kept out " +
+        "too: pass inputLock auto or off to use it. When the lock cannot be set the launch still succeeds and lockNote says why.",
+      // Strict: a removed input (fresh, world, keep, copyFrom) is refused, never silently ignored.
+      inputSchema: z.object({
         project: z.string().optional().describe("Add-on project or pack directory to activate in the world. For a Regolith project whose profile runs filters, the packs are what rgl last built (.regolith/tmp); sculkwire does not run rgl, so run `rgl run` first"),
         deploy: z.boolean().optional().describe("Copy the project's packs into development_*_packs, also over the project's sculkwire_* folder an earlier launch left. Default true. A folder rgl exported to is used as it is. Off: only folders that already serve a pack's uuid are used (what rgl built is still deployed)"),
         display: z
@@ -265,25 +283,15 @@ export function register(server: McpServer): void {
           .optional()
           .describe("headless (Linux default): no window and muted, the game runs in the background; Windows runs the window instead. window: a visible gamescope window on Linux, only when the user wants to watch; the game's own window on Windows (default there). desktop: the launcher's own window (on Windows the same as window)"),
         mute: z.boolean().optional().describe("Silence the game's audio until game_stop (Linux: its streams are kept on a silent sink, through the stop too, and an attached game's streams are moved back to their own output when game_stop detaches; Windows: the game's audio sessions, unmuted again by game_stop). Default: on in headless mode only; window, desktop, a game the user starts and an attached game keep their sound unless this is true. game_status reports muted and muteNote"),
-        world: z
-          .string()
-          .optional()
-          .describe("A sculkwire- test world by name (the prefix is added). Omit it unless a second test world is really needed: the default bridge world is reused and replaced on each launch, so no new entry appears in the user's world list"),
-        keep: z.boolean().optional().describe("Continue in the existing test world as it is (blocks, inventory, settings) instead of replacing it; it is then never removed automatically. game_stop ends the game without Save & Quit, so blocks changed in the last minute before it may be lost"),
         userWorld: z
           .string()
           .optional()
-          .describe("Enter this one of the user's own worlds (level name or level id; a name several worlds share is refused) instead of the saved dev world. ONLY a world the user named: never choose one yourself. Not with world, keep, copyFrom or fresh"),
-        fresh: z.boolean().optional().describe("A fresh sculkwire-bridge test world even when the user saved a dev world"),
-        copyFrom: z
-          .string()
-          .optional()
-          .describe("Start from a copy of one of the user's worlds (level name or level id); the original is never changed. ONLY for a world the user named or picked: list them with game_worlds and ask the user which one, never choose one yourself"),
+          .describe("Enter this one of the user's worlds (level name or level id; a name several worlds share is refused) instead of the saved dev world. ONLY a world the user named: never choose one yourself"),
         difficulty: z
           .enum(Object.keys(DIFFICULTIES) as [Difficulty, ...Difficulty[]])
           .optional()
-          .describe("World difficulty (test world default normal; the user's dev world keeps its own unless this is given). Peaceful removes hostile mobs such as zombies"),
-        betaApis: z.boolean().optional().describe("Enable the Beta APIs experiment. In the user's dev world it stays on for good"),
+          .describe("World difficulty (the world keeps its own unless this is given). Peaceful removes hostile mobs such as zombies"),
+        betaApis: z.boolean().optional().describe("Enable the Beta APIs experiment. In the user's world it stays on for good"),
         width: z.number().int().min(320).max(3840).optional(),
         height: z.number().int().min(240).max(2160).optional(),
         fps: z.number().int().min(10).max(240).optional().describe("Frame rate in window and headless modes (default 60)"),
@@ -297,8 +305,12 @@ export function register(server: McpServer): void {
         keepOnTimeout: z
           .boolean()
           .optional()
-          .describe("When the wait runs out, keep the game running and return a not-ready status with the step to enter the world (Play, then the test world) instead of stopping the game; sculkwire keeps waiting for 30 min and game_status turns ready once the world is in. Default false"),
-      },
+          .describe("When the wait runs out, keep the game running and return a not-ready status with the step to enter the world (Play, then the world) instead of stopping the game; sculkwire keeps waiting for 30 min and game_status turns ready once the world is in. Default false"),
+        inputLock: z
+          .enum(LOCK_MODES)
+          .optional()
+          .describe("Input lock for this session (default on): on keeps the user's keyboard and mouse out of the game until game_stop or until this sculkwire process exits (F9 hands control over), auto locks only while a player_act action or play job runs, off sets nothing"),
+      }).strict(),
       outputSchema: statusSchema,
     },
     async (a) => {
@@ -309,11 +321,7 @@ export function register(server: McpServer): void {
           ...(a.deploy !== undefined ? { deploy: a.deploy } : {}),
           ...(a.display ? { mode: a.display } : {}),
           ...(a.mute !== undefined ? { mute: a.mute } : {}),
-          ...(a.world ? { world: a.world } : {}),
-          ...(a.keep ? { keep: true } : {}),
-          ...(a.copyFrom ? { copyFrom: a.copyFrom } : {}),
           ...(a.userWorld ? { userWorld: a.userWorld } : {}),
-          ...(a.fresh ? { fresh: true } : {}),
           ...(a.difficulty ? { difficulty: a.difficulty } : {}),
           ...(a.betaApis ? { betaApis: true } : {}),
           ...(a.width ? { width: a.width } : {}),
@@ -321,6 +329,7 @@ export function register(server: McpServer): void {
           ...(a.fps ? { fps: a.fps } : {}),
           ...(a.worldWaitSeconds ? { timeoutMs: a.worldWaitSeconds * 1000 } : {}),
           ...(a.keepOnTimeout ? { keepOnTimeout: true } : {}),
+          inputLock: a.inputLock ?? "on",
         });
         return ok(statusText(s), s);
       } catch (err) {
@@ -334,10 +343,11 @@ export function register(server: McpServer): void {
     {
       title: "Client bridge status",
       description:
-        "Whether the client runs, which world and packs are active (worldMode: fresh, kept, copied, user or attached), " +
+        "Whether the client runs, which world and packs are active (worldMode: user or attached), " +
         "which channels (debugger, /connect) are attached, the user's saved default dev world (defaultWorld), and whether " +
         "the player is dead (dead: the death screen is up or the helper streamed health 0; player_act respawns it). For " +
-        "a game game_launch attached to: inWorld, levelId, and helperNote when the helper pack or the content log is missing.",
+        "a game game_launch attached to: inWorld, levelId, and helperNote when the helper pack or the content log is missing. " +
+        "inputLock: the input lock's mode, locked and user (F9); lockNote when the lock game_launch asked for is not set.",
       inputSchema: {},
       outputSchema: statusSchema,
     },
@@ -354,14 +364,14 @@ export function register(server: McpServer): void {
     {
       title: "List, choose or delete worlds",
       description:
-        "List every world of the active game user (sculkwire's test worlds and the user's own; `default` marks the saved " +
-        "dev world), choose the user's default dev world (action use), or delete one sculkwire test world. Needs no " +
-        "running game and never starts one. use saves one of the user's own worlds as the world game_launch enters by " +
-        "default (per game user; world null or clear: true forgets it): ONLY the world the user names, so list the worlds, " +
-        "ask the user which one, and never pick one yourself. sculkwire changes only sculkwire-* worlds and that one dev " +
-        "world (its pack lists, cheats flags, icon, and experiments on request, after a backup); the user's other worlds " +
-        "are only listed, or read for game_launch copyFrom, and never deleted. Test worlds not played for " +
-        `${STALE_WORLD_DAYS} days are removed by the next game_launch unless kept.`,
+        "List every world of the active game user (the user's own, and `sculkwire-` worlds earlier versions or sculk bench " +
+        "made; `default` marks the saved dev world), choose the user's default dev world (action use), or delete one " +
+        "sculkwire- world. Needs no running game and never starts one. use saves one of the user's worlds as the world " +
+        "game_launch enters by default (per game user; world null or clear: true forgets it): ONLY the world the user " +
+        "names, so list the worlds, ask the user which one, and never pick one yourself. sculkwire changes only the world " +
+        "the user chose or opened (its pack lists and cheats flags, and experiments and difficulty on request, after a " +
+        "backup) and never deletes one of the user's worlds. sculkwire- worlds not played for " +
+        `${STALE_WORLD_DAYS} days are removed by the next game_launch unless kept (kept or copied ones can hold the user's work).`,
       inputSchema: {
         action: z.enum(["list", "use", "delete"]).optional().describe("list (default), use or delete"),
         world: z
@@ -401,8 +411,8 @@ export function register(server: McpServer): void {
           const saved = await useDevWorld(install, clear || world === null ? undefined : world);
           return ok(
             saved
-              ? `default dev world: ${saved.name} [${saved.levelId}]; game_launch enters it unless world, keep, copyFrom or fresh is given`
-              : "no default dev world: game_launch uses sculkwire- test worlds",
+              ? `default dev world: ${saved.name} [${saved.levelId}]; game_launch enters it unless userWorld is given`
+              : "no default dev world: game_launch enters the one of your worlds that uses the project's packs, else asks which world to use",
             { defaultWorld: saved ?? null },
           );
         }
@@ -1169,8 +1179,8 @@ export function register(server: McpServer): void {
   const vec3 = z.object({ x: z.number(), y: z.number(), z: z.number() });
   const sceneBox = z.object({ min: vec3, max: vec3 });
   const scenesLast =
-    "Scenes live in the world (a structure plus a world dynamic property), so they last as long as the world: with the " +
-    "default game_launch (the test world is replaced each launch) one session, with `keep: true` or `copyFrom` across launches.";
+    "Scenes live in the world (a structure plus a world dynamic property), so they last as long as the world: across " +
+    "launches into the same world.";
 
   server.registerTool(
     "scene_save",
@@ -1316,13 +1326,9 @@ export function register(server: McpServer): void {
     async () => {
       try {
         await playJobs.stopAll("game_stop");
-        const world = bridge.world;
-        const kept = world !== undefined && world.how !== "user" && (await readMarker(world.dir))?.keep === true;
         const r = await bridge.stop();
-        // A test world is ended without Save & Quit, and the game writes chunks on its own schedule.
-        const note = kept && r.stopped ? `; ${world.name} is a kept world: blocks changed in the last minute before this stop may be missing on the next launch` : "";
         const stopNote = r.stopNote ? `; ${r.stopNote}` : "";
-        return ok(r.stopped ? `${r.message}${note}${stopNote}` : `not stopped: ${r.message}${stopNote}`, r);
+        return ok(r.stopped ? `${r.message}${stopNote}` : `not stopped: ${r.message}${stopNote}`, r);
       } catch (err) {
         return fail(err);
       }

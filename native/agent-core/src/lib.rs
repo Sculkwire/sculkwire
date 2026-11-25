@@ -21,6 +21,7 @@ pub mod hook;
 pub mod image;
 pub mod import;
 pub mod lock;
+pub mod lockbits;
 pub mod log;
 pub mod message_loop;
 pub mod queue;

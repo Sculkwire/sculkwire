@@ -14,6 +14,9 @@ import { register as bdsTools } from "./runtime/bds/mcp.ts";
 import { bdsStoreSource } from "./runtime/bds/store.ts";
 import { installAgentProvider } from "./runtime/client/agentprovider.ts";
 import { bridge } from "./runtime/client/bridge.ts";
+import { readDevWorld } from "./runtime/client/devworld.ts";
+import { gamePids } from "./runtime/client/launcher.ts";
+import { findInstall } from "./gamefiles/install.ts";
 import { commands as gameCommands } from "./runtime/client/cli.ts";
 import { register as gameTools } from "./runtime/client/mcp.ts";
 import { commands as engineCommands } from "./runtime/engine/cli.ts";
@@ -31,8 +34,19 @@ const engineDeps: EngineDeps = {
   script: {
     query: (kind, params) => bridge.query(kind, params),
     loadedWorld: () => {
+      if (!bridge.running) return undefined;
       const world = bridge.world;
-      return bridge.running && world ? { levelId: world.levelId, name: world.name } : undefined;
+      if (world) return { levelId: world.levelId, name: world.name };
+      const s = bridge.status();
+      return s.attached && s.inWorld && s.levelId && s.world ? { levelId: s.levelId, name: s.world } : undefined;
+    },
+    devWorld: async () => {
+      const install = bridge.install ?? (await findInstall().catch(() => undefined));
+      return install ? readDevWorld(install) : undefined;
+    },
+    gameRunning: async () => {
+      const install = bridge.install ?? (await findInstall().catch(() => undefined));
+      return install !== undefined && (await gamePids(install)).length > 0;
     },
   },
 };

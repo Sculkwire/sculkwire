@@ -79,13 +79,15 @@ import { Staleness, streamEntities, streamEntity, TickClock, type StreamedEntiti
 import { horizontalDistance } from "./geometry.ts";
 import { PlayerController } from "./player.ts";
 import type { EntityInfo, Impact, Loadout, PlayerState, PlayerWorld, RespawnOutcome } from "./types.ts";
-import { inputProvider } from "./inputprovider.ts";
+import { inputProvider, NO_INPUT_PROVIDER, type InputLockStatus } from "./inputprovider.ts";
+import type { LockMode } from "../engine/lock.ts";
 import { HELPER_MARK, isReplyTo, parseReply, queryCommand } from "./helperprotocol.ts";
 import { pngSize, readShot } from "./png.ts";
 import { declaredEntityProperties } from "./entityproperties.ts";
 import { unavailableInput, type InputRoute, type PlayerInput } from "./input.ts";
-import { createWorld, enterUserWorld, installHelperPack, markWorldIcon, restoreUserIcon, type CreatedWorld, type PackRef } from "./world.ts";
-import { pruneWorlds } from "./worldstore.ts";
+import { createWorld, enterUserWorld, installHelperPack, type CreatedWorld, type PackRef } from "./world.ts";
+import { ICON_FILE, listAllWorlds, pruneWorlds, worldsWithPacks } from "./worldstore.ts";
+import { decodeJpeg } from "./jpeg.ts";
 import { GameMute } from "./mute.ts";
 import { windowsMute } from "./windows.ts";
 import { readDevWorld, type DevWorld } from "./devworld.ts";
@@ -147,10 +149,6 @@ const ATTACH_DIAL_WAIT_MS = 15_000;
  * its world, window and settings (`mute: true` does silence it, until game_stop).
  */
 const FRESH_START_OPTIONS = [
-  ["fresh", "fresh"],
-  ["world", "world"],
-  ["keep", "keep"],
-  ["copyFrom", "copyFrom"],
   ["userWorld", "userWorld"],
   ["mode", "display"],
   ["width", "width"],
@@ -359,19 +357,18 @@ export interface BridgeStartOptions {
    * headless mode only. A game the user opened (attached) is muted only with `mute: true`, until game_stop.
    */
   mute?: boolean;
-  /** A `sculkwire-` test world by name (`bridge` by default). Never combined with `userWorld`. */
-  world?: string;
-  /** Continue in the existing test world instead of replacing it (see `WorldOptions.keep`). */
-  keep?: boolean;
-  /** Start from a copy of this world, a level name or level id (see `WorldOptions.copyFrom`). */
-  copyFrom?: string;
   /**
-   * Enter this one of the user's own worlds (level name or level id; see `enterUserWorld`) instead of a test world.
-   * Without it, and without `world`, `keep`, `copyFrom` and `fresh`, the user's saved dev world (devworld.ts) is used.
+   * Enter this one of the user's worlds (level name or level id; see `enterUserWorld`). Without it the saved dev world
+   * (devworld.ts) is entered, else the one of the user's worlds whose pack lists name the project's packs
+   * (`userWorldFor`).
    */
   userWorld?: string;
-  /** A `sculkwire-` test world even when the user saved a dev world. */
-  fresh?: boolean;
+  /**
+   * `sculk bench` and sculkwire's own live tests only, never a user's session: create the scratch world
+   * `sculkwire-<name>` for this launch (`createWorld`) instead of entering a user's world. The caller deletes it when
+   * the run ends. Not with `userWorld`.
+   */
+  scratchWorld?: string;
   /** Turn on the Beta APIs experiment (in a user's dev world it stays on for good). */
   betaApis?: boolean;
   /** The world's difficulty (test world default normal; a user's dev world keeps its own unless this is given). */
@@ -394,6 +391,13 @@ export interface BridgeStartOptions {
    * False (the bench, which needs its own game) refuses as before.
    */
   attach?: boolean;
+  /**
+   * The input lock while sculkwire has the game: once a launched game reached its world, or right after attaching to a
+   * game the user opened, the input provider is attached when it is not yet and the lock is set to this mode until
+   * `stop` puts the earlier mode back. Fails open: `lockNote` says why it is not set. Omitted or `off`: nothing is set
+   * (game_launch passes `on` by default; the bench and the CLI set nothing).
+   */
+  inputLock?: LockMode;
 }
 
 /** How the game reached the test world for this launch, for `entry()`. */
@@ -439,11 +443,10 @@ export interface BridgeStatus {
    */
   worldNote?: string;
   /**
-   * How this launch got its world: `fresh` (a new test world), `kept` (a test world entered as it is), `copied` (a test
-   * world copied from another), `user` (the user's own dev world), `attached` (the world of a game the user had
-   * already started, taken as it is).
+   * How this launch got its world: `user` (one of the user's own worlds, entered), `attached` (the world of a game the
+   * user had already started, taken as it is). A scratch world (`scratchWorld`) has none.
    */
-  worldMode?: "fresh" | "kept" | "copied" | "user" | "attached";
+  worldMode?: "user" | "attached";
   /** game_launch found the game already running and attached to it instead of starting one; game_stop only detaches. */
   attached?: boolean;
   /** Attached game: whether it shows a world (false: it sits in a menu, and the channels connect once a world is open). */
@@ -452,7 +455,7 @@ export interface BridgeStatus {
   levelId?: string;
   /** Attached game: what the helper pack's tools or game_log lack in this world, and how it gets there. */
   helperNote?: string;
-  /** `user` mode: the backup of the dev world's level.dat, pack lists and icon this launch made before writing them. */
+  /** `user` mode: the backup of the world's level.dat and pack lists this launch made before writing them. */
   worldBackup?: string;
   /** The user's saved default dev world for this game user (game_status reads it; absent when none is saved). */
   defaultWorld?: DevWorld;
@@ -462,6 +465,10 @@ export interface BridgeStatus {
   muted?: boolean;
   /** Why the game's sound may reach the speakers although `mute` applies (pactl missing, a stream that would not move). */
   muteNote?: string;
+  /** The input lock as the input provider last reported it, once one was read. */
+  inputLock?: InputLockStatus;
+  /** Why the input lock game_launch asked for (`inputLock`) is not set: the user's keyboard and mouse still reach the game. */
+  lockNote?: string;
 }
 
 /** How long `reload` waits at each step (ms); tests shorten them. */
@@ -500,7 +507,7 @@ export interface StopResult {
   savedAndQuit?: boolean;
   /** User's dev world: the project's development pack folders left in place because the world's pack lists name them. */
   keptPackFolders?: string[];
-  /** What the stop did or could not do for a user's dev world (Save & Quit, the icon, the kept folders). */
+  /** What the stop did or could not do for a user's world (Save & Quit, the kept folders). */
   stopNote?: string;
   /** The game was one the user had started and sculkwire attached to: it was left running. */
   detached?: boolean;
@@ -523,27 +530,55 @@ async function untilStopped<T>(wait: Promise<T>, signal: AbortSignal): Promise<T
   }
 }
 
-/** The user's world a launch enters, how to name it in messages, and whether it is the saved default. */
+/** The user's world a launch enters, how to name it in messages, and how it was chosen. */
 export interface UserWorldChoice {
   /** Level name or level id for `enterUserWorld`. */
   world: string;
   label: string;
-  saved: boolean;
+  /** `userWorld` named it, it is the saved dev world, or it is the user's world that uses the project's packs. */
+  by: "userWorld" | "saved" | "packs";
+  /** How it was chosen, for `worldNote`, when more than its label says. */
+  note?: string;
 }
 
+/** Worlds a "no world" error lists by name. */
+const WORLDS_LISTED = 10;
+
 /**
- * The user's world a launch enters: `userWorld`, else the saved dev world when the launch asks for no test world
- * (`world`, `keep`, `copyFrom`, `fresh`), else undefined. `userWorld` with a test world option is refused.
+ * The user's world a launch enters, in this order: `userWorld`; the saved dev world; the one of the user's own worlds
+ * (never a `sculkwire-` one) whose pack lists name one of `packs` (several: the one played last, and `note` says so).
+ * Throws when none is found, listing the user's worlds and the next step: ask the user which one, then save it with
+ * game_worlds `use` or pass `userWorld`. sculkwire never creates a world for a user.
  */
-export async function userWorldFor(install: ClientInstall, opts: BridgeStartOptions): Promise<UserWorldChoice | undefined> {
-  if (opts.userWorld !== undefined) {
-    const clash = (["world", "copyFrom", "keep", "fresh"] as const).filter((key) => opts[key] !== undefined && opts[key] !== false);
-    if (clash.length) throw new Error(`userWorld enters one of your own worlds and cannot be combined with ${clash.join(", ")}`);
-    return { world: opts.userWorld, label: `your world "${opts.userWorld}"`, saved: false };
-  }
-  if (opts.fresh || opts.world !== undefined || opts.copyFrom !== undefined || opts.keep) return undefined;
+export async function userWorldFor(install: ClientInstall, opts: BridgeStartOptions, packs: readonly PackRef[]): Promise<UserWorldChoice> {
+  if (opts.userWorld !== undefined) return { world: opts.userWorld, label: `your world "${opts.userWorld}"`, by: "userWorld" };
   const saved = await readDevWorld(install);
-  return saved ? { world: saved.levelId, label: `your saved dev world ${saved.name} [${saved.levelId}]`, saved: true } : undefined;
+  if (saved) return { world: saved.levelId, label: `your saved dev world ${saved.name} [${saved.levelId}]`, by: "saved" };
+  const using = await worldsWithPacks(install, packs.map((p) => p.uuid));
+  const [newest] = using;
+  if (newest) {
+    const label = `your world ${newest.name} [${newest.levelId}]`;
+    return using.length === 1
+      ? { world: newest.levelId, label, by: "packs", note: `${newest.name} is the one of your worlds whose pack lists name the project's packs` }
+      : {
+          world: newest.levelId,
+          label,
+          by: "packs",
+          note:
+            `${using.length} of your worlds use the project's packs (${using.map((w) => `${w.name} [${w.levelId}]`).join(", ")}); ${newest.name} was played last. ` +
+            "To use another, pass userWorld or save it with game_worlds action use",
+        };
+  }
+  const mine = (await listAllWorlds(install, false)).filter((w) => !w.sculkwire);
+  const listed = mine.slice(0, WORLDS_LISTED).map((w) => `"${w.name}" [${w.levelId}] last played ${w.lastPlayed.toISOString().slice(0, 10)}`);
+  const more = mine.length > WORLDS_LISTED ? `, and ${mine.length - WORLDS_LISTED} more (game_worlds lists them all)` : "";
+  throw new Error(
+    `no world to launch into: no userWorld was given, no default dev world is saved for ${install.label}, and ` +
+      `${packs.length ? "none of your worlds lists the project's packs" : "no project was given to find a world by its packs"}. ` +
+      (mine.length ? `Your worlds, played last first: ${listed.join("; ")}${more}. ` : `${install.label} has no worlds of yours yet: create one in the game first. `) +
+      'Ask the user which world sculkwire may use, then save it with game_worlds {action: "use", world: "<name or level id>"} ' +
+      "(or pass userWorld for this launch only). sculkwire never creates a world for you",
+  );
 }
 
 /** Whether this process's launch state file still exists: `stop`, from here or another process, removes it. */
@@ -655,14 +690,16 @@ export class ClientBridge {
   #worldNote?: string;
   /** Owned by the newest `start`, aborted by `stop`: ends that start's waits for the game and the world, background ones included. */
   #startAbort?: AbortController;
-  /** sculkwire's icon is in the user's dev world this bridge entered: the next `stop` puts the world's own back. */
-  #iconPending = false;
   /** Set while this bridge is attached to a game the user started (`#startAttached`); `stop` then only detaches. */
   #attached?: AttachedGame;
   /** Linux: keeps the game's streams on the silent sink while the game is muted; stopped by `stop` (see there). */
   #muteWatcher?: GameMute;
   /** Windows: why muting the game's audio sessions failed. */
   #muteNote?: string;
+  /** game_launch `inputLock` of the newest `start`, applied once sculkwire has the game (`#lockInput`). */
+  #inputLock?: LockMode;
+  /** Why `#inputLock` could not be applied. */
+  #lockNote?: string;
 
   /** A game was launched and has not exited. Before its process is found (a user still starting it) it counts as running. */
   get running(): boolean {
@@ -698,7 +735,7 @@ export class ClientBridge {
     if (this.install) s.install = this.install.label;
     if (this.world) {
       s.world = this.world.name;
-      s.worldMode = this.world.how === "created" ? "fresh" : this.world.how;
+      if (this.world.how === "user") s.worldMode = "user";
       if (this.world.backup) s.worldBackup = this.world.backup;
     }
     if (game) {
@@ -724,10 +761,15 @@ export class ClientBridge {
       s.muted = (this.#muteWatcher !== undefined || this.launchState.muteRequested === true) && note === undefined;
       if (note) s.muteNote = note;
     }
+    const lock = this.launchState ? inputProvider()?.lockStatus?.() : undefined;
+    if (lock) s.inputLock = lock;
+    if (this.#lockNote) s.lockNote = this.#lockNote;
     return s;
   }
 
   async start(opts: BridgeStartOptions = {}): Promise<BridgeStatus> {
+    this.#inputLock = opts.inputLock;
+    this.#lockNote = undefined;
     const status = await this.#start(opts);
     return { ...status, prunedWorlds: this.#prunedWorlds, ...(this.#worldNote ? { worldNote: this.#worldNote } : {}) };
   }
@@ -758,8 +800,7 @@ export class ClientBridge {
     if (runningPid !== undefined && opts.attach === false) {
       throw new Error(`Minecraft from ${install.label} is already running and this needs a game of its own: close it first, then try again`);
     }
-    // A game that already runs is attached as it is, so no world is chosen or written (a saved dev world included).
-    const userWorld = runningPid === undefined ? await userWorldFor(install, opts) : undefined;
+    if (opts.scratchWorld !== undefined && opts.userWorld !== undefined) throw new Error("scratchWorld and userWorld exclude each other");
     this.world = undefined;
     this.#attached = undefined;
     this.#worldNote = undefined;
@@ -802,47 +843,41 @@ export class ClientBridge {
       // Inside gamescope the game runs fullscreen in gamescope's own output, which never reaches the user's screen.
       const inGamescope = process.platform === "linux" && mode !== "desktop" && (await gamescopeBlocker(install)) === undefined;
       await setOptions(optionsFiles(install), bridgeOptions(debuggerPort, { fullscreen: inGamescope }));
-      if (userWorld) {
+      if (opts.scratchWorld === undefined) {
+        // A game that already runs was attached above as it is, so a world is chosen only for a game sculkwire starts.
+        const choice = await userWorldFor(install, opts, packRefs);
         const entered = await enterUserWorld(install, {
-          world: userWorld.world,
+          world: choice.world,
           packs: packRefs,
           ...(opts.betaApis ? { betaApis: true } : {}),
           ...(opts.difficulty ? { difficulty: opts.difficulty } : {}),
         }).catch((e: unknown) => {
-          throw userWorld.saved
-            ? new Error(`${userWorld.label}: ${errorMessage(e)}. Choose another with game_worlds action use, or launch with fresh: true for a sculkwire test world`)
-            : e;
+          throw choice.by === "saved" ? new Error(`${choice.label}: ${errorMessage(e)}. Ask the user which world to use instead, then game_worlds action use`) : e;
         });
         this.world = entered.world;
-        this.#iconPending = true;
         this.#worldNote = [
-          `entered your dev world ${entered.world.name}; its level.dat, pack lists and icon were backed up to ${entered.world.backup}`,
+          `entered ${choice.label}; its level.dat and pack lists were backed up to ${entered.world.backup}`,
+          ...(choice.note ? [choice.note] : []),
           ...entered.notes,
           ...(opts.difficulty ? [] : ["its own difficulty stays (pass difficulty to change it)"]),
           "the helper pack and the project's packs stay in its pack lists after game_stop, and their development pack folders are kept",
         ].join("; ");
       } else {
         this.world = await createWorld(install, {
-          name: opts.world ?? "bridge",
+          name: opts.scratchWorld,
           packs: packRefs,
           ...(opts.betaApis ? { experiments: ["gametest"] } : {}),
           ...(opts.difficulty ? { difficulty: opts.difficulty } : {}),
           ...(install.version ? { gameVersion: install.version } : {}),
-          ...(opts.keep ? { keep: true } : {}),
-          ...(opts.copyFrom !== undefined ? { copyFrom: opts.copyFrom } : {}),
         });
-        const ignored = [...(opts.difficulty ? [`difficulty ${opts.difficulty}`] : []), ...(opts.betaApis ? ["betaApis"] : [])];
-        this.#worldNote =
-          this.world.how !== "created" && ignored.length > 0
-            ? `${this.world.name} ${this.world.how === "kept" ? "was entered as it is" : `is a copy of ${opts.copyFrom}`} and keeps its own difficulty and experiments: ${ignored.join(" and ")} not applied`
-            : undefined;
       }
     } catch (e) {
       await this.stop();
       throw e;
     }
     try {
-      this.#prunedWorlds = await pruneWorlds(install, { except: this.world.levelId });
+      const devWorld = await readDevWorld(install);
+      this.#prunedWorlds = await pruneWorlds(install, { except: [this.world.levelId, ...(devWorld ? [devWorld.levelId] : [])] });
       this.#logCursor = await contentEnd(install.logsDir);
       this.#printCursor = this.#printSeq;
       this.#joinCursor = await debugLogEnd(install.logsDir);
@@ -996,6 +1031,7 @@ export class ClientBridge {
     if (ignored.length) notes.push(`${ignored.join(", ")} need${ignored.length === 1 ? "s" : ""} the game closed first: not applied`);
     if (this.#packs.length) notes.push(await this.#attachedPacksNote());
     this.#worldNote = notes.join("; ");
+    await this.#lockInput(signal, game.agentError);
     this.#attachLoop(signal).catch(waitFailed);
     return this.status();
   }
@@ -1262,6 +1298,26 @@ export class ClientBridge {
     this.#entry = { by, seconds: Math.round((Date.now() - this.#startedAt) / 100) / 10, ...(this.#walks.walked ? { clicks: this.#walks.clicks } : {}) };
     this.#manual = this.#manual.filter((m) => !m.startsWith(START_YOURSELF) && !m.startsWith(WORLD_NOT_LOADED) && !m.startsWith(OPEN_YOURSELF));
     await this.#attachConnect();
+    // After /connect: on a game with host input it was typed into the chat, which the lock would keep out.
+    await this.#lockInput(signal);
+  }
+
+  /**
+   * Apply game_launch `inputLock` now that sculkwire has the game. Fails open: the reason goes to `lockNote`, and a
+   * `stop` that ran meanwhile gets no lock left behind. `agentError`: the attach already failed (attach mode), so it is
+   * not tried twice.
+   */
+  async #lockInput(signal: AbortSignal, agentError?: string): Promise<void> {
+    const mode = this.#inputLock;
+    if (mode === undefined || mode === "off" || signal.aborted) return;
+    const provider = inputProvider();
+    const why = !provider?.sessionLock
+      ? NO_INPUT_PROVIDER
+      : agentError !== undefined
+        ? `the in-game agent could not be attached (${agentError})`
+        : await provider.sessionLock(mode);
+    if (signal.aborted) await provider?.releaseSessionLock?.();
+    else if (why) this.#lockNote = `input lock ${mode} not set, so the user's keyboard and mouse still reach the game: ${why}`;
   }
 
   /**
@@ -1550,11 +1606,12 @@ export class ClientBridge {
   }
 
   /**
-   * Walk the game from whatever screen it shows back into the test world (`recoverJoin` in screens.ts): Back to menu
-   * on the error screen, Escape out of the Marketplace or any other screen, Play on the start screen, the tile showing
-   * the test world's icon on the Play screen, waiting out loading screens, for up to `timeoutMs`. Host input and
-   * screenshots where they reach the game, the in-game agent's UI calls and screenshots otherwise. The world's icon is
-   * written again first: the game replaces it with a picture of the world when it saves and quits it.
+   * Walk the game from whatever screen it shows back into the world (`recoverJoin` in screens.ts): Back to menu on the
+   * error screen, Escape out of the Marketplace or any other screen, Play on the start screen, the tile showing the
+   * world's own picture (its `world_icon.jpeg`) on the Play screen, waiting out loading screens, for up to `timeoutMs`.
+   * Host input and screenshots where they reach the game, the in-game agent's UI calls and screenshots otherwise. When
+   * the tile cannot be told apart (no picture, or two tiles show it), nothing is clicked and the user is asked to open
+   * the world (`manualSteps`).
    */
   async #returnToWorld(timeoutMs = 180_000): Promise<RecoveryResult> {
     const state = this.launchState;
@@ -1562,15 +1619,20 @@ export class ClientBridge {
     if (!state || !world) throw new Error("the game is not running");
     if (!this.#canWalkMenus()) throw new Error(this.#joinNoInputMessage());
     this.#joinRecovery = { attempts: 0, recovered: false, ...(this.#joinState.lines.length ? { log: this.#joinState.lines.join("\n") } : {}) };
-    // The game replaces the icon with its own picture when it saves and quits the world: write it again, but only while
-    // the game does not have the world open (it would write over it on the next Save & Quit anyway).
-    if (!(this.#screens.inWorld && this.#screens.opened === world.levelId)) await markWorldIcon(world);
+    const thumbnail = await readFile(join(world.dir, ICON_FILE)).then(
+      (jpeg) => decodeJpeg(jpeg),
+      () => undefined,
+    );
     const result = await recoverJoin(this.#recoveryIO(state), {
       levelId: world.levelId,
+      ...(thumbnail ? { thumbnail } : {}),
       timeoutMs,
       screens: this.#screens,
       join: this.#joinState,
     });
+    if (result.needsUser && !this.#manual.some((m) => m.startsWith(OPEN_YOURSELF))) {
+      this.#manual.push(`${OPEN_YOURSELF}: ${result.reason ?? "sculkwire cannot tell its tile apart"}. In the game choose Play, then "${world.name}"`);
+    }
     this.#screens = result.screens;
     this.#joinState = result.join;
     this.#joinRecovery = {
@@ -2145,8 +2207,8 @@ export class ClientBridge {
   /**
    * Stop the game, close listeners, put back the options.txt keys and the game settings sculkwire changed. Safe to call
    * twice. Game settings are restored first, while the game still runs, so the agent can apply them live. In a user's
-   * dev world the game is first told to Save & Quit (`#saveAndQuit`), the world's own icon is put back afterwards
-   * (`restoreUserIcon`), and the project's development pack folders stay because the world's pack lists name them.
+   * world the game is first told to Save & Quit (`#saveAndQuit`), and the project's development pack folders stay
+   * because the world's pack lists name them.
    *
    * A game the bridge attached to (this process's `#startAttached`, or a launch state another process marked attached)
    * is never stopped and never Save & Quit: the settings set live are put back through the agent, the listeners close,
@@ -2155,6 +2217,10 @@ export class ClientBridge {
   async stop(): Promise<StopResult> {
     this.#startAbort?.abort();
     this.#startAbort = undefined;
+    // First, while the agent still answers: a game the user keeps playing (a detach) must never be left locked, and
+    // Save & Quit below may need the pause menu.
+    await inputProvider()?.releaseSessionLock?.();
+    this.#lockNote = undefined;
     const install = this.install ?? (await findInstall());
     const game = this.#attached;
     const attached = game !== undefined || (this.launchState === undefined && (await readLaunchState())?.attached === true);
@@ -2213,15 +2279,6 @@ export class ClientBridge {
     if (userWorld) {
       kept = deployed;
       if (deployed.length) notes.push(`kept the development pack folders ${userWorld.name} names in its pack lists: ${deployed.join(", ")}`);
-      if (this.#iconPending) {
-        this.#iconPending = false;
-        const icon = await restoreUserIcon(userWorld).catch((e: unknown) => `not restored (${errorMessage(e)})`);
-        notes.push(
-          icon === "game's own"
-            ? `${userWorld.name} keeps the picture the game took when it was saved as its icon`
-            : `${userWorld.name}'s own icon ${icon === "restored" ? "was put back" : icon === "removed" ? "was put back (it had none)" : icon}`,
-        );
-      }
     } else if (attached) {
       // The open world may use them: keep the folders its pack lists name (all of them when the world is unknown).
       const listed = game?.levelId ? await worldPackIds(join(install.userComMojang, "minecraftWorlds", game.levelId)) : undefined;

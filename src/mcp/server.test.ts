@@ -111,7 +111,7 @@ describe("prompts", () => {
         return content?.type === "text" ? content.text : "";
       };
       const played = await text("playtest_feature", { project: "/packs/My Addon", feature: "the zombie drops a gem", scene: "arena" });
-      expect(played).toContain('game_launch {"project": "/packs/My Addon", "keep": true}');
+      expect(played).toContain('game_launch {"project": "/packs/My Addon"}');
       expect(played).toContain('scene_reset {"name": "arena"}');
       expect(played).toContain("the zombie drops a gem");
       // Without a scene the default name is used.

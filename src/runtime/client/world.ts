@@ -1,8 +1,11 @@
 /**
- * Test worlds for the client: a flat creative world with cheats on, named `sculkwire-<name>`, with the helper pack
- * and chosen packs active. The game fills in every level.dat key we leave out on first load. And the user's own dev
- * world (`enterUserWorld`): one of their worlds they chose, entered with the same packs, backed up before each launch
- * writes to it.
+ * The worlds the client is launched into. For a user that is always one of their own worlds (`enterUserWorld`): the
+ * one they chose or the one that uses the project's packs, entered with the helper and the project's packs, its small
+ * files backed up before each launch writes them. sculkwire writes nothing else into it (no icon, no marker).
+ *
+ * `createWorld` makes a scratch world for `sculk bench` and sculkwire's own live tests only: a flat creative world with
+ * cheats on, named `sculkwire-<name>`, replaced on each call and deleted by its caller when the run ends. The game fills
+ * in every level.dat key left out on first load.
  */
 import { cp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -14,8 +17,7 @@ import type { ClientInstall } from "../../gamefiles/install.ts";
 import { DIFFICULTIES, difficultyOf, hasCheats, levelIdFor, setCheats, setSinglePlayer, WORLD_PREFIX, worldName, type Difficulty } from "../../gamefiles/worlds.ts";
 import { exists, readJsonOr, writeFileAtomic } from "../../core/fs.ts";
 import { dataDir } from "../../core/paths.ts";
-import { ICON_FILE, worldIcon } from "./icon.ts";
-import { copyWorld, findWorld, readMarker, testWorldAt, writeMarker, writeWorldIcon } from "./worldstore.ts";
+import { findWorld } from "./worldstore.ts";
 
 export const HELPER_PACK_DIR = join(dirname(fileURLToPath(import.meta.url)), "helper-pack");
 export const HELPER_PACK_FOLDER = "sculkwire_helper";
@@ -40,13 +42,6 @@ export interface WorldOptions {
   gameVersion?: string;
   /** Default `normal`, so hostile mobs exist (peaceful removes them). */
   difficulty?: Difficulty;
-  /**
-   * Enter the existing test world as it is (its settings stay; the pack lists are merged) instead of replacing it, and
-   * mark it kept so it is never removed automatically. A missing world is created.
-   */
-  keep?: boolean;
-  /** Start from a copy of this world (level name or level id); the original is only read. The copy is kept. */
-  copyFrom?: string;
 }
 
 export interface CreatedWorld {
@@ -54,11 +49,8 @@ export interface CreatedWorld {
   levelId: string;
   name: string;
   dir: string;
-  /**
-   * `created` fresh, `kept`: an existing test world entered as it is, `copied` from `copyFrom`, `user`: the user's own
-   * dev world (`enterUserWorld`).
-   */
-  how: "created" | "kept" | "copied" | "user";
+  /** `created`: a scratch world (`createWorld`), `user`: one of the user's own worlds (`enterUserWorld`). */
+  how: "created" | "user";
   /** `user` only: the backup of the files this launch wrote (`USER_WORLD_FILES`). */
   backup?: string;
 }
@@ -138,33 +130,22 @@ async function mergePackList(file: string, entries: PackEntry[]): Promise<void> 
 }
 
 /**
- * Create (or replace) a `sculkwire-` world in the active user's minecraftWorlds. Never touches other worlds. The world
- * gets sculkwire's icon for its level id (icon.ts), which is how the join recovery knows its tile on the Play screen.
- * With `keep` an existing test world is entered as it is; with `copyFrom` the world starts as a copy of that one.
+ * Create (or replace) the scratch world `sculkwire-<name>` in the active user's minecraftWorlds, for `sculk bench` and
+ * sculkwire's own live tests: never for a user's session. Never touches other worlds and writes no icon; its caller
+ * deletes it when the run ends (`deleteWorld`).
  */
 export async function createWorld(install: ClientInstall, opts: WorldOptions): Promise<CreatedWorld> {
   const name = worldName(opts.name);
   const levelId = levelIdFor(name);
   const dir = join(install.userComMojang, "minecraftWorlds", levelId);
   if (!levelId.startsWith(WORLD_PREFIX)) throw new Error(`refusing to write world folder ${levelId}`);
-  let how: CreatedWorld["how"];
-  if (opts.keep && (await testWorldAt(install, levelId))) how = "kept";
-  else if (opts.copyFrom !== undefined) {
-    await copyWorld(install, { from: opts.copyFrom, name });
-    how = "copied";
-  } else {
-    await rm(dir, { recursive: true, force: true });
-    await mkdir(join(dir, "db"), { recursive: true });
-    const root = levelDatRoot(name, opts);
-    await writeFile(join(dir, "level.dat"), writeLevelDat({ storageVersion: 10, rootName: "", root }));
-    await writeFile(join(dir, "levelname.txt"), name);
-    how = "created";
-  }
-  const world: CreatedWorld = { levelId, name, dir, how };
-  await writeWorldIcon(world);
-  await activatePacks(install, dir, opts, how === "created");
-  if (opts.keep || how !== "created") await writeMarker(world, { ...(await readMarker(dir)), keep: true });
-  return world;
+  await rm(dir, { recursive: true, force: true });
+  await mkdir(join(dir, "db"), { recursive: true });
+  const root = levelDatRoot(name, opts);
+  await writeFile(join(dir, "level.dat"), writeLevelDat({ storageVersion: 10, rootName: "", root }));
+  await writeFile(join(dir, "levelname.txt"), name);
+  await activatePacks(install, dir, opts, true);
+  return { levelId, name, dir, how: "created" };
 }
 
 /** The helper (unless `helper` is false) and `packs` into a world's pack lists: written anew with `replace`, else merged. */
@@ -180,7 +161,7 @@ async function activatePacks(install: ClientInstall, dir: string, opts: Pick<Wor
 }
 
 /** The files of a user's dev world sculkwire may write, copied to a backup before each launch writes them. Never `db/`. */
-export const USER_WORLD_FILES = ["level.dat", "level.dat_old", "world_behavior_packs.json", "world_resource_packs.json", ICON_FILE] as const;
+export const USER_WORLD_FILES = ["level.dat", "level.dat_old", "world_behavior_packs.json", "world_resource_packs.json"] as const;
 /** Backups kept per world; older ones are removed. */
 export const WORLD_BACKUPS_KEPT = 10;
 
@@ -218,16 +199,14 @@ async function backupUserWorld(dir: string, levelId: string, root: string, now: 
 }
 
 /**
- * Enter one of the user's own worlds, the one they chose as their dev world. Never deletes or replaces it: first its
- * small files are backed up (`backupUserWorld`), then the helper and `packs` are merged into its pack lists (other
- * packs stay), cheats and commands are turned on when they are off, Beta APIs only with `betaApis`, the difficulty only
- * when given, and sculkwire's icon is written so the join recovery finds its tile (`restoreUserIcon` puts the user's
- * back). Call it only while the game does not run. Returns the world and one note per change to its settings.
+ * Enter one of the user's own worlds: the one they chose, or the one that uses the project's packs. Never deletes or
+ * replaces it: first its small files are backed up (`backupUserWorld`), then the helper and `packs` are merged into
+ * its pack lists (other packs stay), cheats and commands are turned on when they are off, Beta APIs only with
+ * `betaApis`, the difficulty only when given. Nothing else is written into it. Call it only while the game does not
+ * run. Returns the world and one note per change to its settings.
  */
 export async function enterUserWorld(install: ClientInstall, opts: UserWorldOptions): Promise<{ world: CreatedWorld; notes: string[] }> {
-  const found = await findWorld(install, opts.world);
-  if (found.sculkwire) throw new Error(`${found.name} is a sculkwire test world; launch it with world and keep instead`);
-  const { levelId, name, dir } = found;
+  const { levelId, name, dir } = await findWorld(install, opts.world);
   const backup = await backupUserWorld(dir, levelId, opts.backupRoot ?? dataDir("world-backups"), opts.now ?? new Date());
   const level = readLevelDat(new Uint8Array(await readFile(join(dir, "level.dat"))));
   const notes: string[] = [];
@@ -255,53 +234,6 @@ export async function enterUserWorld(install: ClientInstall, opts: UserWorldOpti
     notes.push(`set the difficulty of ${name} to ${opts.difficulty}`);
   }
   if (changed) await writeFileAtomic(join(dir, "level.dat"), writeLevelDat(level));
-  await writeFileAtomic(join(dir, ICON_FILE), worldIcon(levelId));
   await activatePacks(install, dir, opts, false);
   return { world: { levelId, name, dir, how: "user", backup }, notes };
-}
-
-/** Write sculkwire's icon into the world again, which the join recovery looks for: a test world, or the user's dev world. */
-export async function markWorldIcon(world: CreatedWorld): Promise<void> {
-  if (world.how === "user") await writeFileAtomic(join(world.dir, ICON_FILE), worldIcon(world.levelId));
-  else await writeWorldIcon(world);
-}
-
-/**
- * Give the user's dev world its own icon back after a launch: the one in the launch's backup, or none when it had none.
- * When the game wrote a new picture over sculkwire's icon (Save & Quit does), that one stays. What happened.
- */
-export async function restoreUserIcon(world: CreatedWorld): Promise<"restored" | "removed" | "game's own"> {
-  if (world.how !== "user" || !world.backup) throw new Error(`${world.name} is not a user's dev world`);
-  const file = join(world.dir, ICON_FILE);
-  const current = await readFile(file).catch(() => undefined);
-  if (!current?.equals(worldIcon(world.levelId))) return "game's own";
-  const saved = join(world.backup, ICON_FILE);
-  if (await exists(saved)) {
-    await writeFileAtomic(file, await readFile(saved));
-    return "restored";
-  }
-  await rm(file, { force: true });
-  return "removed";
-}
-
-/** `sculkwire-` worlds in the active user's folder. */
-export async function listWorlds(install: ClientInstall): Promise<{ levelId: string; name: string; dir: string }[]> {
-  const base = join(install.userComMojang, "minecraftWorlds");
-  let names: string[];
-  try {
-    names = await readdir(base);
-  } catch {
-    return [];
-  }
-  const out: { levelId: string; name: string; dir: string }[] = [];
-  for (const levelId of names) {
-    let name: string;
-    try {
-      name = (await readFile(join(base, levelId, "levelname.txt"), "utf8")).trim();
-    } catch {
-      continue;
-    }
-    if (name.startsWith(WORLD_PREFIX)) out.push({ levelId, name, dir: join(base, levelId) });
-  }
-  return out;
 }

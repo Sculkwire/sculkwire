@@ -152,19 +152,21 @@ While sculkwire plays through the engine, your own keyboard and mouse still reac
 
 While it is on, the DLL drops the key presses, mouse movement, clicks and wheel turns that reach the game window, including raw input, before the game sees them. Key and button releases still pass, so a key held when the lock engaged does not stay pressed. The camera is gated with the game's own permission, and the movement keys the agent did not press are cleared every frame. A controller bypasses window messages, so the functions the game polls for it report a centred, released pad while the lock is on. The action bar shows a badge.
 
-F9 always works. It hands control to you: a running `player_act` action stops, a `play` job pauses, and agent input that still arrives is ignored. Pressing F9 again gives control back.
+F9 always works. It hands control to you: a running `player_act` action stops, a `play` job pauses, and agent input that still arrives is ignored. Pressing F9 again gives control back. You keep control until then, or until sculkwire changes the lock: any `input.lock` call that sets a mode, an action or a session lock (`game_input_lock`, the start of a new `player_act` action or `play` job, `game_launch`).
 
 | Mode | Behavior |
 |---|---|
-| `auto` | Default. Locked while a `player_act` action or a `play` job runs |
+| `auto` | Default. Locked while a `player_act` action or a `play` job runs, or while a connection holds a session lock |
 | `on` | Locked until changed |
 | `off` | Never locked |
 
-The mode lives in the DLL, so every sculkwire process sees the same one, and each change is sent to every connection. The result carries `locked`, `mode`, `by` (`agent` or `user`), `user`, `active`, `window`, `dropped`, `focusLost`, `focusKept`, `shift`, `keysHidden`, `hostFocused`, `pad`, `wineFocused` and `wineForeground`; the MCP tool adds `focusWatch`.
+The mode lives in the DLL, so every sculkwire process sees the same one, and each change is sent to every connection. The result carries `locked`, `mode`, `by` (`agent` or `user`), `user`, `active`, `session`, `window`, `dropped`, `focusLost`, `focusKept`, `shift`, `keysHidden`, `hostFocused`, `pad`, `wineFocused` and `wineForeground`; the MCP tool adds `focusWatch`.
+
+`game_launch` locks by itself (`inputLock`, default `on`): once sculkwire has the game — the world of a game it launched is loaded, or right after it attached to a game you opened — it attaches the agent when needed and holds a session lock, in `headless` mode too. A session lock is not a mode: like `active`, each connection owns one bit of it, and the agent clears both bits when the connection closes. So the lock never outlives the sculkwire process that asked for it, even one that is killed, and `game_stop` ends it first, while the agent still answers. When sculkwire's connection drops and it reconnects, it declares the session lock (and a running action) again on the new connection. If the agent cannot attach, or the agent already loaded in the game predates session locks (`session` absent from the state; restart the game so the next attach loads the current one), the launch goes on and `lockNote` says why the lock is not set. `game_stop` also turns a mode left `on` into `auto`.
 
 Focus is the part that differs by OS. Inside Wine under gamescope the game never learns about desktop focus changes, so on a KDE Plasma Wayland desktop sculkwire loads a KWin script at runtime over D-Bus (from a temporary file, never installed into your KWin config) and unloads it on `game_stop`; on X11 it reads `_NET_ACTIVE_WINDOW` with `xprop`. It reports the game window's focus to the agent with `input.focus`, and the agent keeps polled input out while the window is not focused. On Windows nothing is watched: the game sees its own focus, and `focusWatch.backend` is `windows`. The watcher fails open: a game counts as focused until a report says otherwise, and again if the watcher cannot start or dies.
 
-The keyboard route cannot be locked, because its keys and mouse reach the game the same way as yours. Use the engine route (attach the agent) or launch with `display: headless`.
+The keyboard route cannot be locked, because its keys and mouse reach the game the same way as yours; while the lock is on they are kept out with yours. Use the engine route (attach the agent), or launch with `inputLock: auto` or `off` to use the keyboard route.
 
 ## Game Settings
 
@@ -178,7 +180,7 @@ Every value sculkwire changes is recorded in `<data>/client/engine-settings-rest
 
 ## World Settings
 
-`world_settings` reads and changes a test world: game rules, difficulty, game type, time and weather. Through an attached agent it reads the loaded level's own data, so the answer is what the running world uses, and applies changes the way the game applies its own command (game rule, difficulty, time and weather through the game's setters or the equivalent command run as the local player), never as a raw memory write. Without an agent it reads and rewrites `level.dat`, and only for a `sculkwire-*` world that no game has loaded, because a running game would overwrite the file and keep its own value.
+`world_settings` reads and changes the world sculkwire entered or attached to: game rules, difficulty, game type, time and weather. Through an attached agent it reads the loaded level's own data, so the answer is what the running world uses, and applies changes the way the game applies its own command (game rule, difficulty, time and weather through the game's setters or the equivalent command run as the local player), never as a raw memory write. A change goes only to the world sculkwire entered or attached to, or the user's saved dev world: the host checks the loaded world's name and passes it as `world.set {world}`, and the agent refuses when the loaded world has another name. Without an agent it reads `level.dat`, and rewrites it only for the saved dev world while the game is closed, because a running game would overwrite the file and keep its own value.
 
 A field the engine cannot read is `null`, never a guess. In `level.dat` mode only the game rules the file stores by name are reported (the boolean switches and the integer rules), a weather change is written with a five-day timer so it holds through a test session, and education edition and the dimension are left `null` because the file does not store them.
 
@@ -246,7 +248,7 @@ Newline-delimited JSON-RPC 2.0 over TCP on `127.0.0.1:<port>`: one object per li
 | `engine.status` | socket | `{build, hooked, attached, tick, mainThread, hooks, gameinput, port, drainReleases, resolved: {name: "0x…"}, missing: [name]}` plus the engine's own `minecraft` and `ui`; `attached` is false while the agent is still resolving right after the injection, and `engine_attach` waits for it |
 | `engine.resolve` | socket | The `engine.status` shape, answered like `engine.status`; the TypeScript client does not call it |
 | `stream.subscribe {every?}` / `stream.unsubscribe` | socket | `tick` notifications, every 1 to 1200 ticks |
-| `input.lock {mode?, active?}` / `input.focus {focused}` | socket | Lock state; host focus |
+| `input.lock {mode?, active?, session?}` / `input.focus {focused}` | socket | Lock state; host focus. `active` and `session` belong to the calling connection and end when it closes |
 | `command {command}` | main | `{success: bool\|null, message}` |
 | `command.prime` | socket | Arms the agent so the output of the next player command, the line typed to capture a command origin, is kept out of chat |
 | `tick.pause {paused}` | main | `{paused, success}` |
@@ -259,7 +261,7 @@ Newline-delimited JSON-RPC 2.0 over TCP on `127.0.0.1:<port>`: one object per li
 | `input.release` | main | Drops everything held |
 | `input.attack {hold?}`, `input.use {hold?}` | main | `{hit: entityId\|null, target}` (`use`, and `attack` with `hold`: `{held, target}`); no `hold` is one click, `hold: true` presses and keeps holding (held `attack` breaks the block under the crosshair), renewed by repeating it, and let go a second after the last one or by `hold: false` or `input.release`. `target` is the crosshair's target before the click: `{kind:"block", block, face, position}` or `{kind:"entity", id, type, position}`, `null` when nothing in reach. The game keeps the crosshair pick in a queue that is empty in part of every 20 Hz tick, and a click read in that stretch reports no target; a click that finds it empty waits for the next main-thread drain that has it, at most 75 ms, and then reads the target and clicks in that same drain (after the bound it clicks with `target: null`) |
 | `settings.list {filter?}`, `settings.get {id}`, `settings.set {id, value}` | main | `{settings: [...]}`, one entry, `{id, previous, value, saved?}` (`saved` false: live only, not in options.txt) |
-| `world.settings`, `world.set {gamerules?, difficulty?, gameType?, time?, weather?}` | main | The world state, before and after, read on the server thread (`gameType` sets `/defaultgamemode` and `/gamemode … @s`) |
+| `world.settings`, `world.set {world, gamerules?, difficulty?, gameType?, time?, weather?}` | main | The world state, before and after, read on the server thread (`gameType` sets `/defaultgamemode` and `/gamemode … @s`). `world.set` changes the loaded world only when its level name is `world` |
 | `ui.screen`, `ui.controls {filter?}`, `ui.press {name}`, `ui.key {key, action?}`, `ui.text {text}`, `ui.click {x, y, button?}`, `ui.scroll {x, y, delta}` | main | `{name, stack, modal}`, the controls, then the input; refused on a store screen except `Escape` |
 | `player.attributes`, `player.inventory` | main | `{name: {current, min, max, default, base}}` for every attribute plus `armor` and `armorToughness` as numbers (sculkwire turns them into `{current}`); `{selectedSlot, hotbar, inventory, armor: {head, chest, legs, feet}, offhand, cursor}` |
 | `container.get {x, y, z, dimension?}`, `container.open` | main | `{block, size, slots}`; `dimension` is the bare name (`overworld`, `nether`, `the_end`), which sculkwire sends whichever spelling the caller used. A block without a container is `-32602`. Open: `{screen, block, position, slots, playerSlots}` (`position` `[x, y, z]` of the block the crosshair opened, `null` with `block` for an entity's screen; `playerSlots` the 36 carried slots once) |
