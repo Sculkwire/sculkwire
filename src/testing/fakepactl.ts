@@ -50,7 +50,8 @@ export class FakePactl {
     if (args[0] === "move-sink-input") {
       if (this.failMoves) throw new Error("Failure: No such entity");
       const input = this.inputs.find((i) => i.id === Number(args[1]));
-      const sink = this.sinks.find((s) => s.name === args[2] || s.index === args[2]);
+      // `@DEFAULT_SINK@` is the first sink, the user's output.
+      const sink = args[2] === "@DEFAULT_SINK@" ? this.sinks[0] : this.sinks.find((s) => s.name === args[2] || s.index === args[2]);
       if (!input || !sink) throw new Error("Failure: No such entity");
       input.sink = sink.index;
       return "";

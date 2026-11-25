@@ -39,6 +39,20 @@ describe("GameMute", () => {
     await mute.stop({ restore: false });
   });
 
+  it("moves another process's stream off the silent sink to the default output, as the user's own Minecraft", async () => {
+    const pactl = withStreams();
+    const mute = new GameMute(pactl.run, async () => [GAME]);
+    await mute.sweep();
+    // The user starts their own Minecraft; the stored target puts it on the silent sink.
+    const silent = pactl.sinks.find((s) => s.name === MUTE_SINK)!.index;
+    pactl.inputs.push({ id: 11, sink: silent, pid: OTHER + 1 });
+    await mute.sweep();
+    expect(pactl.sinkOf(11)).toBe("speakers");
+    expect(pactl.sinkOf(7)).toBe(MUTE_SINK);
+    expect(pactl.sinkOf(8)).toBe("speakers");
+    await mute.stop({ restore: false });
+  });
+
   it("uses the sink the launch loaded, and does not unload it", async () => {
     const pactl = withStreams();
     pactl.sinks.push({ index: "5", name: MUTE_SINK, module: 30 });

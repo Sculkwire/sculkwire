@@ -4,8 +4,11 @@
  * The launch sets PULSE_SINK, but WirePlumber's stream restore remembers a target per application name and that
  * remembered target wins, so the game's streams can still reach the user's real output. `GameMute` therefore watches
  * the sink inputs: every stream whose `application.process.id` is one of the game's pids and that is not on the silent
- * sink is moved there with `pactl move-sink-input`. Streams of other processes are never touched, the default sink is
- * never changed, and sculkwire never mutes a stream (`set-sink-input-mute` persists per application name).
+ * sink is moved there with `pactl move-sink-input`. The stored target can also pull another process onto the silent
+ * sink: the user's own Minecraft, started while a muted game runs, shares the application name. A stream of another
+ * process found on the silent sink is moved to the default sink (where it would play without sculkwire); every other
+ * stream of other processes is never touched, the default sink is never changed, and sculkwire never mutes a stream
+ * (`set-sink-input-mute` persists per application name).
  *
  * A move persists in WirePlumber as the application's target. A game sculkwire stops stays on the silent sink until
  * it exited (no sound during the stop); the sink is unloaded afterwards, so the stored target names a sink that no
@@ -175,7 +178,13 @@ export class GameMute {
     }
     const failed: string[] = [];
     for (const input of inputs) {
-      if (input.pid === undefined || !pids.has(input.pid) || input.sink === muted.index) continue;
+      if (input.pid === undefined) continue;
+      if (!pids.has(input.pid)) {
+        // Not the game's: off the silent sink, onto the output it would have played on without sculkwire.
+        if (input.sink === muted.index) await this.#pactl(["move-sink-input", String(input.id), "@DEFAULT_SINK@"]).catch(() => undefined);
+        continue;
+      }
+      if (input.sink === muted.index) continue;
       if (this.#stopped) return;
       try {
         await this.#pactl(["move-sink-input", String(input.id), MUTE_SINK]);

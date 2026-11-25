@@ -2,6 +2,10 @@
 
 Release notes for sculkwire. Each `## vX.Y.Z` section becomes the GitHub release text when its tag is pushed.
 
+## v0.1.10
+
+- Your own Minecraft keeps its sound while sculkwire runs a muted game in the background. PipeWire remembers one output per application name, and both games are named Minecraft, so a Minecraft you started from another install while a headless game ran went to the silent sink. sculkwire now moves a stream of any other process it finds on the silent sink to the default output, within 2 s (checked live: the retail game started while the muted dev game ran was silent for under 2 s, then played on the default output).
+
 ## v0.1.9
 
 - `game_launch` works with a game you already opened. When the install's game runs, it attaches instead of refusing (`attached: true`, `worldMode: "attached"`): the game is never restarted, closed or Save & Quit, and nothing in its world is written. Options that need a fresh start (`fresh`, `world`, `keep`, `copyFrom`, `userWorld`, `display`, `width`, `height`, `fps`, `difficulty`, `betaApis`) are named in `worldNote` and not applied; a saved dev world no longer blocks the launch. The game keeps its sound unless `mute: true` is given, which mutes it until `game_stop`.
