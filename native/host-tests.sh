@@ -5,7 +5,7 @@
 # call this script.
 set -eu
 
-MODULES="agent/src/look agent/src/screens agent/src/registries agent/src/click agent/src/logring agent-core/src/lockbits"
+MODULES="agent/src/look agent/src/screens agent/src/registries agent/src/click agent/src/logring agent-core/src/lockbits agent-core/src/connectreply"
 
 mkdir -p target
 for m in $MODULES; do

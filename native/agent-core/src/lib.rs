@@ -15,6 +15,7 @@
 extern crate alloc;
 
 pub mod hub;
+pub mod connectreply;
 pub mod engine;
 pub mod gameinput;
 pub mod hook;

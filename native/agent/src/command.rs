@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 use core::mem::transmute;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use agent_core::connectreply;
 use agent_core::sync::SpinLock;
 use agent_core::RpcError;
 use serde_json::{json, Value};
@@ -246,6 +247,12 @@ pub(crate) fn run(minecraft: usize, line: &str, quiet: bool) -> Result<Value, Rp
     let Some(line_text) = text::Text::new(line) else {
         return Err(RpcError::standard(agent_core::engine::INTERNAL_ERROR));
     };
+    // A quiet `script debugger connect` opens the window for its success line, in case it reaches the hook
+    // after the capture below closed (`connectreply`).
+    let connect = quiet && connectreply::is_connect(line);
+    if connect {
+        connectreply::arm(agent_core::win::tick_ms());
+    }
     // Marked as ours before `fromData`, so the origin hook knows this capture is our own replay and leaves an
     // armed prime for the player's chat line.
     begin(quiet);
@@ -265,6 +272,9 @@ pub(crate) fn run(minecraft: usize, line: &str, quiet: bool) -> Result<Value, Rp
     }
     if origin == 0 {
         end();
+        if connect {
+            connectreply::disarm();
+        }
         // The player could not be resolved from that source: the origin builder refused it.
         return Err(RpcError::anchor("command.origin"));
     }
@@ -285,6 +295,11 @@ pub(crate) fn run(minecraft: usize, line: &str, quiet: bool) -> Result<Value, Rp
     }
     end();
     let messages = take();
+    // The command reported during the capture (this build answers a connect synchronously): its line was
+    // dropped with the capture, and nothing late is left to drop.
+    if connect && !messages.is_empty() {
+        connectreply::disarm();
+    }
     Ok(summary(&messages))
 }
 
@@ -343,8 +358,16 @@ pub(crate) fn capture(_output: usize, key: usize, params: usize, kind: u32) -> C
     let ours = OURS.load(Ordering::Acquire);
     let thread = agent_core::win::current_thread_id();
     if ours == 0 || ours != thread {
-        // The client's priming chat line (`command.prime`) stays out of chat; every other command is untouched.
-        return if primed(thread) { Capture::Drop } else { Capture::Off };
+        // The client's priming chat line (`command.prime`) stays out of chat, and so does the late success line of
+        // a quiet debugger connect; every other command is untouched.
+        if primed(thread) {
+            return Capture::Drop;
+        }
+        let now = agent_core::win::tick_ms();
+        if connectreply::armed(now) && connectreply::take(now, message_key(key).as_bytes()) {
+            return Capture::Drop;
+        }
+        return Capture::Off;
     }
     let key = message_key(key);
     let mut values = Vec::new();
