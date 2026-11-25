@@ -12,7 +12,7 @@ import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { Ajv, type ErrorObject, type ValidateFunction } from "ajv";
+import { Ajv, type ErrorObject, type SchemaValidateFunction, type ValidateFunction } from "ajv";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { errorMessage } from "../core/errors.ts";
 import { readJsonOr, writeFileAtomic } from "../core/fs.ts";
@@ -22,8 +22,9 @@ import { cacheDir } from "../core/paths.ts";
 import type { PackKind } from "../core/project.ts";
 import { compareTuples } from "../core/version.ts";
 import { listEngineSchemas, readSchemaJson } from "../knowledge/metadata.ts";
-import { rockideRoutes } from "../knowledge/rockide.ts";
+import { rockideLatestVersion, rockideRoutes } from "../knowledge/rockide.ts";
 import { type FileKind, formatVersionOf, versionTuple } from "./classify.ts";
+import { expandFormatVersions, inRanges, RANGE_KEYWORD, type VersionRange } from "./formatrange.ts";
 import type { Finding } from "./context.ts";
 import { type JsonDocument, parsePointer, pointerJoin, rangeAtPointer } from "./jsonc.ts";
 
@@ -58,7 +59,7 @@ export function engineSchemasBase(opts: SchemaOptions): string | undefined {
 }
 
 const MAX_ERRORS_PER_FILE = 20;
-const CALIBRATION_VERSION = 4;
+const CALIBRATION_VERSION = 5;
 
 interface EngineRoot {
   kind: FileKind;
@@ -462,6 +463,13 @@ function makeAjv(dialect: "draft-07" | "2020-12"): Ajv {
     validate: (schemaValue: boolean) => schemaValue !== true,
     errors: false,
   });
+  // rockide 0.2 `x-format-version` ranges, expanded in `formatrange.ts`.
+  const inRange: SchemaValidateFunction = (ranges: VersionRange[], data: unknown) => {
+    const ok = inRanges(data, ranges);
+    inRange.errors = ok ? [] : [{ keyword: RANGE_KEYWORD, message: `must be a format_version in ${ranges.map((r) => r.text).join(" or ")}`, params: {} }];
+    return ok;
+  };
+  ajv.addKeyword({ keyword: RANGE_KEYWORD, schemaType: "array", validate: inRange });
   return ajv;
 }
 
@@ -490,6 +498,7 @@ class SchemaRuntime {
     if (/[\\/]server[\\/]block[\\/][^\\/]+[\\/]States\.json$/.test(path)) blockStateValues(schema);
     oneOfToAnyOf(schema);
     if (rt.rockide) {
+      expandFormatVersions(schema, rt.sourceRoot ? await rockideLatestVersion(rt.sourceRoot) : undefined);
       if (path.split("\\").join("/").endsWith("/server/loot_table/condition.json")) flatMatchTool(schema);
       await vscodeMerge(schema);
       tupleItems(schema);

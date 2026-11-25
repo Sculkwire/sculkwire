@@ -134,6 +134,17 @@ export async function rockideRoutes(root: string): Promise<RockideRoute[]> {
   return routes;
 }
 
+const latestMemo = memoAsync<string | undefined>();
+
+/** The game version rockide's `x-format-version` ranges mean by `latest` (`LATEST_GAME_VERSION` in its
+ * `scripts/format_version_range.ts`); `undefined` before rockide 0.2 or when the constant moved. */
+export function rockideLatestVersion(root: string): Promise<string | undefined> {
+  return latestMemo(root, async () => {
+    const src = await readFile(join(root, "scripts", "format_version_range.ts"), "utf8").catch(() => "");
+    return /LATEST_GAME_VERSION\s*=\s*"(\d+\.\d+\.\d+)"/.exec(src)?.[1];
+  });
+}
+
 
 export interface RockideProperty {
   name: string;

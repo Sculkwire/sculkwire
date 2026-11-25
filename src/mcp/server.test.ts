@@ -64,7 +64,8 @@ async function connect(env: NodeJS.ProcessEnv): Promise<{ client: Client; close:
 
 /** The tools `docs/tools.md` documents between two `## ` headings. */
 function documentedBetween(from: string, to: string): string[] {
-  const doc = readFileSync(fileURLToPath(new URL("../../docs/tools.md", import.meta.url)), "utf8");
+  // A Windows checkout may have CRLF line ends.
+  const doc = readFileSync(fileURLToPath(new URL("../../docs/tools.md", import.meta.url)), "utf8").replace(/\r\n/g, "\n");
   const section = doc.slice(doc.indexOf(`\n## ${from}\n`), doc.indexOf(`\n## ${to}\n`));
   return [...section.matchAll(/^### (\S+)\s*$/gm)].map((m) => m[1] ?? "");
 }
