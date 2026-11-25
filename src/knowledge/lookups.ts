@@ -104,6 +104,13 @@ export interface MolangInfo {
 
 const molangTable = memo(async (s) => readJson<RawMolang>(join(s.root, "metadata", "molang_modules", "mojang-molang-queries.json")));
 
+/** Every `query.*` name in the channel's engine metadata. */
+export async function molangQueryNames(opts: { channel: Channel; offline?: boolean }): Promise<SourceTag & { queries: string[] }> {
+  const samples = await ensureBedrockSamples({ channel: opts.channel, offline: opts.offline, parts: ["metadata"] });
+  const raw = await molangTable(samples);
+  return { ...tagOf(samples), queries: raw.queries.map((q) => q.name) };
+}
+
 export async function molangLookup(opts: { name: string; channel: Channel; offline?: boolean; limit?: number }): Promise<
   SourceTag & { query: string; exact: boolean; entries: MolangInfo[] }
 > {

@@ -1,7 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { formatDiagnostic } from "../core/diagnostic.ts";
-import { channelSchema, ok, summarySchema } from "../core/mcp.ts";
+import { channelSchema, fail, ok, summarySchema } from "../core/mcp.ts";
+import { type FixOptions, fixSummary, fixVersions } from "./fixversions.ts";
 import { CHECKS, toOptions, type ValidationResult, validateProject, validateText } from "./index.ts";
 
 const position = z.object({ line: z.number().int(), column: z.number().int() });
@@ -149,6 +150,50 @@ export function register(server: McpServer): void {
       const r = await validateText(args.path, args.content, toOptions(args));
       const max = args.max_diagnostics ?? 200;
       return ok(summaryText(r, max), structured(r, max));
+    },
+  );
+
+  const note = z.object({ file: z.string(), pointer: z.string().optional(), from: z.string().optional(), to: z.string().optional(), reason: z.string() });
+  server.registerTool(
+    "pack_fix_versions",
+    {
+      title: "Raise outdated pack versions",
+      description:
+        "Raise outdated version fields of every pack under a directory; a dry run unless apply is true. " +
+        "manifest header.min_engine_version -> the channel's bedrock-samples release version (only when lower; never past gameVersion, since a client older than min_engine_version refuses the pack); script module dependencies (@minecraft/server, server-ui, ...) -> the newest version for the channel, " +
+        "beta only when the manifest already uses a -beta version, never a downgrade. " +
+        "Content-file format_versions are only suggested (schemas change between versions) unless formatVersions is true: then a file moves to the newest version its schema knows when the validator finds no new error under it, else it is skipped with the reason. " +
+        "Edits splice the value in place, keeping formatting and comments. Regolith projects: the source packs are edited, never rgl's output in .regolith/tmp.",
+      inputSchema: {
+        path: z.string().describe("project, add-on or pack directory"),
+        apply: z.boolean().optional().describe("write the changes (default false: dry run)"),
+        channel: channelSchema.optional().describe("release channel whose versions to move to (default stable)"),
+        formatVersions: z.boolean().optional().describe("also move content-file format_versions the validator accepts under the newer version (default false: suggestions only)"),
+        gameVersion: z.string().regex(/^\d+\.\d+\.\d+/).optional().describe("the game the packs must load on, e.g. 1.26.63 (game_status version): min_engine_version is never raised past it"),
+      },
+      outputSchema: {
+        root: z.string(),
+        channel: channelSchema,
+        target: z.object({ gameVersion: z.string().describe("min_engine_version target and format_version cap") }),
+        applied: z.boolean().describe("false for a dry run: nothing was written"),
+        changes: z.array(z.object({ file: z.string(), pointer: z.string(), from: z.string(), to: z.string(), applied: z.boolean() })),
+        suggestions: z.array(note).describe("newer format_versions the schemas know; pass formatVersions to try them"),
+        skipped: z.array(note).describe("fields left alone, with the reason"),
+        regolith: z.string().optional().describe("set for a Regolith project whose profile runs filters"),
+      },
+    },
+    async (args) => {
+      try {
+        const opts: FixOptions = {};
+        if (args.apply) opts.apply = true;
+        if (args.channel) opts.channel = args.channel;
+        if (args.formatVersions) opts.formatVersions = true;
+        if (args.gameVersion) opts.gameVersion = args.gameVersion;
+        const r = await fixVersions(args.path, opts);
+        return ok(fixSummary(r), r);
+      } catch (err) {
+        return fail(err);
+      }
     },
   );
 }

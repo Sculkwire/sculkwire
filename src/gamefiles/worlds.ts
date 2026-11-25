@@ -1,5 +1,5 @@
 /** The `sculkwire-` worlds sculkwire creates and the level.dat values they set. */
-import { TAG, type NbtCompound } from "./nbt.ts";
+import { tagNumber, TAG, type NbtCompound } from "./nbt.ts";
 
 export const WORLD_PREFIX = "sculkwire-";
 
@@ -12,10 +12,15 @@ export function levelIdFor(name: string): string {
   return worldName(name).replace(/[^A-Za-z0-9_-]+/g, "_");
 }
 
-/** Cheats and commands on in a level.dat root: the bridge's commands need them. */
+/** Cheats and commands on in a level.dat root: the bridge's commands need them. The game awards no achievements then. */
 export function setCheats(root: NbtCompound): void {
   root.set("commandsEnabled", { type: TAG.Byte, value: 1 });
   root.set("cheatsEnabled", { type: TAG.Byte, value: 1 });
+}
+
+/** Whether a level.dat root has both cheats and commands on. */
+export function hasCheats(root: NbtCompound): boolean {
+  return tagNumber(root.get("commandsEnabled")) === 1 && tagNumber(root.get("cheatsEnabled")) === 1;
 }
 
 /** Single player in a level.dat root: multiplayer and every broadcast off (no LAN, Xbox Live or platform), so nobody can join. */

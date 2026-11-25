@@ -37,16 +37,23 @@ const engineDeps: EngineDeps = {
   },
 };
 
-/** A built-in feature has the shape of an extension: a name, its MCP tools, its CLI commands. */
-export const FEATURES: Extension[] = [
-  { name: "knowledge", register: knowledgeTools, commands: knowledgeCommands },
-  { name: "validate", register: validateTools, commands: validateCommands },
-  { name: "bds", register: bdsTools, commands: bdsCommands },
-  { name: "game client", register: gameTools, commands: gameCommands },
-  { name: "engine", register: (server) => engineTools(server, engineDeps), commands: engineCommands(engineDeps) },
-  { name: "gamefiles", register: gamefilesTools, commands: gamefilesCommands },
-  { name: "setup", commands: setupCommands },
-  { name: "update", register: updateTools, commands: updateCommands },
+/**
+ * A built-in feature has the shape of an extension (a name, its MCP tools, its CLI commands) plus `id`: its toolset
+ * id in `SCULKWIRE_TOOLSETS`, stable across releases.
+ */
+export interface Feature extends Extension {
+  id: string;
+}
+
+export const FEATURES: Feature[] = [
+  { id: "knowledge", name: "knowledge", register: knowledgeTools, commands: knowledgeCommands },
+  { id: "validate", name: "validate", register: validateTools, commands: validateCommands },
+  { id: "bds", name: "bds", register: bdsTools, commands: bdsCommands },
+  { id: "game", name: "game client", register: gameTools, commands: gameCommands },
+  { id: "engine", name: "engine", register: (server) => engineTools(server, engineDeps), commands: engineCommands(engineDeps) },
+  { id: "gamefiles", name: "gamefiles", register: gamefilesTools, commands: gamefilesCommands },
+  { id: "setup", name: "setup", commands: setupCommands },
+  { id: "update", name: "update", register: updateTools, commands: updateCommands },
 ];
 
 let wired = false;

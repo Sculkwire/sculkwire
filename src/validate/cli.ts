@@ -2,6 +2,7 @@ import { stat } from "node:fs/promises";
 import { type CliCommand, err, out } from "../core/cli.ts";
 import { ExitCode } from "../core/diagnostic.ts";
 import { isChannel } from "../core/version.ts";
+import { type FixOptions, fixSummary, fixVersions } from "./fixversions.ts";
 import { type OutputFormat, render } from "./format.ts";
 import { CHECKS, toOptions, unknownChecks, type ValidateArgs, validateProject, validateText } from "./index.ts";
 
@@ -108,6 +109,64 @@ async function run(args: string[]): Promise<number> {
   return result.ok ? ExitCode.ok : ExitCode.findings;
 }
 
+const FIX_USAGE = `Usage: sculk validate fix-versions <path> [options]
+
+Raise outdated version fields of every pack under <path>: manifest min_engine_version to the channel's game version,
+script module dependencies to the newest version for the channel (beta stays beta; never a downgrade). Content-file
+format_versions are only suggested unless --format-versions. Dry run unless --apply. Regolith projects: the source
+packs are edited, never rgl's output in .regolith/tmp.
+
+  <path>              project, add-on or pack directory
+  --apply             write the changes (default: dry run)
+  --channel <c>       stable | preview (default stable)
+  --format-versions   also move format_versions the validator accepts under the newer version
+  --game-version <v>  the game the packs must load on (1.26.63): min_engine_version stays at or below it
+  --json              print the result as JSON
+
+Exit codes: 0 nothing to change or changes applied, 1 a dry run found changes, 2 usage or prerequisite error.`;
+
+async function runFix(args: string[]): Promise<number> {
+  const opts: FixOptions = {};
+  let json = false;
+  const positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] as string;
+    if (a === "-h" || a === "--help") {
+      out(FIX_USAGE);
+      return ExitCode.ok;
+    }
+    if (a === "--apply") opts.apply = true;
+    else if (a === "--format-versions") opts.formatVersions = true;
+    else if (a === "--json") json = true;
+    else if (a === "--game-version") {
+      const v = args[++i];
+      if (v === undefined || !/^\d+\.\d+\.\d+/.test(v)) {
+        err(`--game-version needs a version like 1.26.63\n\n${FIX_USAGE}`);
+        return ExitCode.usage;
+      }
+      opts.gameVersion = v;
+    } else if (a === "--channel") {
+      const v = args[++i];
+      if (v === undefined || !isChannel(v)) {
+        err(`--channel must be stable or preview\n\n${FIX_USAGE}`);
+        return ExitCode.usage;
+      }
+      opts.channel = v;
+    } else if (a.startsWith("--")) {
+      err(`unknown option ${a}\n\n${FIX_USAGE}`);
+      return ExitCode.usage;
+    } else positional.push(a);
+  }
+  if (positional.length !== 1) {
+    err(`expected exactly one <path>\n\n${FIX_USAGE}`);
+    return ExitCode.usage;
+  }
+  const r = await fixVersions(positional[0] as string, opts);
+  out(json ? JSON.stringify(r, null, 2) : fixSummary(r, Number.POSITIVE_INFINITY));
+  return !r.applied && r.changes.length ? ExitCode.findings : ExitCode.ok;
+}
+
 export const commands: CliCommand[] = [
   { name: "validate", summary: "Validate add-on packs: diagnostics with file:line:col, stable codes, exit codes", run },
+  { name: "validate fix-versions", summary: "Raise outdated min_engine_version, script module and format versions (dry run by default)", run: runFix },
 ];

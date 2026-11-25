@@ -1,7 +1,7 @@
 // sculkwire helper (MIT): answers `/scriptevent sculkwire:query <json>` with one console line
 // `[sculkwire:reply] {"id":..,"ok":true,"result":..}` that the bridge reads from the script debugger
 // (PrintEvent) or the content log.
-import { BlockTypes, BlockVolume, EntityTypes, ItemTypes, system, world } from "@minecraft/server";
+import { BlockTypes, BlockVolume, EnchantmentType, EntityTypes, ItemStack, ItemTypes, system, world } from "@minecraft/server";
 
 const MAX_ENTITIES = 200;
 const MAX_BLOCKS = 2000;
@@ -763,6 +763,8 @@ world.afterEvents.entityDie.subscribe((ev) => {
   } catch {}
   DEATHS.push(out);
   if (DEATHS.length > MAX_DEATHS) DEATHS.shift();
+  const { tick, ...fields } = out;
+  pushEvent("entityDie", fields);
 });
 
 /** Deaths after game tick `since` (default all kept), oldest first. */
@@ -771,30 +773,572 @@ function deaths(q) {
   return { tick: system.currentTick, deaths: DEATHS.filter((d) => d.tick > since) };
 }
 
-/** The last hurts of players, so a run can tell blast and fall damage from a mob's hit. */
+/** The last hurts of players, so a run can tell blast and fall damage from a mob's hit. Every entity's hurt is an event. */
 const HURTS = [];
 const MAX_HURTS = 64;
-world.afterEvents.entityHurt.subscribe(
-  (ev) => {
-    const out = { tick: system.currentTick, damage: ev.damage };
-    try {
-      out.cause = ev.damageSource.cause;
-      const damager = ev.damageSource.damagingEntity;
-      if (damager) {
-        out.damager = damager.typeId;
-        out.damagerId = damager.id;
-      }
-    } catch {}
-    HURTS.push(out);
-    if (HURTS.length > MAX_HURTS) HURTS.shift();
-  },
-  { entityTypes: ["minecraft:player"] },
-);
+world.afterEvents.entityHurt.subscribe((ev) => {
+  const out = { tick: system.currentTick, damage: ev.damage };
+  try {
+    out.cause = ev.damageSource.cause;
+    const damager = ev.damageSource.damagingEntity;
+    if (damager) {
+      out.damager = damager.typeId;
+      out.damagerId = damager.id;
+    }
+  } catch {}
+  let hurt = {};
+  try {
+    hurt = { id: ev.hurtEntity.id, typeId: ev.hurtEntity.typeId };
+  } catch {}
+  const { tick, ...fields } = out;
+  pushEvent("entityHurt", { ...hurt, ...fields });
+  if (hurt.typeId !== "minecraft:player") return;
+  HURTS.push(out);
+  if (HURTS.length > MAX_HURTS) HURTS.shift();
+});
 
 /** Player hurts after game tick `since` (default all kept), oldest first. */
 function hurts(q) {
   const since = Number(q.since ?? -1);
   return { tick: system.currentTick, hurts: HURTS.filter((h) => h.tick > since) };
+}
+
+/**
+ * In-world events for `events` and `wait` `event` conditions: a ring of the newest MAX_EVENTS, each
+ * `{ seq, tick, kind, ...fields }` with flat fields. `seq` grows by one per event from the helper's start (a `/reload`
+ * restarts it at 1), so a caller's cursor is the last `seq` it saw.
+ */
+const EVENTS = [];
+const MAX_EVENTS = 2000;
+let eventSeq = 0;
+function pushEvent(kind, fields) {
+  EVENTS.push({ seq: ++eventSeq, tick: system.currentTick, kind, ...fields });
+  if (EVENTS.length > MAX_EVENTS) EVENTS.shift();
+}
+
+/** Read fields off an event without letting one invalid handle drop the whole event. */
+function safely(read) {
+  try {
+    return read();
+  } catch {
+    return undefined;
+  }
+}
+function blockAtOf(b) {
+  return safely(() => ({ block: b.typeId, location: { x: b.location.x, y: b.location.y, z: b.location.z } })) ?? {};
+}
+/** Subscribe when this game's API has the signal, so a missing one never stops the helper. */
+function onWorld(name, record) {
+  const signal = world.afterEvents[name];
+  if (!signal) return;
+  signal.subscribe((ev) => {
+    const fields = safely(() => record(ev));
+    if (fields) pushEvent(name, fields);
+  });
+}
+onWorld("entitySpawn", (ev) => ({ id: ev.entity.id, typeId: ev.entity.typeId, cause: ev.cause, location: vec(ev.entity.location) }));
+onWorld("playerBreakBlock", (ev) => ({ player: ev.player.name, ...blockAtOf(ev.block), block: ev.brokenBlockPermutation.type.id }));
+onWorld("playerPlaceBlock", (ev) => ({ player: ev.player.name, ...blockAtOf(ev.block) }));
+onWorld("itemUse", (ev) => ({ player: ev.source.name, item: ev.itemStack.typeId }));
+onWorld("itemCompleteUse", (ev) => ({ player: ev.source.name, item: ev.itemStack.typeId, useDuration: ev.useDuration }));
+onWorld("playerInteractWithBlock", (ev) => ({ player: ev.player.name, ...blockAtOf(ev.block), item: safely(() => ev.itemStack?.typeId) }));
+onWorld("playerInteractWithEntity", (ev) => ({ player: ev.player.name, id: ev.target.id, typeId: ev.target.typeId, item: safely(() => ev.itemStack?.typeId) }));
+onWorld("effectAdd", (ev) => ({ id: ev.entity.id, typeId: ev.entity.typeId, effect: ev.effect.typeId, amplifier: ev.effect.amplifier, duration: ev.effect.duration }));
+
+/** A `/scriptevent` other than sculkwire's own queries: `id`, `message` and the sending entity's type. */
+function recordScriptEvent(ev) {
+  if (ev.id === "sculkwire:query") return;
+  const source = safely(() => ev.sourceEntity?.typeId);
+  pushEvent("scriptevent", { id: ev.id, message: ev.message, ...(source ? { source } : {}) });
+}
+
+const EVENTS_LIMIT = 100;
+const EVENTS_MAX_LIMIT = 500;
+/**
+ * Events after cursor `since` (default 0: every event kept), oldest first, at most `limit`, of `kinds` when given.
+ * `since: "now"` answers only the cursor. `next` is the cursor for the following call; `dropped` counts events after
+ * `since` the ring no longer holds; `reset` says the cursor was past the helper's newest event (its scripts restarted),
+ * so reading started over from its first event.
+ */
+function events(q) {
+  if (q.since === "now") return { tick: system.currentTick, events: [], next: eventSeq, dropped: 0, reset: false };
+  let since = Math.max(0, Math.floor(Number(q.since ?? 0)) || 0);
+  const reset = since > eventSeq;
+  if (reset) since = 0;
+  const kinds = Array.isArray(q.kinds) && q.kinds.length ? new Set(q.kinds.map(String)) : undefined;
+  const limit = Math.max(1, Math.min(EVENTS_MAX_LIMIT, Math.floor(Number(q.limit ?? EVENTS_LIMIT)) || EVENTS_LIMIT));
+  const oldest = EVENTS.length ? EVENTS[0].seq : eventSeq + 1;
+  const dropped = Math.max(0, oldest - since - 1);
+  const out = [];
+  let next = eventSeq;
+  for (const e of EVENTS) {
+    if (e.seq <= since || (kinds && !kinds.has(e.kind))) continue;
+    if (out.length === limit) {
+      next = out[out.length - 1].seq;
+      break;
+    }
+    out.push(e);
+  }
+  return { tick: system.currentTick, events: out, next, dropped, reset };
+}
+
+/** `id` with the `minecraft:` namespace when it has none. */
+function namespaced(id) {
+  const s = String(id);
+  return s.includes(":") ? s : `minecraft:${s}`;
+}
+
+const COMPARE = {
+  "==": (a, b) => a === b,
+  "!=": (a, b) => a !== b,
+  "<": (a, b) => a < b,
+  "<=": (a, b) => a <= b,
+  ">": (a, b) => a > b,
+  ">=": (a, b) => a >= b,
+};
+function compareOp(op) {
+  const f = COMPARE[op];
+  if (!f) throw queryError("bad_condition", `op must be one of ${Object.keys(COMPARE).join(", ")}`);
+  return f;
+}
+function numberOf(q, key) {
+  const n = Number(q[key]);
+  if (!Number.isFinite(n)) throw queryError("bad_condition", `${key} must be a number`);
+  return n;
+}
+
+/**
+ * A participant's score: `@s` or `@p` (the local player), a player by name, else a scoreboard identity by display
+ * name, else a fake player name.
+ */
+function scoreOf(objective, participant) {
+  const p = SELF_SELECTORS.has(participant) ? thePlayer() : world.getAllPlayers().find((pl) => pl.name === participant);
+  if (p) return safely(() => objective.getScore(p));
+  const identity = safely(() => objective.getParticipants().find((i) => i.displayName === participant));
+  return safely(() => objective.getScore(identity ?? participant));
+}
+
+/**
+ * One `wait` condition as a check run every tick: `() => ({ met, observed })`. Bad input throws at once, so the
+ * caller learns it on the first reply rather than after the timeout.
+ */
+const CONDITIONS = {
+  entity(c) {
+    if (c.type === undefined) throw queryError("bad_condition", "entity needs type");
+    const type = namespaced(c.type);
+    const op = c.op ?? "present";
+    const radius = Math.max(0, Math.min(256, Number(c.radius ?? 32)));
+    let test;
+    if (op === "present") test = (n) => n > 0;
+    else if (op === "absent") test = (n) => n === 0;
+    else {
+      const f = compareOp(op);
+      const value = numberOf(c, "value");
+      test = (n) => f(n, value);
+    }
+    return () => {
+      const { dim, at } = anchor(c);
+      const count = dim.getEntities({ location: at, maxDistance: radius, type }).length;
+      return { met: test(count), observed: { count } };
+    };
+  },
+  block(c) {
+    const x = Math.floor(numberOf(c, "x"));
+    const y = Math.floor(numberOf(c, "y"));
+    const z = Math.floor(numberOf(c, "z"));
+    if (c.type === undefined) throw queryError("bad_condition", "block needs type");
+    const type = namespaced(c.type);
+    const is = c.is !== false;
+    const states = c.states && typeof c.states === "object" ? Object.entries(c.states) : [];
+    return () => {
+      const player = thePlayer();
+      const dim = world.getDimension(c.dimension ?? player?.dimension.id ?? "overworld");
+      const b = blockAt(dim, x, y, z);
+      // An unloaded block meets neither `is` nor `is: false`: its type is unknown.
+      if (!b) return { met: false, observed: null };
+      const info = blockInfo(b);
+      const matches = info.typeId === type && states.every(([k, v]) => info.states?.[k] === v);
+      return { met: matches === is, observed: info };
+    };
+  },
+  score(c) {
+    if (!c.objective || c.participant === undefined) throw queryError("bad_condition", "score needs objective and participant");
+    const f = compareOp(c.op ?? "==");
+    const value = numberOf(c, "value");
+    const participant = String(c.participant);
+    return () => {
+      const objective = world.scoreboard.getObjective(String(c.objective));
+      if (!objective) return { met: false, observed: { objective: false } };
+      const score = scoreOf(objective, participant);
+      return { met: score !== undefined && f(score, value), observed: { score: score ?? null } };
+    };
+  },
+  event(c) {
+    if (!c.event) throw queryError("bad_condition", "event needs event (an event kind or a scriptevent id)");
+    const name = String(c.event);
+    const match = c.match && typeof c.match === "object" ? Object.entries(c.match) : [];
+    let since = c.since === undefined ? eventSeq : Math.max(0, Math.floor(Number(c.since)) || 0);
+    if (since > eventSeq) since = 0;
+    return () => {
+      for (const e of EVENTS) {
+        if (e.seq <= since) continue;
+        if (e.kind !== name && !(e.kind === "scriptevent" && e.id === name)) continue;
+        if (match.every(([k, v]) => e[k] === v)) return { met: true, observed: e };
+      }
+      return { met: false, observed: { next: eventSeq } };
+    };
+  },
+  player(c) {
+    const at = { x: numberOf(c, "x"), y: numberOf(c, "y"), z: numberOf(c, "z") };
+    const radius = numberOf(c, "radius");
+    return () => {
+      const p = thePlayer();
+      if (!p) return { met: false, observed: null };
+      const l = p.location;
+      const distance = Math.hypot(l.x - at.x, l.y - at.y, l.z - at.z);
+      return { met: distance <= radius, observed: { location: vec(l), distance: Math.round(distance * 100) / 100 } };
+    };
+  },
+  ticks(c) {
+    const n = Math.max(0, Math.floor(numberOf(c, "ticks")));
+    const start = system.currentTick;
+    return () => ({ met: system.currentTick - start >= n, observed: { ticks: system.currentTick - start } });
+  },
+};
+
+const WAIT_MAX_MS = 60_000;
+const waits = [];
+let waitRunner;
+function finishWait(w, check) {
+  const ticks = system.currentTick - w.startTick;
+  const elapsedMs = Date.now() - w.startMs;
+  if (check.met) w.resolve({ met: true, timedOut: false, elapsedMs, ticks, observed: check.observed });
+  else if (elapsedMs >= w.timeoutMs) w.resolve({ met: false, timedOut: true, elapsedMs, ticks, observed: check.observed });
+  else return false;
+  return true;
+}
+function pumpWaits() {
+  for (let i = waits.length - 1; i >= 0; i--) {
+    const w = waits[i];
+    let check;
+    try {
+      check = w.check();
+    } catch (e) {
+      waits.splice(i, 1);
+      w.reject(e);
+      continue;
+    }
+    if (finishWait(w, check)) waits.splice(i, 1);
+  }
+  if (!waits.length && waitRunner !== undefined) {
+    system.clearRun(waitRunner);
+    waitRunner = undefined;
+  }
+}
+
+/**
+ * Wait until `condition` (`{ kind, ... }`, see CONDITIONS) holds, checking now and then every tick, or until
+ * `timeoutMs` (wall clock, so a paused game still times out). Answers `{ met, timedOut, elapsedMs, ticks, observed }`.
+ */
+function wait(q) {
+  const c = q.condition ?? {};
+  const make = CONDITIONS[c.kind];
+  if (!make) throw queryError("bad_condition", `condition kind must be one of ${Object.keys(CONDITIONS).join(", ")}`);
+  const check = make(c);
+  const w = { check, startTick: system.currentTick, startMs: Date.now(), timeoutMs: Math.max(0, Math.min(WAIT_MAX_MS, Number(q.timeoutMs ?? 10_000))) };
+  if (finishWait({ ...w, resolve: (r) => (w.now = r) }, check())) return w.now;
+  return new Promise((resolve, reject) => {
+    waits.push({ ...w, resolve, reject });
+    waitRunner ??= system.runInterval(pumpWaits, 1);
+  });
+}
+
+/**
+ * The entity a `components`, `dynamic_properties` or `entity_properties` query reads: `entity` (an id from
+ * `entities`), else the nearest entity of `type` around the anchor (within `radius`, default 64), else the player.
+ */
+function targetEntity(q) {
+  if (q.entity !== undefined) {
+    const e = world.getEntity(String(q.entity));
+    if (!e || e.isValid === false) throw queryError("no_entity", `no entity with id ${q.entity}`);
+    return e;
+  }
+  if (q.type && q.target !== "player") {
+    const { dim, at } = anchor(q);
+    const radius = Math.min(Number(q.radius ?? 64), 256);
+    const e = dim.getEntities({ location: at, maxDistance: radius, closest: 1, type: q.type })[0];
+    if (!e) throw queryError("no_entity", `no ${q.type} within ${radius} blocks`);
+    return e;
+  }
+  if (q.target === "entity") throw queryError("no_entity", "target entity needs `entity` (an id) or `type`");
+  const p = thePlayer();
+  if (!p) throw queryError("no_entity", "no player in the world");
+  return p;
+}
+
+/** Per component read: keys kept, array items kept, nesting depth, and string length. */
+const READ_KEYS = 40;
+const READ_ITEMS = 20;
+const READ_DEPTH = 2;
+const READ_STRING = 1000;
+/** Fields never read off a component: its owner (a whole entity) and the class plumbing. */
+const SKIP_FIELDS = new Set(["constructor", "entity", "block", "typeId", "isValid", "__proto__"]);
+
+/** Own and prototype property names of a game object, up to (not including) Object.prototype. */
+function fieldNames(value) {
+  const names = new Set();
+  for (let o = value; o && o !== Object.prototype && names.size < READ_KEYS * 2; o = Object.getPrototypeOf(o)) {
+    for (const name of Object.getOwnPropertyNames(o)) if (!SKIP_FIELDS.has(name)) names.add(name);
+  }
+  return [...names];
+}
+
+/**
+ * A readable copy of a Script API value: primitives as they are, a Vector3 as {x,y,z}, arrays and objects by their
+ * readable fields, depth- and size-capped. Functions are left out. A getter that throws is left out and its path
+ * pushed to `unreadable`, so one broken field never loses the rest.
+ */
+function readable(value, depth, path, unreadable) {
+  if (value === null || value === undefined) return value;
+  const t = typeof value;
+  if (t === "number" || t === "boolean") return value;
+  if (t === "string") return value.length > READ_STRING ? `${value.slice(0, READ_STRING)}…` : value;
+  if (t !== "object") return undefined;
+  try {
+    if (typeof value.x === "number" && typeof value.y === "number" && typeof value.z === "number") return vec(value);
+    // A nested game object (an item, an entity type) reads as its id.
+    if (depth > 0 && typeof value.typeId === "string") return value.typeId;
+  } catch {
+    unreadable.push(path || "(value)");
+    return undefined;
+  }
+  if (depth >= READ_DEPTH) return undefined;
+  if (Array.isArray(value)) {
+    return value.slice(0, READ_ITEMS).map((v, i) => readable(v, depth + 1, `${path}[${i}]`, unreadable)).filter((v) => v !== undefined);
+  }
+  const out = {};
+  let kept = 0;
+  for (const name of fieldNames(value)) {
+    if (kept >= READ_KEYS) break;
+    let v;
+    try {
+      v = value[name];
+    } catch {
+      unreadable.push(path ? `${path}.${name}` : name);
+      continue;
+    }
+    if (typeof v === "function") continue;
+    const r = readable(v, depth + 1, path ? `${path}.${name}` : name, unreadable);
+    if (r === undefined) continue;
+    out[name] = r;
+    kept++;
+  }
+  return out;
+}
+
+/**
+ * Components whose data sits behind a no-argument method rather than a property (the type families, a rideable's
+ * seats): each method's result is read into `values` under the given key.
+ */
+const COMPONENT_GETTERS = [
+  ["getTypeFamilies", "families"],
+  ["getSeats", "seats"],
+  ["getFamilyTypes", "familyTypes"],
+];
+
+/** An entity's components (or the `ids` asked for): typeId and its readable fields; `unreadable` names fields that threw. */
+function components(q) {
+  const e = targetEntity(q);
+  const only = Array.isArray(q.ids) ? new Set(q.ids.map((id) => (String(id).includes(":") ? String(id) : `minecraft:${id}`))) : undefined;
+  const list = [];
+  for (const c of e.getComponents()) {
+    let typeId;
+    try {
+      typeId = c.typeId;
+    } catch {
+      continue;
+    }
+    if (only && !only.has(typeId)) continue;
+    const unreadable = [];
+    const one = { typeId, values: readable(c, 0, "", unreadable) ?? {} };
+    for (const [method, key] of COMPONENT_GETTERS) {
+      if (typeof c[method] !== "function") continue;
+      try {
+        const v = readable(c[method](), 0, key, unreadable);
+        if (v !== undefined) one.values[key] = v;
+      } catch {
+        unreadable.push(key);
+      }
+    }
+    if (unreadable.length) one.unreadable = unreadable;
+    list.push(one);
+  }
+  list.sort((a, b) => (a.typeId < b.typeId ? -1 : a.typeId > b.typeId ? 1 : 0));
+  const out = { id: e.id, typeId: e.typeId, components: list };
+  if (only) {
+    const missing = [...only].filter((id) => !list.some((c) => c.typeId === id));
+    if (missing.length) out.missing = missing;
+  }
+  return out;
+}
+
+/** Dynamic property values kept per reply, and the longest string kept whole. */
+const MAX_DYNAMIC = 500;
+const DYNAMIC_STRING = 4000;
+
+/** Dynamic properties of the world (default), the player or an entity, with the holder's total byte count. */
+function dynamicProperties(q) {
+  const target = q.target ?? (q.entity !== undefined || q.type ? "entity" : "world");
+  const holder = target === "world" ? world : targetEntity(target === "player" ? { ...q, target: "player" } : q);
+  const prefix = q.prefix === undefined ? "" : String(q.prefix);
+  const ids = holder.getDynamicPropertyIds().filter((id) => id.startsWith(prefix)).sort();
+  const limit = Math.min(Number(q.limit ?? MAX_DYNAMIC), MAX_DYNAMIC);
+  const properties = {};
+  const cut = [];
+  for (const id of ids.slice(0, limit)) {
+    let v;
+    try {
+      v = holder.getDynamicProperty(id);
+    } catch {
+      continue;
+    }
+    if (v && typeof v === "object") v = { x: v.x, y: v.y, z: v.z };
+    else if (typeof v === "string" && v.length > DYNAMIC_STRING) {
+      cut.push(id);
+      v = v.slice(0, DYNAMIC_STRING);
+    }
+    properties[id] = v;
+  }
+  const out = { target, totalBytes: holder.getDynamicPropertyTotalByteCount(), count: ids.length, properties };
+  if (target !== "world") {
+    out.id = holder.id;
+    out.typeId = holder.typeId;
+  }
+  if (ids.length > limit) out.truncated = true;
+  if (cut.length) out.cutStrings = cut;
+  return out;
+}
+
+/** Score rows kept per reply by default and at most. */
+const SCORE_ROWS = 100;
+const MAX_SCORE_ROWS = 1000;
+
+/** Selectors that name the local player as a scoreboard participant. */
+const SELF_SELECTORS = new Set(["@s", "@p"]);
+
+/** Whether a scoreboard participant is the one asked for: `@s`/`@p`, a player or fake player name, or an entity id. */
+function isParticipant(identity, wanted) {
+  try {
+    if (SELF_SELECTORS.has(wanted)) return identity.type === "Player" && identity.getEntity()?.id === thePlayer()?.id;
+    if (identity.displayName === wanted) return true;
+    if (identity.type === "Entity" || identity.type === "Player") return identity.getEntity()?.id === wanted;
+  } catch {}
+  return false;
+}
+
+/**
+ * Scoreboard objectives with their scores. `objective` keeps one, `participant` keeps one participant's rows,
+ * `limit` caps the rows over all objectives. Bedrock has one criteria, `dummy` (the Script API does not expose it).
+ */
+function scores(q) {
+  const board = world.scoreboard;
+  let objectives = board.getObjectives();
+  if (q.objective !== undefined) {
+    const one = board.getObjective(String(q.objective));
+    if (!one) throw queryError("no_objective", `no scoreboard objective ${q.objective}; objectives: ${objectives.map((o) => o.id).join(", ") || "none"}`);
+    objectives = [one];
+  }
+  const limit = Math.min(Number(q.limit ?? SCORE_ROWS), MAX_SCORE_ROWS);
+  const wanted = q.participant === undefined ? undefined : String(q.participant);
+  let rows = 0;
+  let truncated = false;
+  const out = [];
+  for (const o of objectives) {
+    const list = [];
+    for (const info of o.getScores()) {
+      const identity = info.participant;
+      if (wanted !== undefined && !isParticipant(identity, wanted)) continue;
+      if (rows >= limit) {
+        truncated = true;
+        break;
+      }
+      const row = { participant: identity.displayName, type: identity.type, score: info.score };
+      try {
+        const e = identity.type === "FakePlayer" ? undefined : identity.getEntity();
+        if (e) row.entityId = e.id;
+      } catch {}
+      list.push(row);
+      rows++;
+    }
+    out.push({ id: o.id, displayName: o.displayName, criteria: "dummy", scores: list });
+  }
+  return truncated ? { objectives: out, truncated } : { objectives: out };
+}
+
+const RAY_DISTANCE = 16;
+const MAX_RAY_DISTANCE = 64;
+
+/**
+ * The first block and the entities along a ray: from x/y/z (default the player's head) along `direction` or toward
+ * `to` (default the player's view direction), up to `maxDistance` (default 16, at most 64). Entities behind the block
+ * hit are not reported, nor the player the ray starts in.
+ */
+function raycast(q) {
+  const player = thePlayer();
+  const fromPlayer = q.x === undefined || q.y === undefined || q.z === undefined;
+  if (fromPlayer && !player) throw new Error("no player in the world and no x/y/z given");
+  const dim = fromPlayer ? player.dimension : world.getDimension(q.dimension ?? player?.dimension.id ?? "overworld");
+  const from = fromPlayer ? player.getHeadLocation() : { x: q.x, y: q.y, z: q.z };
+  let direction;
+  if (q.to) direction = { x: q.to.x - from.x, y: q.to.y - from.y, z: q.to.z - from.z };
+  else if (q.direction) direction = q.direction;
+  else if (player) direction = player.getViewDirection();
+  else throw new Error("raycast needs direction or to");
+  const length = Math.hypot(direction.x, direction.y, direction.z);
+  if (!(length > 0)) throw new Error("raycast direction has zero length");
+  direction = { x: direction.x / length, y: direction.y / length, z: direction.z / length };
+  // Toward `to`, the ray ends at that point unless maxDistance says otherwise.
+  const maxDistance = Math.max(0, Math.min(Number(q.maxDistance ?? (q.to ? length : RAY_DISTANCE)), MAX_RAY_DISTANCE));
+  const opts = { maxDistance, includeLiquidBlocks: q.includeLiquidBlocks === true, includePassableBlocks: q.includePassableBlocks === true };
+  let block = null;
+  const hit = dim.getBlockFromRay(from, direction, opts);
+  if (hit) {
+    const at = hit.faceLocation;
+    block = { ...blockInfo(hit.block), face: hit.face, faceLocation: vec(at) };
+    // faceLocation is relative to the block's corner.
+    const point = { x: hit.block.location.x + at.x, y: hit.block.location.y + at.y, z: hit.block.location.z + at.z };
+    block.distance = Math.round(Math.hypot(point.x - from.x, point.y - from.y, point.z - from.z) * 100) / 100;
+  }
+  const entities = [];
+  for (const h of dim.getEntitiesFromRay(from, direction, opts)) {
+    try {
+      if (fromPlayer && h.entity.id === player.id) continue;
+      entities.push({ id: h.entity.id, typeId: h.entity.typeId, distance: Math.round(h.distance * 100) / 100 });
+    } catch {}
+  }
+  return { from: vec(from), direction: vec(direction), maxDistance, block, entities };
+}
+
+/**
+ * Entity property values (`entity.getProperty`). The Script API cannot list an entity's property ids, so the host
+ * passes `ids` (the caller's, or the ones declared in the project's entity file); an id with no value is in `missing`.
+ */
+function entityProperties(q) {
+  if (!Array.isArray(q.ids) || q.ids.length === 0) throw queryError("no_ids", "entity_properties needs ids");
+  const e = targetEntity(q);
+  const properties = {};
+  const missing = [];
+  for (const id of q.ids.map(String)) {
+    let v;
+    try {
+      v = e.getProperty(id);
+    } catch {}
+    if (v === undefined) missing.push(id);
+    else properties[id] = v;
+  }
+  const out = { id: e.id, typeId: e.typeId, properties };
+  if (missing.length) out.missing = missing;
+  return out;
 }
 
 /** The Script API's registries, by the `/connect` data kind they stand in for (`mob` lists every entity type). */
@@ -811,14 +1355,14 @@ function registry(q) {
   return { total: ids.length, offset, ids: ids.slice(offset, offset + REGISTRY_PAGE) };
 }
 
-const HANDLERS = { ping: () => "pong", registry, entities, entity, blocks, block, grid, player, state, stream, impacts, deaths, hurts, loadout, inventory, container: containerAt };
+const HANDLERS = { ping: () => "pong", registry, entities, entity, blocks, block, grid, player, state, stream, impacts, deaths, hurts, loadout, inventory, container: containerAt, components, dynamic_properties: dynamicProperties, scores, raycast, entity_properties: entityProperties, events, wait };
 
 function sendReply(reply) {
   console.log(`[sculkwire:reply] ${JSON.stringify(reply)}`);
 }
 
 system.afterEvents.scriptEventReceive.subscribe((ev) => {
-  if (ev.id !== "sculkwire:query") return;
+  if (ev.id !== "sculkwire:query") return recordScriptEvent(ev);
   let q = {};
   try {
     q = JSON.parse(ev.message || "{}");
@@ -847,3 +1391,289 @@ world.afterEvents.playerSpawn.subscribe((ev) => {
 world.afterEvents.playerLeave.subscribe((ev) => {
   if (spawned?.id === ev.playerId) spawned = undefined;
 });
+
+/**
+ * Scenes: a named test start saved IN the world, so it lasts as long as the world does. The box's blocks and entities
+ * are a world structure `sculkwire:scene_<name>`; the player's state, the time and the weather are JSON in the world
+ * dynamic property `sculkwire:scene:<name>` (split over `sculkwire:scene:<name>:<i>` when longer than one property holds,
+ * with the part count in the main property).
+ */
+const SCENE_NAME = /^[a-z0-9_-]{1,32}$/;
+const SCENE_PROP = "sculkwire:scene:";
+/** Structures may be at most 64 blocks wide and deep, so a box of `2 * radius + 1` fits up to radius 31. */
+const SCENE_MAX_RADIUS = 31;
+const SCENE_PART = 30000;
+const EQUIPMENT_SLOTS = ["Head", "Chest", "Legs", "Feet", "Offhand"];
+/** The newest weather per dimension id, from `weatherChange` (the Script API has no stable weather getter). */
+const WEATHER = new Map();
+world.afterEvents.weatherChange.subscribe((ev) => WEATHER.set(ev.dimension, ev.newWeather));
+
+function sceneName(q) {
+  if (typeof q.name !== "string" || !SCENE_NAME.test(q.name)) {
+    throw queryError("bad_name", `scene name must match [a-z0-9_-]{1,32}, got ${JSON.stringify(q.name)}`);
+  }
+  return q.name;
+}
+
+const sceneStructure = (name) => `sculkwire:scene_${name}`;
+
+function readScene(name) {
+  const head = world.getDynamicProperty(SCENE_PROP + name);
+  if (head === undefined) return undefined;
+  let text = head;
+  if (typeof head === "number") {
+    text = "";
+    for (let i = 0; i < head; i++) text += world.getDynamicProperty(`${SCENE_PROP}${name}:${i}`) ?? "";
+  }
+  return JSON.parse(String(text));
+}
+
+/** Remove the scene's properties (the main one and any parts). */
+function dropSceneProps(name) {
+  const head = world.getDynamicProperty(SCENE_PROP + name);
+  if (typeof head === "number") for (let i = 0; i < head; i++) world.setDynamicProperty(`${SCENE_PROP}${name}:${i}`, undefined);
+  world.setDynamicProperty(SCENE_PROP + name, undefined);
+}
+
+function writeScene(name, scene) {
+  dropSceneProps(name);
+  const text = JSON.stringify(scene);
+  if (text.length <= SCENE_PART) return world.setDynamicProperty(SCENE_PROP + name, text);
+  const parts = Math.ceil(text.length / SCENE_PART);
+  for (let i = 0; i < parts; i++) world.setDynamicProperty(`${SCENE_PROP}${name}:${i}`, text.slice(i * SCENE_PART, (i + 1) * SCENE_PART));
+  world.setDynamicProperty(SCENE_PROP + name, parts);
+}
+
+/** An item as a scene stores it: everything `restoreItem` can put back. */
+function sceneItem(item) {
+  if (!item) return null;
+  const out = { id: item.typeId, amount: item.amount };
+  if (item.nameTag) out.name = item.nameTag;
+  const lore = item.getLore();
+  if (lore.length) out.lore = lore.map((line) => String(line));
+  const durability = componentOf(item, "minecraft:durability");
+  if (durability && durability.damage > 0) out.damage = durability.damage;
+  const enchantable = componentOf(item, "minecraft:enchantable");
+  const enchantments = enchantable ? enchantable.getEnchantments() : [];
+  if (enchantments.length) out.enchantments = enchantments.map((e) => ({ id: e.type.id, level: e.level }));
+  return out;
+}
+
+/** An ItemStack from a stored item; what could not be reapplied goes into `notes` under `where`. */
+function restoreItem(rec, where, notes) {
+  if (!rec) return undefined;
+  let item;
+  try {
+    item = new ItemStack(rec.id, rec.amount);
+  } catch (e) {
+    notes.push(`${where}: ${rec.id} x${rec.amount} not restored (${e})`);
+    return undefined;
+  }
+  if (rec.name) item.nameTag = rec.name;
+  if (rec.lore) item.setLore(rec.lore);
+  if (rec.damage) {
+    const durability = componentOf(item, "minecraft:durability");
+    if (durability) durability.damage = rec.damage;
+    else notes.push(`${where}: ${rec.id} has no durability now; damage ${rec.damage} not restored`);
+  }
+  for (const e of rec.enchantments ?? []) {
+    try {
+      const enchantable = componentOf(item, "minecraft:enchantable");
+      if (!enchantable) throw new Error("not enchantable");
+      enchantable.addEnchantment({ type: new EnchantmentType(e.id), level: e.level });
+    } catch (err) {
+      notes.push(`${where}: ${rec.id} enchantment ${e.id} ${e.level} not restored (${err})`);
+    }
+  }
+  return item;
+}
+
+/** A box `radius` around the anchor (block corners, inclusive), its rows kept inside the dimension's height range. */
+function sceneBox(dim, at, radius) {
+  const range = dim.heightRange;
+  const cx = Math.floor(at.x);
+  const cy = Math.floor(at.y);
+  const cz = Math.floor(at.z);
+  return {
+    min: { x: cx - radius, y: Math.max(range.min, cy - radius), z: cz - radius },
+    max: { x: cx + radius, y: Math.min(range.max - 1, cy + radius), z: cz + radius },
+  };
+}
+
+/** Non-player entities inside a box. */
+function entitiesInBox(dim, box) {
+  const volume = { x: box.max.x - box.min.x + 1, y: box.max.y - box.min.y + 1, z: box.max.z - box.min.z + 1 };
+  return dim.getEntities({ location: box.min, volume }).filter((e) => e.typeId !== "minecraft:player");
+}
+
+const SCENE_ATTRIBUTES = [
+  ["health", "minecraft:health"],
+  ["hunger", "minecraft:player.hunger"],
+  ["saturation", "minecraft:player.saturation"],
+];
+
+function sceneSave(q) {
+  const name = sceneName(q);
+  const radius = q.radius ?? 8;
+  if (!Number.isInteger(radius) || radius < 0 || radius > SCENE_MAX_RADIUS) {
+    throw queryError("bad_radius", `radius must be a whole number from 0 to ${SCENE_MAX_RADIUS}, got ${radius}`);
+  }
+  const p = thePlayer();
+  if (!p) throw new Error("no player in the world");
+  const { dim, at } = anchor(q);
+  const box = sceneBox(dim, at, radius);
+  const notes = [];
+  const structureId = sceneStructure(name);
+  const manager = world.structureManager;
+  const hadStructure = manager.get(structureId) !== undefined;
+  const overwritten = hadStructure || world.getDynamicProperty(SCENE_PROP + name) !== undefined;
+  if (hadStructure) manager.delete(structureId);
+  manager.createFromWorld(structureId, dim, box.min, box.max, { includeBlocks: true, includeEntities: true, saveMode: "World" });
+  const container = componentOf(p, "minecraft:inventory")?.container;
+  const equippable = componentOf(p, "minecraft:equippable");
+  const slots = [];
+  for (let i = 0; i < (container?.size ?? 0); i++) slots.push(sceneItem(container.getItem(i)));
+  const equipment = {};
+  for (const slot of EQUIPMENT_SLOTS) equipment[slot] = sceneItem(equippable?.getEquipment(slot));
+  const saved = {
+    location: p.location,
+    rotation: p.getRotation(),
+    dimension: p.dimension.id,
+    gameMode: p.getGameMode(),
+    selectedSlot: p.selectedSlotIndex,
+    slots,
+    equipment,
+  };
+  for (const [key, id] of SCENE_ATTRIBUTES) {
+    const attribute = componentOf(p, id);
+    if (attribute && typeof attribute.currentValue === "number") saved[key] = attribute.currentValue;
+  }
+  const weather = WEATHER.get(dim.id);
+  if (weather === undefined) notes.push("weather unknown (no weather change seen since the helper started); scene_reset leaves it as it is");
+  const scene = { v: 1, name, savedAt: Date.now(), structure: structureId, dimension: dim.id, box, player: saved, timeOfDay: world.getTimeOfDay() };
+  if (weather !== undefined) scene.weather = weather;
+  writeScene(name, scene);
+  return {
+    name,
+    overwritten,
+    dimension: dim.id,
+    box,
+    entities: entitiesInBox(dim, box).length,
+    items: slots.filter(Boolean).length + Object.values(equipment).filter(Boolean).length,
+    notes,
+  };
+}
+
+/** Resolve after one game tick. */
+const nextTick = () => new Promise((resolve) => system.run(resolve));
+/** Ticks scene_reset waits for the box's chunks to load after the teleport. */
+const SCENE_LOAD_TICKS = 100;
+
+async function sceneReset(q) {
+  const name = sceneName(q);
+  const scene = readScene(name);
+  if (!scene) throw queryError("no_scene", `no scene named ${name} in this world; scene_list lists the saved ones`);
+  const p = thePlayer();
+  if (!p) throw new Error("no player in the world");
+  const notes = [];
+  const restored = [];
+  const s = scene.player;
+  const boxDim = world.getDimension(scene.dimension);
+  const playerDim = world.getDimension(s.dimension);
+  const teleport = () => p.teleport(s.location, { dimension: playerDim, rotation: s.rotation, keepVelocity: false });
+  // Teleport first so the box's chunks load, then wait for them before placing the structure.
+  teleport();
+  const { min, max } = scene.box;
+  for (let t = 0; t < SCENE_LOAD_TICKS && !(blockAt(boxDim, min.x, min.y, min.z) && blockAt(boxDim, max.x, max.y, max.z)); t++) {
+    await nextTick();
+  }
+  let removedEntities = 0;
+  try {
+    for (const e of entitiesInBox(boxDim, scene.box)) {
+      e.remove();
+      removedEntities++;
+    }
+  } catch (e) {
+    notes.push(`entities in the box not all removed (${e})`);
+  }
+  try {
+    if (!world.structureManager.get(scene.structure)) throw new Error(`structure ${scene.structure} is missing`);
+    world.structureManager.place(scene.structure, boxDim, min, { includeBlocks: true, includeEntities: true });
+    restored.push("blocks", "entities");
+  } catch (e) {
+    notes.push(`blocks and entities not restored (${e})`);
+  }
+  // Again after placing, so the player stands where the scene says and not where a placed block pushed it.
+  teleport();
+  restored.push("position", "rotation", "dimension");
+  const container = componentOf(p, "minecraft:inventory")?.container;
+  if (container) {
+    container.clearAll();
+    s.slots.forEach((rec, i) => {
+      const item = restoreItem(rec, `slot ${i}`, notes);
+      if (item && i < container.size) container.setItem(i, item);
+    });
+    restored.push("inventory");
+  } else notes.push("the player has no inventory component; inventory not restored");
+  const equippable = componentOf(p, "minecraft:equippable");
+  if (equippable) {
+    for (const slot of EQUIPMENT_SLOTS) equippable.setEquipment(slot, restoreItem(s.equipment?.[slot], slot, notes));
+    restored.push("equipment");
+  } else notes.push("the player has no equippable component; armor and off hand not restored");
+  p.setGameMode(s.gameMode);
+  p.selectedSlotIndex = s.selectedSlot;
+  restored.push("gameMode", "selectedSlot");
+  for (const [key, id] of SCENE_ATTRIBUTES) {
+    if (s[key] === undefined) continue;
+    const attribute = componentOf(p, id);
+    if (attribute?.setCurrentValue) {
+      attribute.setCurrentValue(s[key]);
+      restored.push(key);
+    } else notes.push(`${key} not restored (no ${id} component)`);
+  }
+  for (const effect of p.getEffects()) p.removeEffect(effect.typeId);
+  restored.push("effects");
+  world.setTimeOfDay(scene.timeOfDay);
+  restored.push("timeOfDay");
+  if (scene.weather !== undefined) {
+    boxDim.setWeather(scene.weather);
+    restored.push("weather");
+  } else notes.push("weather was unknown when the scene was saved; left as it is");
+  return { name, dimension: scene.dimension, box: scene.box, removedEntities, restored, notes };
+}
+
+function sceneList() {
+  const scenes = [];
+  for (const id of world.getDynamicPropertyIds()) {
+    if (!id.startsWith(SCENE_PROP)) continue;
+    const name = id.slice(SCENE_PROP.length);
+    if (!SCENE_NAME.test(name)) continue;
+    try {
+      const scene = readScene(name);
+      scenes.push({
+        name,
+        savedAt: scene.savedAt,
+        dimension: scene.dimension,
+        box: scene.box,
+        position: scene.player.location,
+        structure: world.structureManager.get(scene.structure) !== undefined,
+      });
+    } catch (e) {
+      scenes.push({ name, error: String(e) });
+    }
+  }
+  return scenes.sort((a, b) => (a.name < b.name ? -1 : 1));
+}
+
+function sceneDelete(q) {
+  const name = sceneName(q);
+  const structureId = sceneStructure(name);
+  const hadScene = world.getDynamicProperty(SCENE_PROP + name) !== undefined;
+  const hadStructure = world.structureManager.get(structureId) !== undefined;
+  if (!hadScene && !hadStructure) throw queryError("no_scene", `no scene named ${name} in this world`);
+  dropSceneProps(name);
+  if (hadStructure) world.structureManager.delete(structureId);
+  return { name, deleted: true };
+}
+
+Object.assign(HANDLERS, { scene_save: sceneSave, scene_reset: sceneReset, scene_list: sceneList, scene_delete: sceneDelete });

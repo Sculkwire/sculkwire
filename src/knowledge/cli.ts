@@ -1,4 +1,4 @@
-/** `sculk knowledge update|status`, `sculk docs|api|component|changelog <query>`. */
+/** `sculk knowledge update|status`, `sculk docs|api|component|changelog <query>`, `sculk molang <expression>`. */
 import { parseArgs } from "node:util";
 import { type CliCommand, err, out } from "../core/cli.ts";
 import { ExitCode } from "../core/diagnostic.ts";
@@ -7,6 +7,7 @@ import { type Channel, CHANNELS, isChannel } from "../core/version.ts";
 import { searchChangelogs } from "./changelog.ts";
 import { DOCS_ATTRIBUTION, searchDocs } from "./docs.ts";
 import { componentLookup } from "./lookups.ts";
+import { formatMolangResult, molangEval, type MolangValue } from "./molangeval.ts";
 import { formatRockide } from "./rockide.ts";
 import { apiLookup } from "./scriptapi.ts";
 import { formatSources, knowledgeStatus, updateKnowledge } from "./store.ts";
@@ -209,6 +210,66 @@ export const commands: CliCommand[] = [
       }
       emit(p.json, r, lines.join("\n"));
       return r.hits.length || r.articles?.length ? ExitCode.ok : ExitCode.findings;
+    },
+  ),
+  command(
+    "molang",
+    "Evaluate a Molang expression offline with the game's rules (32-bit floats, degrees, unset variable reads give 0)",
+    "<expression> [--query name=value]... [--var name=value]... [--samples query:from:to:step] [--seed N] [--channel stable|preview] [--json] [--offline]",
+    async (args) => {
+      const { values, positionals } = parseArgs({
+        args,
+        allowPositionals: true,
+        options: {
+          query: { type: "string", short: "q", multiple: true },
+          var: { type: "string", short: "v", multiple: true },
+          samples: { type: "string" },
+          seed: { type: "string" },
+          channel: { type: "string", short: "c", default: "stable" },
+          json: { type: "boolean", default: false },
+          offline: { type: "boolean", default: false },
+        },
+      });
+      const expression = positionals.join(" ").trim();
+      if (!expression) throw new UsageError("missing expression");
+      const channel = String(values.channel);
+      if (!isChannel(channel)) throw new UsageError(`--channel must be stable or preview, got ${channel}`);
+      const pairs = (list: string[] | undefined, flag: string) =>
+        Object.fromEntries(
+          (list ?? []).map((pair) => {
+            const eq = pair.indexOf("=");
+            if (eq <= 0) throw new UsageError(`--${flag} takes name=value, got ${pair}`);
+            const raw = pair.slice(eq + 1);
+            const n = Number(raw);
+            return [pair.slice(0, eq), raw.trim() !== "" && Number.isFinite(n) ? n : raw.replace(/^'(.*)'$/, "$1")];
+          }),
+        ) as Record<string, MolangValue>;
+      const queries = pairs(values.query, "query");
+      for (const [name, v] of Object.entries(queries)) {
+        if (typeof v !== "number") throw new UsageError(`--query ${name} needs a number, got ${v}`);
+      }
+      let samples;
+      if (values.samples !== undefined) {
+        const [query, ...nums] = values.samples.split(":");
+        const [from, to, step] = nums.map(Number);
+        if (!query || nums.length !== 3 || ![from, to, step].every((n) => Number.isFinite(n))) {
+          throw new UsageError(`--samples takes query:from:to:step, got ${values.samples}`);
+        }
+        samples = { query, from: from!, to: to!, step: step! };
+      }
+      const seed = values.seed === undefined ? undefined : Number(values.seed);
+      if (seed !== undefined && !Number.isInteger(seed)) throw new UsageError(`--seed must be an integer`);
+      const r = await molangEval({
+        expression,
+        queries: queries as Record<string, number>,
+        variables: pairs(values.var, "var"),
+        samples,
+        seed,
+        channel,
+        offline: values.offline === true,
+      });
+      emit(values.json === true, r, formatMolangResult(r));
+      return r.diagnostics.length ? ExitCode.findings : ExitCode.ok;
     },
   ),
 ];

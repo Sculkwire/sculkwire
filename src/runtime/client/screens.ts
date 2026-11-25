@@ -676,3 +676,107 @@ function fixedPress(t: Touch, kind: ScreenKind, n: number, wrongWorld: boolean):
       return t.key("Escape");
   }
 }
+
+/** How long `leaveWorld` tries by default. */
+export const LEAVE_TIMEOUT_MS = 45_000;
+
+export interface LeaveOptions {
+  /** Give up after this long (default `LEAVE_TIMEOUT_MS`). */
+  timeoutMs?: number;
+  /** State of the reads before the walk started. */
+  screens?: ScreenState;
+  join?: JoinState;
+}
+
+export interface LeaveResult {
+  /** The game left the world and shows a menu (start, Play or the connection-error screen). */
+  left: boolean;
+  /** What was pressed, in order, with the screen it was pressed on. */
+  steps: string[];
+  presses: number;
+  screens: ScreenState;
+  join: JoinState;
+  /** Why it stopped while the world was still open. */
+  reason?: string;
+}
+
+/**
+ * Save & Quit like a player: leave the world the game has open through its pause menu, so the game saves it, and wait
+ * for the start or Play screen. In the world Escape opens the pause menu; on the pause menu Save & Quit is pressed by its
+ * name through the in-game agent's UI, else clicked at its known place with a background mouse, never pressed near it by
+ * guess (through the agent a pixel next to it may be a store entry). Chat and other screens over the world get Escape;
+ * loading (saving) screens are waited out. Gives up after `timeoutMs`, and after Save & Quit failed to press twice.
+ */
+export async function leaveWorld(io: RecoveryIO, opts: LeaveOptions = {}): Promise<LeaveResult> {
+  const timeoutMs = opts.timeoutMs ?? LEAVE_TIMEOUT_MS;
+  const deadline = io.now() + timeoutMs;
+  let screens = opts.screens ?? NO_SCREENS;
+  let join = opts.join ?? NO_JOIN_YET;
+  const steps: string[] = [];
+  let presses = 0;
+  let uiFailures = 0;
+  let uiDown = false;
+  let seenChanges = -1;
+  let since = io.now();
+  let pressed: { at: number; patienceMs: number } | undefined;
+  let failedQuits = 0;
+  const uiRoute = (): UiRecovery | undefined => (uiDown ? undefined : io.ui?.(io.sleep));
+  // Save & Quit through the agent is pressed by name only, so no click needs the frame's size.
+  const touches = touchRoute(io, uiRoute, () => undefined);
+  const done = (left: boolean, reason?: string): LeaveResult => ({ left, steps, presses, screens, join, ...(reason ? { reason } : {}) });
+
+  for (;;) {
+    if (!(await io.alive())) return done(false, "the game stopped before it left the world");
+    const text = await io.readLog();
+    if (text) {
+      screens = screensInLog(text, screens);
+      join = joinStateInLog(text, join);
+    }
+    const ui = uiRoute();
+    if (ui) {
+      const screen = await ui.screen().catch(() => undefined);
+      if (screen) {
+        screens = screensFromUi(screen, screens);
+        uiFailures = 0;
+      } else if (++uiFailures >= 2) {
+        uiDown = true;
+        steps.push("the agent's UI stopped answering: back to the log and the keyboard route");
+      }
+    }
+    const kind = currentScreen(screens);
+    if (!screens.inWorld && (kind === "start" || kind === "play" || kind === "disconnect")) return done(true);
+    if (io.now() > deadline) return done(false, `the game did not leave the world within ${Math.round(timeoutMs / 1000)} s (last screen: ${kind})`);
+    if (screens.changes !== seenChanges) {
+      seenChanges = screens.changes;
+      since = io.now();
+      pressed = undefined;
+    }
+    const waiting =
+      kind === "loading" ||
+      kind === "start" ||
+      kind === "play" ||
+      io.now() - since < (kind === "unknown" ? 1000 : SETTLE_MS[kind]) ||
+      (pressed !== undefined && io.now() - pressed.at < pressed.patienceMs);
+    if (waiting) {
+      await io.sleep(300);
+      continue;
+    }
+    let press: Press;
+    if (kind === "pause") {
+      if (!touches.canClick()) return done(false, "Save & Quit cannot be pressed: no in-game agent UI and no background mouse reach this game");
+      press = touches.named("Save & Quit", ["Save & Quit"], LAYOUT.saveAndQuit, OPEN_PATIENCE_MS);
+    } else {
+      // In the world Escape opens the pause menu; over chat or any other screen it closes that screen first.
+      press = touches.key("Escape");
+    }
+    steps.push(`${kind}: ${press.label}`);
+    try {
+      await press.run();
+      presses++;
+    } catch (e) {
+      steps.push(`${kind}: ${press.label} failed: ${errorMessage(e)}`);
+      if (kind === "pause" && ++failedQuits >= 2) return done(false, `Save & Quit could not be pressed: ${errorMessage(e)}`);
+    }
+    pressed = { at: io.now(), patienceMs: press.patienceMs ?? PATIENCE_MS };
+  }
+}

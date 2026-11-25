@@ -2,8 +2,9 @@
  * The worlds of the active user and the life of sculkwire's test worlds: the kept marker, removal of stale ones,
  * deletion of one, and a test world copied from one of the user's worlds.
  *
- * Only a folder whose name AND level name both start with `sculkwire-` is ever written or deleted (the live-game rule:
- * never touch the user's own worlds). A user's world is only read, to copy it, and only when the user picked it.
+ * Only a folder whose name AND level name both start with `sculkwire-` is ever written or deleted here (the live-game
+ * rule: never touch the user's own worlds). A user's world is read to copy it, and only when the user picked it; the one
+ * world the user chose as their dev world is entered by `enterUserWorld` (world.ts), never deleted.
  */
 import { cp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -232,18 +233,26 @@ export interface CopyOptions {
 }
 
 /**
+ * The one world whose level id, else whose level name, is `wanted`. Throws when none is, and when several share the
+ * name (pass the level id of one).
+ */
+export async function findWorld(install: ClientInstall, wanted: string): Promise<WorldInfo> {
+  const all = await scanWorlds(install, false);
+  const byId = all.filter((w) => w.levelId === wanted);
+  const matches = byId.length > 0 ? byId : all.filter((w) => w.name === wanted);
+  if (matches.length === 0) throw new Error(`no world named or with level id "${wanted}" in ${install.label}; game_worlds lists them`);
+  if (matches.length > 1) {
+    throw new Error(`${matches.length} worlds are named "${wanted}"; pass the level id of one: ${matches.map((w) => `${w.levelId} (last played ${w.lastPlayed.toISOString()})`).join(", ")}`);
+  }
+  return matches[0] as WorldInfo;
+}
+
+/**
  * Copy one of the user's worlds (or a test world) to the test world `sculkwire-<name>`, replacing an older one. The
  * source is only read. The copy gets the new name, single player with cheats on, the icon and the kept marker.
  */
 export async function copyWorld(install: ClientInstall, opts: CopyOptions): Promise<{ levelId: string; name: string; dir: string }> {
-  const all = await scanWorlds(install, false);
-  const byId = all.filter((w) => w.levelId === opts.from);
-  const matches = byId.length > 0 ? byId : all.filter((w) => w.name === opts.from);
-  if (matches.length === 0) throw new Error(`no world named or with level id "${opts.from}" in ${install.label}; game_worlds lists them`);
-  if (matches.length > 1) {
-    throw new Error(`${matches.length} worlds are named "${opts.from}"; pass the level id of one: ${matches.map((w) => `${w.levelId} (last played ${w.lastPlayed.toISOString()})`).join(", ")}`);
-  }
-  const [source] = matches as [WorldInfo];
+  const source = await findWorld(install, opts.from);
   const name = worldName(opts.name);
   const levelId = levelIdFor(name);
   if (!levelId.startsWith(WORLD_PREFIX)) throw new WorldRefused(`refusing to write world folder ${levelId}`);
@@ -265,10 +274,13 @@ export async function copyWorld(install: ClientInstall, opts: CopyOptions): Prom
   return world;
 }
 
-/** One line of a world list: name, folder, mode, last played, size, and what sculkwire may do with it. */
-export function worldLine(w: WorldInfo, loaded?: string): string {
+/**
+ * One line of a world list: name, folder, mode, last played, size, and what sculkwire may do with it. `devWorld` is
+ * the level id of the user's saved dev world.
+ */
+export function worldLine(w: WorldInfo, loaded?: string, devWorld?: string): string {
   const tags = [
-    w.sculkwire ? "sculkwire" : "yours, never changed",
+    w.sculkwire ? "sculkwire" : w.levelId === devWorld ? "yours, your default dev world" : "yours, never changed",
     ...(w.kept ? ["kept"] : []),
     ...(w.copiedFrom ? [`copy of ${w.copiedFrom}`] : []),
     ...(w.levelId === loaded ? ["loaded"] : []),

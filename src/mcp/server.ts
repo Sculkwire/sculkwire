@@ -3,19 +3,44 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { setBackgroundDownloads } from "../core/background.ts";
+import { UsageError } from "../core/errors.ts";
 import { VERSION } from "../core/meta.ts";
 import { runShutdown } from "../core/shutdown.ts";
-import { loadExtensions, registerExtension } from "../extensions/index.ts";
+import { type Extension, loadExtensions, registerExtension } from "../extensions/index.ts";
 import { FEATURES, wireFeatures } from "../features.ts";
 import { autoUpdate } from "../update/auto.ts";
 import { detectRunning, markInUse } from "../update/layout.ts";
+import { registerPrompts } from "./prompts.ts";
 
-/** The server with every built-in feature, then the tools of every installed extension (`src/extensions/`). */
-export async function createServer(): Promise<McpServer> {
+/**
+ * The toolsets `SCULKWIRE_TOOLSETS` keeps (comma separated: built-in feature ids, extension names), or `undefined`
+ * for all of them when it is unset or empty. An id that names nothing is a usage error listing the valid ones.
+ */
+export function selectedToolsets(env: NodeJS.ProcessEnv, extensions: readonly Extension[]): Set<string> | undefined {
+  const ids = (env.SCULKWIRE_TOOLSETS ?? "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+  if (ids.length === 0) return undefined;
+  const valid = [...FEATURES.filter((f) => f.register).map((f) => f.id), ...extensions.filter((e) => e.register).map((e) => e.name)];
+  const unknown = ids.filter((id) => !valid.includes(id));
+  if (unknown.length > 0) {
+    throw new UsageError(`SCULKWIRE_TOOLSETS: unknown toolset ${unknown.map((id) => `"${id}"`).join(", ")}; valid: ${valid.join(", ")}`);
+  }
+  return new Set(ids);
+}
+
+/**
+ * The server with the built-in features, then the tools of every installed extension (`src/extensions/`), limited to
+ * the toolsets `SCULKWIRE_TOOLSETS` names. The prompts are always registered.
+ */
+export async function createServer(env: NodeJS.ProcessEnv = process.env): Promise<McpServer> {
+  const extensions = await loadExtensions();
+  const toolsets = selectedToolsets(env, extensions);
   const server = new McpServer(
     { name: "sculkwire", version: VERSION },
     {
-      capabilities: { logging: {} },
+      capabilities: { logging: {}, prompts: {} },
       instructions:
         "sculkwire: Minecraft Bedrock add-on development. Look up versioned docs, Script API, components and vanilla " +
         "examples before writing content; validate packs and fix every error by file and line; prove behaviour in the " +
@@ -23,8 +48,9 @@ export async function createServer(): Promise<McpServer> {
     },
   );
   wireFeatures();
-  for (const feature of FEATURES) feature.register?.(server);
-  for (const ext of await loadExtensions()) registerExtension(server, ext);
+  for (const feature of FEATURES) if (!toolsets || toolsets.has(feature.id)) feature.register?.(server);
+  for (const ext of extensions) if (!toolsets || toolsets.has(ext.name)) registerExtension(server, ext);
+  registerPrompts(server);
   return server;
 }
 

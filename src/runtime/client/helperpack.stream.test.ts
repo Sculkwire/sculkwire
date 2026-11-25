@@ -106,7 +106,7 @@ function loadHelper(entities: FakeEntity[], opts: { players?: FakePlayer[] } = {
       const e = entities.find((m) => m.id === id);
       return e ? asEntity(e) : undefined;
     },
-    afterEvents: Object.fromEntries(["projectileHitEntity", "projectileHitBlock", "entityDie", "entityHurt", "playerSpawn", "playerLeave", "dataDrivenEntityTrigger", "entityRemove"].map((n) => [n, on(n)])),
+    afterEvents: Object.fromEntries(["projectileHitEntity", "projectileHitBlock", "entityDie", "entityHurt", "playerSpawn", "playerLeave", "dataDrivenEntityTrigger", "entityRemove", "weatherChange"].map((n) => [n, on(n)])),
   };
   const system = {
     get currentTick() {

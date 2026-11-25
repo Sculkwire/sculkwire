@@ -1,10 +1,11 @@
 /** MCP tools over the versioned knowledge layer. Every result names the `{channel, version}` it came from. */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { channelSchema, ok } from "../core/mcp.ts";
+import { channelSchema, diagnosticSchema, ok } from "../core/mcp.ts";
 import { searchChangelogs } from "./changelog.ts";
 import { DOCS_ATTRIBUTION, searchDocs } from "./docs.ts";
 import { commandLookup, componentLookup, molangLookup, vanillaExample } from "./lookups.ts";
+import { formatMolangResult, MAX_SAMPLES, molangEval } from "./molangeval.ts";
 import { formatRockide } from "./rockide.ts";
 import { apiLookup } from "./scriptapi.ts";
 import { formatSources, sourceStatus } from "./store.ts";
@@ -220,6 +221,60 @@ export function register(server: McpServer): void {
         `${r.exact ? "" : "no exact match; "}${plural(r.entries.length, "entry")} (${r.channel} ${r.version})\n${lines.join("\n")}`,
         { ...r, entries: r.entries.map((e) => ({ ...e })) },
       );
+    },
+  );
+
+  const molangValue = z.union([z.number(), z.string()]);
+  server.registerTool(
+    "molang_eval",
+    {
+      title: "Molang eval",
+      description:
+        "Evaluate a Molang expression offline with the game's rules (pack min_engine_version 1.18.20+): 32-bit float " +
+        "results, degrees in math.sin/cos/asin/acos/atan/atan2, `??` as the lowest operator, right-associative `? :`, " +
+        "`&&` before `||`, assignments, `;` statements with `return` (none gives 0), `loop` with break/continue, and " +
+        "an unset variable/temp/context read stopping the whole expression at 0 (reported in `notes`). Query values " +
+        "come from `queries`; query names the channel's engine metadata does not know are listed in `unknownQueries` " +
+        "with near names. `samples` evaluates over a range of one query (an animation curve over anim_time). " +
+        "Entities, `->`, arrays, for_each and resources need the game and are refused with a diagnostic.",
+      inputSchema: {
+        expression: z.string().min(1),
+        queries: z
+          .record(z.string(), z.number())
+          .optional()
+          .describe("Query values by name: `anim_time`, `q.anim_time` or `query.anim_time`; call arguments are ignored"),
+        variables: z
+          .record(z.string(), molangValue)
+          .optional()
+          .describe("Values of `v.*`, `t.*` and `c.*` (long forms too); a bare name is a `variable.*`"),
+        samples: z
+          .object({
+            query: z.string().min(1).describe("Query the samples vary, e.g. `anim_time`"),
+            from: z.number(),
+            to: z.number(),
+            step: z.number().positive(),
+          })
+          .optional()
+          .describe(`Evaluate at from, from+step, … to (at most ${MAX_SAMPLES} points); each point starts from \`variables\` again`),
+        seed: z.number().int().optional().describe("Seed for math.random and math.die_roll, for repeatable results"),
+        channel,
+        offline,
+      },
+      outputSchema: {
+        channel: z.string(),
+        version: z.string().optional(),
+        samplesTag: z.string().optional(),
+        value: molangValue.optional().describe("absent when the expression does not load or `samples` was given; NaN and Infinity by name"),
+        values: z.array(z.object({ x: z.number(), value: molangValue, aborted: z.boolean() })).optional(),
+        aborted: z.boolean().describe("an unset variable was read, so the game stopped the expression at 0"),
+        notes: z.array(z.string()),
+        unknownQueries: z.array(z.object({ name: z.string(), suggestions: z.array(z.string()) })),
+        diagnostics: z.array(diagnosticSchema).describe("errors that stop the game from loading the expression"),
+      },
+    },
+    async (args) => {
+      const r = await molangEval(args);
+      return ok(formatMolangResult(r), r);
     },
   );
 

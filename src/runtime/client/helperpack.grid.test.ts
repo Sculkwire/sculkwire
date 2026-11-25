@@ -52,7 +52,7 @@ function loadHelper(blockAt: (x: number, y: number, z: number) => FakeBlock | un
   const fakeWorld = {
     getAllPlayers: () => [],
     getDimension: () => dim,
-    afterEvents: { projectileHitEntity: subscribe, projectileHitBlock: subscribe, entityDie: subscribe, entityHurt: subscribe, playerSpawn: subscribe, playerLeave: subscribe, dataDrivenEntityTrigger: subscribe, entityRemove: subscribe },
+    afterEvents: { projectileHitEntity: subscribe, projectileHitBlock: subscribe, entityDie: subscribe, entityHurt: subscribe, playerSpawn: subscribe, playerLeave: subscribe, dataDrivenEntityTrigger: subscribe, entityRemove: subscribe, weatherChange: subscribe },
   };
   const fakeSystem = {
     get currentTick() {

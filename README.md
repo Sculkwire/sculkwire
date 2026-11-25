@@ -33,17 +33,17 @@ Sculkwire gives your AI agent the Bedrock docs, a validator, a test server and t
 
 | Category | Tools |
 |---|---|
-| Knowledge | `docs_search`, `api_lookup`, `component_lookup`, `command_lookup`, `molang_lookup`, `vanilla_example`, `changelog_search`, `knowledge_versions` |
-| Validation | `validate_pack`, `validate_file` |
+| Knowledge | `docs_search`, `api_lookup`, `component_lookup`, `command_lookup`, `molang_lookup`, `molang_eval`, `vanilla_example`, `changelog_search`, `knowledge_versions` |
+| Validation | `validate_pack`, `validate_file`, `pack_fix_versions` |
 | Server | `bds_check`, `gametest_run`, `bds_session_start`, `bds_session_command`, `bds_session_logs`, `bds_session_stop`, `script_profile` |
-| Game | `game_launch`, `game_status`, `game_command`, `game_reload`, `game_log`, `game_screenshot`, `game_query`, `game_registry`, `game_input`, `game_input_lock`, `game_ui`, `game_settings`, `world_settings`, `game_worlds`, `game_stop` |
+| Game | `game_launch`, `game_status`, `game_command`, `game_reload`, `game_log`, `game_screenshot`, `game_query`, `game_registry`, `wait_until`, `game_events`, `scene_save`, `scene_reset`, `scene_list`, `game_input`, `game_input_lock`, `game_ui`, `game_settings`, `world_settings`, `game_worlds`, `game_stop` |
 | Player | `player_act`, `player_job`, `player_state`, `player_inventory` |
 | Containers and Crafting | `container`, `craft`, `interact`, `screen` |
 | Engine | `engine_attach`, `engine_status`, `engine_command`, `engine_player`, `engine_tick`, `engine_screenshot` |
 | Game Files | `game_builds`, `game_vanilla_packs`, `game_extract_pack` |
 | Setup | `sculkwire_version` |
 
-The [tool reference](docs/tools.md) explains each tool and its inputs.
+The [tool reference](docs/tools.md) explains each tool and its inputs, the MCP prompts, and `SCULKWIRE_TOOLSETS`.
 
 ## Quick Start
 

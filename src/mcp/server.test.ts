@@ -47,6 +47,85 @@ describe("tools/list", () => {
   });
 });
 
+/** A connected client of `createServer(env)`, closed by the returned `close`. */
+async function connect(env: NodeJS.ProcessEnv): Promise<{ client: Client; close: () => Promise<void> }> {
+  const server = await createServer(env);
+  const client = new Client({ name: "test", version: "0" });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(a), client.connect(b)]);
+  return {
+    client,
+    close: async () => {
+      await client.close();
+      await server.close();
+    },
+  };
+}
+
+/** The tools `docs/tools.md` documents between two `## ` headings. */
+function documentedBetween(from: string, to: string): string[] {
+  const doc = readFileSync(fileURLToPath(new URL("../../docs/tools.md", import.meta.url)), "utf8");
+  const section = doc.slice(doc.indexOf(`\n## ${from}\n`), doc.indexOf(`\n## ${to}\n`));
+  return [...section.matchAll(/^### (\S+)\s*$/gm)].map((m) => m[1] ?? "");
+}
+
+describe("SCULKWIRE_TOOLSETS", () => {
+  it("lists only the tools of the named toolsets, and still every prompt", async () => {
+    const { client, close } = await connect({ ...process.env, SCULKWIRE_TOOLSETS: "knowledge, validate" });
+    try {
+      const names = (await client.listTools()).tools.map((tool) => tool.name).sort();
+      expect(names).toEqual(documentedBetween("Knowledge", "Bedrock Dedicated Server").sort());
+      expect(names).toContain("docs_search");
+      expect(names).toContain("validate_pack");
+      expect((await client.listPrompts()).prompts).toHaveLength(4);
+    } finally {
+      await close();
+    }
+  });
+
+  it("refuses an unknown toolset and names the valid ones", async () => {
+    await expect(createServer({ ...process.env, SCULKWIRE_TOOLSETS: "knowledge,gaem" })).rejects.toThrow(
+      'SCULKWIRE_TOOLSETS: unknown toolset "gaem"; valid: knowledge, validate, bds, game, engine, gamefiles, update',
+    );
+  });
+});
+
+describe("prompts", () => {
+  it("lists the four flows and fills their arguments into exact tool calls", async () => {
+    const { client, close } = await connect(process.env);
+    try {
+      expect(client.getServerCapabilities()?.prompts).toBeDefined();
+      const { prompts } = await client.listPrompts();
+      expect(prompts.map((prompt) => prompt.name).sort()).toEqual(["debug_pack_errors", "new_content", "playtest_feature", "test_on_server"]);
+      const playtest = prompts.find((prompt) => prompt.name === "playtest_feature");
+      expect(playtest?.arguments?.map((arg) => [arg.name, arg.required ?? false])).toEqual([
+        ["project", true],
+        ["feature", true],
+        ["scene", false],
+      ]);
+
+      const text = async (name: string, args: Record<string, string>) => {
+        const { messages } = await client.getPrompt({ name, arguments: args });
+        const content = messages[0]?.content;
+        return content?.type === "text" ? content.text : "";
+      };
+      const played = await text("playtest_feature", { project: "/packs/My Addon", feature: "the zombie drops a gem", scene: "arena" });
+      expect(played).toContain('game_launch {"project": "/packs/My Addon", "keep": true}');
+      expect(played).toContain('scene_reset {"name": "arena"}');
+      expect(played).toContain("the zombie drops a gem");
+      // Without a scene the default name is used.
+      expect(await text("playtest_feature", { project: "p", feature: "f" })).toContain('scene_save {"name": "playtest"}');
+      expect(await text("debug_pack_errors", { project: "p" })).toContain('game_reload {"all": true}');
+      expect(await text("test_on_server", { project: "p" })).toContain('gametest_run {"path": "p"}');
+      expect(await text("new_content", { project: "p", what: "a ruby block" })).toContain('pack_fix_versions {"path": "p"}');
+      // A required argument left out is refused.
+      await expect(client.getPrompt({ name: "new_content", arguments: { project: "p" } })).rejects.toThrow();
+    } finally {
+      await close();
+    }
+  });
+});
+
 // A kernel pipe needs a shell: Node connects its own children through socket pairs, whose buffers hold the whole answer.
 describe.skipIf(process.platform === "win32")("sculk mcp over stdio", () => {
   it("answers the requests a client wrote before closing stdin, even to a reader slower than the pipe buffer", async () => {

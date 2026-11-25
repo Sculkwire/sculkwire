@@ -735,6 +735,34 @@ export async function evaluate(value: unknown, choice: SchemaChoice, kindKey: st
   return fallback ? { issues, fallback } : { issues };
 }
 
+/**
+ * Every `format_version` the schemas know for a file, oldest first: the routed rockide schema's `format_version`
+ * enum, else the engine schema folders of the file's kind (`legacy` and beta folders excluded). Empty when no schema
+ * names versions for it.
+ */
+export async function knownFormatVersions(packKind: PackKind, rel: string, kind: FileKind, value: unknown, opts: SchemaOptions): Promise<string[]> {
+  if (kind === "manifest" || !isPlainObject(value)) return [];
+  const found = new Set<string>();
+  const rockide = await rockideChoice(packKind, rel, opts);
+  if (rockide) {
+    try {
+      const validate = await runtime.validator(rockide, opts);
+      validate({ ...value, format_version: "sculkwire:none" });
+      const e = (validate.errors ?? []).find((x) => x.instancePath === "/format_version" && x.keyword === "enum");
+      for (const v of (e?.params.allowedValues as unknown[] | undefined) ?? []) if (typeof v === "string" && versionTuple(v).length) found.add(v);
+    } catch {
+      // a schema that cannot compile names no versions
+    }
+  }
+  const engineBase = engineSchemasBase(opts);
+  if (!found.size && engineBase) {
+    for (const c of (await engineIndex(engineBase)).get(kind) ?? []) {
+      if (c.versionText !== "legacy" && subtreeExists(value, c.root.pointer)) found.add(c.versionText);
+    }
+  }
+  return [...found].sort((a, b) => compareTuples(versionTuple(a), versionTuple(b)));
+}
+
 /** What vanilla content tells about the schemas: complaints it triggers (gaps). */
 export interface Calibration {
   signatures: Set<string>;

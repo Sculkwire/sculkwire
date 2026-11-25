@@ -7,6 +7,8 @@ import {
   kindOfRoute,
   kindOfScreenName,
   LAYOUT,
+  LEAVE_TIMEOUT_MS,
+  leaveWorld,
   localWorldTiles,
   NO_SCREENS,
   playTab,
@@ -743,5 +745,62 @@ describe("join recovery through the agent's UI", () => {
     expect(result.steps.some((step) => step.startsWith("the agent's UI stopped answering"))).toBe(true);
     expect(game.inputs.length).toBeGreaterThan(0);
     expect(game.inputs.every((entry) => !entry.startsWith("ui:"))).toBe(true);
+  });
+});
+
+describe("Save & Quit before a stop", () => {
+  /** A game in the user's world, and the screen state the bridge has read so far. */
+  function inWorld(opts: Partial<FakeGameOptions> = {}): { game: FakeGame; screens: ScreenState } {
+    const game = new FakeGame({ start: "start", ...opts });
+    game.openWorld("Xy+z=");
+    const screens = screensInLog(`${game.history()}\n${game.pending}`);
+    game.pending = "";
+    return { game, screens };
+  }
+
+  it("opens the pause menu with Escape and clicks Save & Quit with the background mouse", async () => {
+    const { game, screens } = inWorld();
+    const result = await leaveWorld(game.io(), { screens });
+    expect(result).toMatchObject({ left: true, presses: 2 });
+    expect(game.inputs).toEqual(["Escape", `click ${LAYOUT.saveAndQuit.x.toFixed(3)},${LAYOUT.saveAndQuit.y.toFixed(3)}`]);
+    expect(game.world).toBeUndefined();
+    // The pause menu is given its settle time first: a click in its first seconds lands on Resume Game.
+    expect(game.clock).toBeGreaterThanOrEqual(4000);
+  });
+
+  it("presses Save & Quit by its name through the agent's UI, never the store entry next to it", async () => {
+    const { game, screens } = inWorld({ ui: true, quiet: true });
+    const result = await leaveWorld(game.io(), { screens });
+    expect(result.left).toBe(true);
+    expect(game.inputs).toEqual(["ui:key Escape", "ui:press button.save_and_quit"]);
+  });
+
+  it("gives up, pressing nothing near it, when the pause menu lists no Save & Quit control", async () => {
+    const { game, screens } = inWorld({ ui: true, quiet: true, noQuitControl: true });
+    const result = await leaveWorld(game.io(), { screens });
+    expect(result.left).toBe(false);
+    expect(result.reason).toContain("Save & Quit could not be pressed");
+    expect(game.inputs.filter((entry) => entry.startsWith("ui:press") || entry.startsWith("ui:click"))).toEqual([]);
+    expect(game.world).toBe("Xy+z=");
+  });
+
+  it("says it cannot press Save & Quit without the agent or a mouse", async () => {
+    const { game, screens } = inWorld({ noMouse: true });
+    const result = await leaveWorld(game.io(), { screens });
+    expect(result).toMatchObject({ left: false, reason: "Save & Quit cannot be pressed: no in-game agent UI and no background mouse reach this game" });
+  });
+
+  it(`stops trying after ${LEAVE_TIMEOUT_MS / 1000} s when the game does not react`, async () => {
+    const { game, screens } = inWorld({ frozen: true });
+    const result = await leaveWorld(game.io(), { screens });
+    expect(result.left).toBe(false);
+    expect(result.reason).toContain(`within ${LEAVE_TIMEOUT_MS / 1000} s`);
+    expect(game.clock).toBeLessThanOrEqual(LEAVE_TIMEOUT_MS + 1000);
+  });
+
+  it("returns at once when the game is already out of the world", async () => {
+    const game = new FakeGame({ start: "start" });
+    const result = await leaveWorld(game.io(), { screens: screensInLog(game.history()) });
+    expect(result).toMatchObject({ left: true, presses: 0 });
   });
 });

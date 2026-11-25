@@ -2,6 +2,7 @@
 
 Every tool returns structured JSON plus a short text summary. Problems found in packs are always reported with a file, a line and a column, so an agent can jump straight to the fix.
 
+- [Prompts and Toolsets](#prompts-and-toolsets)
 - [Regolith Projects](#regolith-projects)
 - [Knowledge](#knowledge)
 - [Validation](#validation)
@@ -14,6 +15,35 @@ Every tool returns structured JSON plus a short text summary. Problems found in 
 - [sculkwire](#sculkwire)
 
 Most knowledge tools take `channel` (`stable` by default, or `preview`) and `offline` (default false, answer from the local cache only and never fetch). Every answer names the game version and bedrock-samples tag it describes.
+
+## Prompts and Toolsets
+
+### MCP Prompts
+
+The server offers MCP prompts (`prompts/list`, `prompts/get`): each one writes out a sculkwire flow as the tool calls to make, in order, with your arguments filled in. They are always offered, whatever `SCULKWIRE_TOOLSETS` keeps; each prompt's description names the toolsets its calls need.
+
+| Prompt | Arguments | Flow | Toolsets |
+|---|---|---|---|
+| `debug_pack_errors` | `project` | `validate_pack`, fix by file and line, repeat. With the game running (`game_status`): `game_reload {"all": true}`, `game_log`, then `game_query` or `wait_until` to confirm. Otherwise `bds_check` | `validate`, `game`, `bds` |
+| `playtest_feature` | `project`, `feature`, `scene` (optional, default `playtest`) | `game_launch {"keep": true}`, `scene_save` once and `scene_reset` on later runs, `game_events {"since": "now"}`, `player_act` or `game_command` to exercise the feature, `wait_until`, `game_events` and `game_query` to check it, `game_log`, `game_screenshot` | `game` |
+| `test_on_server` | `project` | `bds_check`, `gametest_run`, then `bds_session_start` and `script_profile` for slow scripts, `bds_session_stop` | `bds` |
+| `new_content` | `project`, `what` | `docs_search`, `component_lookup`, `api_lookup` and `vanilla_example` before writing, then `validate_file` per file, `pack_fix_versions` as a dry run, `validate_pack`, `bds_check` | `knowledge`, `validate`, `bds` |
+
+### Toolset Filter
+
+Set `SCULKWIRE_TOOLSETS` in the MCP server's environment to a comma-separated list of toolset ids to register only those tools; a client with a small tool budget then sees fewer tools. Unset or empty registers every tool. An extension's toolset id is its name. An id that names nothing stops the server at start with exit code 2 and a stderr line listing the valid ids.
+
+| Id | Tools |
+|---|---|
+| `knowledge` | [Knowledge](#knowledge) |
+| `validate` | [Validation](#validation) |
+| `bds` | [Bedrock Dedicated Server](#bedrock-dedicated-server) |
+| `game` | [Game Client](#game-client) (except `game_input_lock`, `game_settings`, `world_settings`, `game_ui`) and `player_act`, `player_job`, `player_state` |
+| `engine` | [Engine](#engine), [Containers and Crafting](#containers-and-crafting), `player_inventory`, `game_input_lock`, `game_settings`, `world_settings`, `game_ui`. They act on a running game, so keep `game` with it |
+| `gamefiles` | [Game Files](#game-files) |
+| `update` | [sculkwire](#sculkwire) |
+
+For example `SCULKWIRE_TOOLSETS=knowledge,validate,bds` keeps the tools that need no game client.
 
 ## Regolith Projects
 
@@ -92,6 +122,29 @@ Explains a Molang query or math function, e.g. `query.is_baby`, `q.is_baby`, `is
 | `limit` | Entries to return, 1 to 100 (default 20) |
 | `channel`, `offline` | As above |
 
+### molang_eval
+
+Evaluates a Molang expression offline with the game's rules, so a curve or a condition can be checked before it goes into a pack. The rules are those of packs with `min_engine_version` 1.18.20 or newer:
+
+- Every number is a 32-bit float (`0.1 + 0.2 == 0.3` is 1), and `math.sin`, `math.cos` take degrees while `math.asin`, `math.acos`, `math.atan`, `math.atan2` return degrees. Every `math.*` function of the engine metadata is implemented, the easing curves included.
+- `??` is the lowest operator (`v.b ?? 1 ? 7 : 8` is `v.b ?? (1 ? 7 : 8)`), `? :` groups to the right, `&&` comes before `||`, and comparisons before `==` and `!=`. `a ? b` without `:` gives 0 when `a` is false.
+- With a `;` the expression is a list of statements: the value is what `return` gives, and 0 without one. Assignments to `v.*` and `t.*` have a value (`v.a = (v.b = 3)`); `loop(count, {…})` rounds a fractional count up and supports `break` and `continue`. Strings only compare with `==` and `!=`.
+- Reading a `v.*`, `t.*` or `c.*` that nothing set stops the whole expression: the value is 0, `aborted` is true and `notes` names the variable. `v.x ?? 0` gives the fallback instead.
+- Division by zero gives 0, with a note. `math.mod(5, 0)` and `math.sqrt(-1)` give `"NaN"`, `math.ln(0)` gives `"-Infinity"`: JSON has no such numbers, so they come by name.
+
+Queries read the values in `queries`; a query without one reads 0, with a note. Every `query.*` name in the expression is checked against the channel's engine metadata: unknown names are listed in `unknownQueries` with near names (`q.anim_tme` → `query.anim_time`) and as a `molang.unknown-query` diagnostic, because the game does not load such an expression. Errors that stop the game from loading the expression (syntax, an unknown math function or wrong argument count, an assignment to a query, a string in arithmetic) come as `diagnostics` with a 1-based line and column in the expression, and `value` is then absent. Entities, `->`, arrays, `for_each` and resources (`geometry.*`, `texture.*`, `material.*`) need the game and are refused with a `molang.unsupported` diagnostic. When the metadata is not available (offline, nothing cached), the expression is still evaluated and a note says the query names were not checked.
+
+| Input | Description |
+|---|---|
+| `expression` | The Molang expression (required) |
+| `queries` | Query values by name: `anim_time`, `q.anim_time` or `query.anim_time`. Arguments of a query call are ignored |
+| `variables` | Values of `v.*`, `t.*` and `c.*` (long forms too; a bare name is a `variable.*`), numbers or strings |
+| `samples` | `{query, from, to, step}`: evaluate at `from`, `from + step`, ... up to `to`, at most 1000 points, e.g. an animation curve over `anim_time`. Each point starts again from `variables` |
+| `seed` | Seed for `math.random`, `math.random_integer`, `math.die_roll` and `math.die_roll_integer`, for repeatable results; without it they differ on each call |
+| `channel`, `offline` | As above |
+
+Result: `value` (a number, or a string), or with `samples` `values` (`[{x, value, aborted}]`); `aborted`; `notes`; `unknownQueries` (`[{name, suggestions}]`); `diagnostics`; `channel`, `version` and `samplesTag` of the metadata used. CLI: `sculk molang '<expression>' [--query name=value]... [--var name=value]... [--samples query:from:to:step] [--seed N]` (put `--` before an expression that starts with `-`); exit code 1 when the expression does not load.
+
 ### component_lookup
 
 Explains a component such as `minecraft:behavior.tempt` or `minecraft:geometry`. Returns the engine documentation with every property's type, default and description (`docs`), the engine JSON schemas for each `format_version` (`engineSchemas`), and the [rockide/schemas](https://github.com/rockide/schemas) definition with its description (`rockide`). When nothing matches, `suggestions` lists close ids.
@@ -128,7 +181,7 @@ Searches the official Bedrock changelogs, the release changelogs for `stable` an
 
 ## Validation
 
-Both validation tools return `ok` (no diagnostic reaches `fail_on`), `root`, `target` (channel and version), `packs`, `filesChecked`, `checks`, `summary` (errors, warnings, infos), `diagnostics`, `truncated` when `max_diagnostics` cut the list, `schemaSources` (files checked per schema source), `vanilla`, `rockide` (the rockide/schemas copy used: `root`, `release`, `commit`, `latest`, or a `note` when none was) and, for a Regolith project, `regolith`: the `profile`, `built` (true when rgl's last build output was validated), `builtAt` (when rgl last ran, if it can be told) and a `message`. Every diagnostic has a file, a 1-based range and a stable code.
+`validate_pack` and `validate_file` return `ok` (no diagnostic reaches `fail_on`), `root`, `target` (channel and version), `packs`, `filesChecked`, `checks`, `summary` (errors, warnings, infos), `diagnostics`, `truncated` when `max_diagnostics` cut the list, `schemaSources` (files checked per schema source), `vanilla`, `rockide` (the rockide/schemas copy used: `root`, `release`, `commit`, `latest`, or a `note` when none was) and, for a Regolith project, `regolith`: the `profile`, `built` (true when rgl's last build output was validated), `builtAt` (when rgl last ran, if it can be told) and a `message`. Every diagnostic has a file, a 1-based range and a stable code.
 
 Schemas come from two sources. The first that covers a file is used:
 
@@ -139,7 +192,7 @@ On vanilla 1.26.60.5 (7862 JSON files) rockide covers 7476 files. The other 386 
 
 The order was measured on bedrock-samples 1.26.60.5 (rockide commit `a532d3b`). Errors injected into vanilla entity, block and item files (an unknown component, an unknown field in a component, a wrong value type; 886 cases) were caught 86% of the time with rockide first and 18% with the engine first: the engine dump admits unknown components and fields. False positives on vanilla files held out of calibration (3816 files, calibrated on the other half) went from 15 to 24, all unknown or removed fields in older entity files that full calibration against vanilla then demotes to `schema.gap`. On `test/fixtures` and a real add-on both rockide orders gave the same results; the add-on's flat `match_tool` loot condition with `levels: {range_min}` (the form Mojang documents) was a rockide false positive, now accepted.
 
-These inputs are shared.
+`validate_pack` and `validate_file` share these inputs.
 
 | Input | Description |
 |---|---|
@@ -171,6 +224,26 @@ Checks one file in the context of its pack and the sibling packs, and returns on
 |---|---|
 | `path` | A file inside a pack (required) |
 | `content` | Unsaved text to check instead of the file on disk |
+
+### pack_fix_versions
+
+Raises outdated version fields in every behavior and resource pack under a folder. It is a dry run unless `apply` is true: the result lists what would change, and nothing is written. The targets come from the [knowledge version pins](#knowledge_versions) of the channel. For a script module the pin is checked against the module versions the game ships (bedrock-samples metadata). When the game does not ship the pinned version yet, the newest version of the same kind that it ships is used.
+
+- `header.min_engine_version` in each manifest moves to the channel's bedrock-samples release version (`1.26.60`), only when it is lower. It does not follow the newest hotfix a changelog names, because a client older than a pack's `min_engine_version` refuses the pack; `gameVersion` (the `version` in `game_status`) lowers the target to the game you test on.
+- Script module dependencies (`module_name` such as `@minecraft/server` or `@minecraft/server-ui`) move to the newest version for the channel. A dependency on a `-beta` version moves to the newest beta and a stable one to the newest stable release; a version is never lowered. npm-only libraries (`@minecraft/math`, `@minecraft/vanilla-data`) are skipped: they belong in your bundle, not in the manifest.
+- A content file's `format_version` is never raised blindly, because fields change between versions. By default a file whose schema knows a newer `format_version` is listed under `suggestions` and left alone. The newer version is the newest one in rockide's `format_version` list for that file (else the newest engine schema folder of its kind), and never newer than the game. With `formatVersions: true` the tool validates each file under the newer version (JSON and schema checks) and moves it only when no error appears that the file did not already have; otherwise the file goes to `skipped` with the first new error.
+
+Each edit replaces only the value's text, so formatting, comments and the layout of a `min_engine_version` array stay. For a [Regolith project](#regolith-projects) whose profile runs filters, the source packs are edited, never rgl's output in `.regolith/tmp`, and `regolith` says so: run `rgl run` afterwards. The CLI form is `sculk validate fix-versions <path> [--apply] [--channel <c>] [--format-versions] [--game-version <v>] [--json]`. It exits 1 when a dry run finds changes.
+
+| Input | Description |
+|---|---|
+| `path` | The project, add-on or pack folder (required) |
+| `apply` | Write the changes (default false: dry run) |
+| `channel` | `stable` (default) or `preview`: whose versions to move to |
+| `formatVersions` | Also move content-file `format_version`s that still validate under the newer version (default false: `suggestions` only) |
+| `gameVersion` | The game the packs must load on, such as `1.26.63`: `min_engine_version` and `format_version`s never go past it |
+
+The result has `root`, `channel`, `target.gameVersion` (the `min_engine_version` target and the `format_version` cap), `applied` (false for a dry run), `changes` (`file`, `pointer`, `from`, `to`, `applied`), `suggestions` and `skipped` (`file`, `pointer`, `from`, `to`, `reason`), and `regolith` for a Regolith project whose profile runs filters.
 
 ## Bedrock Dedicated Server
 
@@ -265,7 +338,7 @@ These tools drive the real Minecraft client. See [Game Client Setup](client.md) 
 
 ### game_launch
 
-Starts the game of one detected install (Windows, mcbe-gdk-installer, a Wine or Proton prefix such as Flarial, or `SCULKWIRE_MINECRAFT_DIR`) in a fresh test world named `sculkwire-<name>`, with your packs and the sculkwire helper pack turned on. The world is flat and creative, has cheats on, keeps time, weather and mob spawning frozen, and is single-player only (no LAN, Xbox Live or platform broadcast), so nobody can join it. The script debugger attaches by itself. Only the chosen install's game is managed, so a game the user plays from another launcher is left alone. On Linux the agent's input stays inside gamescope; on Windows it uses the system keyboard and mouse while the game window is in the foreground and stops when you switch away (see [Platform Support](client.md#platform-support)).
+Starts the game of one detected install (Windows, mcbe-gdk-installer, a Wine or Proton prefix such as Flarial, or `SCULKWIRE_MINECRAFT_DIR`) with your packs and the sculkwire helper pack turned on, in your own dev world when you chose one (see [Your Own Dev World](#your-own-dev-world)), else in a fresh test world named `sculkwire-<name>`. A test world is flat and creative, has cheats on, keeps time, weather and mob spawning frozen, and is single-player only (no LAN, Xbox Live or platform broadcast), so nobody can join it. The script debugger attaches by itself. Only the chosen install's game is managed, so a game the user plays from another launcher is left alone. On Linux the agent's input stays inside gamescope; on Windows it uses the system keyboard and mouse while the game window is in the foreground and stops when you switch away (see [Platform Support](client.md#platform-support)).
 
 For a [Regolith project](#regolith-projects) whose profile runs filters, run `rgl run` (or keep `rgl watch` running) first: the game gets what rgl last built, so scripts produced by filters such as a TypeScript compiler are what it loads. When rgl exported the packs into this install's `development_*_packs`, those folders are used as they are and never written; with `--compat` the export folder is told by holding the same files as rgl's build. When rgl built them somewhere else (a `local` or `exact` export, or the com.mojang folder of another install), they are copied into `sculkwire_*` folders, which `game_stop` removes. When rgl has not built the project, the launch fails before the game starts and says so. The call returns once the world is loaded, usually in 1 to 2 minutes; it blocks for that whole wait, so an MCP client with a shorter call timeout gives up on the call while the launch goes on (`game_status` then shows it). The result is the same as `game_status`, and its `packs` list names each deployed folder, its absolute path, and whether the folder holds build output.
 
@@ -279,11 +352,13 @@ If the world join races Microsoft sign-in (the game stops on "You need to authen
 | `deploy` | Copy the project's packs into `development_*_packs` (default true). Copies go to folders named `sculkwire_<project folder>_<pack folder>`, so projects with the same `packs/BP` layout do not overwrite each other; such a folder left by an earlier launch is copied over with the current packs, and `game_stop` removes the folders this launch copied. With `false`, a pack is only used when a folder already serves its uuid; what rgl built for a Regolith project is deployed either way. Each deployed uuid ends up in one folder of the project, see [One Folder per Pack UUID](client.md#one-folder-per-pack-uuid) |
 | `display` | `window` (Linux: a visible gamescope window; Windows: the game's own window), `headless` (Linux: no window, muted) or `desktop` (the launcher's own window; on Windows the same as `window`). The default is `window` on Windows. On Linux it is `window` when gamescope can run the install and there is a desktop, `headless` with no desktop, and `desktop` otherwise. A mode that cannot run falls back with a note: to `desktop` on Linux, to `window` for `headless` on Windows |
 | `mute` | Silence the game's audio (default on in `headless` mode only). Linux: a silent PipeWire or PulseAudio sink. Windows: the game's audio sessions, unmuted again by `game_stop`; without an audio device or session the result has a note instead |
-| `world` | World name, prefixed with `sculkwire-` (default `bridge`, replaced on each launch). Leave it out unless a second world is really needed |
+| `world` | Test world name, prefixed with `sculkwire-` (default `bridge`, replaced on each launch). Leave it out unless a second world is really needed |
 | `keep` | Continue in the existing test world as it is instead of replacing it (default false). It is created when missing, and is never removed automatically. `game_stop` ends the game without Save & Quit and the game writes chunks on its own schedule: measured on 1.26.60, a scoreboard objective added 5 s before the stop was kept, a block placed 5 s before it was lost, and one placed 75 s before it was kept |
 | `copyFrom` | Start from a copy of one of the user's worlds, by level name or level id (see [Worlds](#worlds)). Only for a world the user named or picked |
-| `difficulty` | `peaceful`, `easy`, `normal` (default) or `hard`. Peaceful removes hostile mobs such as zombies |
-| `betaApis` | Turn on the Beta APIs experiment |
+| `userWorld` | Enter this one of the user's own worlds, by level name or level id, instead of the saved dev world (see [Your Own Dev World](#your-own-dev-world)). Only a world the user named. Not with `world`, `keep`, `copyFrom` or `fresh` |
+| `fresh` | A test world (`sculkwire-bridge`, or `world`) even when the user saved a dev world (default false) |
+| `difficulty` | `peaceful`, `easy`, `normal` (default for a test world) or `hard`. Peaceful removes hostile mobs such as zombies. A dev world keeps its own unless this is given |
+| `betaApis` | Turn on the Beta APIs experiment. In a dev world it stays on for good |
 | `width`, `height` | Game resolution in `window` and `headless` mode on Linux, 320 to 3840 by 240 to 2160 (default 1280 by 720). Windows sizes the game window itself |
 | `fps` | Frame rate in `window` and `headless` mode on Linux, 10 to 240 (default 60) |
 | `worldWaitSeconds` | Seconds to wait for the game to start, and then for the world to load, 10 to 1800 (default 180). `sculk game check` takes it as `--world-wait` |
@@ -291,11 +366,23 @@ If the world join races Microsoft sign-in (the game stops on "You need to authen
 
 #### Worlds
 
-Without `world`, every launch reuses the test world `sculkwire-bridge` and replaces it, so the user's world list gains no new entry. Each launch also removes the test worlds nobody played for 3 days, never the one it launches and never a kept or copied one; the result lists them in `prunedWorlds` (`removed N old test world(s): ...` in the text). `keep: true` enters the existing test world as it is: its blocks, inventory, difficulty, experiments and game mode stay, its pack lists get the helper and the project's packs added (other packs stay), and `difficulty` or `betaApis` given with it are not applied, which `worldNote` says. `copyFrom` starts from a copy of one of the user's worlds named `sculkwire-<world>`: the original is never changed, the copy is single player with cheats on and keeps everything else (game mode, seed, inventory, experiments), and a world over 4 GiB is refused. A name shared by two worlds is refused with their level ids. List the worlds with `game_worlds` and ask the user which one to copy; never choose one yourself. Each launch with `copyFrom` copies again, unless `keep: true` finds the copy already there.
+Without `world`, `keep`, `copyFrom` or `userWorld`, and with no saved dev world (or with `fresh: true`), every launch reuses the test world `sculkwire-bridge` and replaces it, so the user's world list gains no new entry. Each launch also removes the test worlds nobody played for 3 days, never the one it launches and never a kept or copied one, and never a world of the user's; the result lists them in `prunedWorlds` (`removed N old test world(s): ...` in the text). `keep: true` enters the existing test world as it is: its blocks, inventory, difficulty, experiments and game mode stay, its pack lists get the helper and the project's packs added (other packs stay), and `difficulty` or `betaApis` given with it are not applied, which `worldNote` says. `copyFrom` starts from a copy of one of the user's worlds named `sculkwire-<world>`: the original is never changed, the copy is single player with cheats on and keeps everything else (game mode, seed, inventory, experiments), and a world over 4 GiB is refused. A name shared by two worlds is refused with their level ids. List the worlds with `game_worlds` and ask the user which one to copy; never choose one yourself. Each launch with `copyFrom` copies again, unless `keep: true` finds the copy already there. The result's `worldMode` says which it was: `fresh`, `kept`, `copied` or `user`.
+
+#### Your Own Dev World
+
+A developer can work in one of their own worlds instead of a test world. They choose it once with `game_worlds` `action: "use"` (or `sculk game worlds --use <name or level id>`); it is saved per game user in the `devWorlds` section of sculkwire's `config.json`, and every later `game_launch` without `world`, `keep`, `copyFrom` or `fresh` enters it (`userWorld` enters another one for one launch). The agent asks the user which world; it never picks one itself. The world is entered through the same deeplink, and sculkwire writes only these, and only while the game is closed (a launch while the game runs is refused):
+
+- Before the first write of each launch, `level.dat`, `level.dat_old`, `world_behavior_packs.json`, `world_resource_packs.json` and `world_icon.jpeg` are copied to `<data>/world-backups/<levelId>/<ISO time>` (never `db/`); the newest 10 backups per world are kept, and `worldBackup` gives the path.
+- The helper pack and the project's packs are merged into the world's pack lists; other packs stay. They stay after `game_stop` too, and so do the project's `sculkwire_*` development pack folders the lists name.
+- When cheats or commands are off, both are turned on in `level.dat` (sculkwire's commands need them); the game awards no achievements in that world from then on. `worldNote` says so.
+- Beta APIs only with `betaApis: true` (an experiment stays on in a world for good), the difficulty only when `difficulty` is given; `worldNote` says both. Game mode, seed, multiplayer and everything else stay as they are.
+- sculkwire's icon is written as `world_icon.jpeg`, which is how the join recovery finds the world's tile; `game_stop` puts the world's own icon back, unless the game wrote a new picture over sculkwire's (it does on Save & Quit).
+
+The world is never deleted, replaced or pruned. `game_stop` first tries Save & Quit so the game writes the world (see [game_stop](#game_stop)).
 
 ### game_status
 
-Shows whether the game is running (`running`, `ready`), the display `mode`, the game `version`, the `install`, the `world`, the `project` and its `packs`, the script `debugger` and `/connect` state, `manualSteps` still to do by hand, `deployDiagnostics` (a `client.duplicate-pack-uuid` warning for each pack folder that is not a copy of the project but shares a deployed pack's uuid, and a `client.rgl-export-differs` warning when a folder rgl exported a profile without filters to no longer matches the source pack), and `joinRecovery` after sculkwire walked the menus into the world itself, after a sign-in race or from a start or Play screen nobody left (`attempts`, `recovered`, `via` with the presses, `log`, `screenshot`). Each pack entry gives the pack name, uuid, kind, the deployed folder, its absolute path, and whether it holds what rgl built (`built`). A manifest name that is a lang key such as `pack.name` is shown as its value in the pack's `texts/en_US.lang`.
+Shows whether the game is running (`running`, `ready`), the display `mode`, the game `version`, the `install`, the `world` and how it was reached (`worldMode`: `fresh`, `kept`, `copied` or `user`, with `worldBackup` for a dev world), the user's saved default dev world (`defaultWorld`, with `levelId` and `name`, also while no game runs), the `project` and its `packs`, the script `debugger` and `/connect` state, `manualSteps` still to do by hand, `deployDiagnostics` (a `client.duplicate-pack-uuid` warning for each pack folder that is not a copy of the project but shares a deployed pack's uuid, and a `client.rgl-export-differs` warning when a folder rgl exported a profile without filters to no longer matches the source pack), and `joinRecovery` after sculkwire walked the menus into the world itself, after a sign-in race or from a start or Play screen nobody left (`attempts`, `recovered`, `via` with the presses, `log`, `screenshot`). Each pack entry gives the pack name, uuid, kind, the deployed folder, its absolute path, and whether it holds what rgl built (`built`). A manifest name that is a lang key such as `pack.name` is shown as its value in the pack's `texts/en_US.lang`.
 
 `running` and `ready` follow the game process found for the launch, checked on every call: once it exits (a crash, or closed by hand) they turn false, `gameExited` is `true` and `manualSteps` says to call `game_stop` (which still cleans up the bridge, its options and deployed packs); `game_launch` does that cleanup itself. Until the process is found (a user still starting the game) `running` stays true and `ready` false.
 
@@ -332,6 +419,51 @@ Returns content log and script errors since the last call as `diagnostics` mappe
 |---|---|
 | `includeText` | Also return the log text in content-log format as `text` (default false) |
 
+### wait_until
+
+Waits in one call until one condition holds, then returns. The helper pack checks world conditions every game tick and answers once, so the tool makes one round trip; the `log` condition is checked by sculkwire itself every 250 ms. A call that is not met by `timeoutMs` returns `met: false` and `timedOut: true` rather than failing. While the helper pack is not answering (`ready` false in [game_status](#game_status)) the call fails at once with the steps to bring it back.
+
+| Input | Description |
+|---|---|
+| `condition` | The condition, an object with `kind` and the fields below (required) |
+| `timeoutMs` | How long to wait on the wall clock, 0 to 55000 (default 10000). A paused game still times out |
+
+| `condition.kind` | Fields | Met when |
+|---|---|---|
+| `entity` | `type` (namespace optional), `op` (`present` default, `absent`, or `==`, `!=`, `<`, `<=`, `>`, `>=` with `value`), `radius` (default 32, up to 256), `x`, `y`, `z`, `dimension` (default around the player) | The count of entities of `type` within `radius` passes `op`. `observed`: `{ count }` |
+| `block` | `x`, `y`, `z`, `type`, `is` (default true), `states`, `dimension` | The block at `x`, `y`, `z` is `type` with every given state (or, with `is: false`, is not). An unloaded block meets neither. `observed`: the block with its states, or `null` |
+| `score` | `objective`, `participant` (`@s` or `@p` for the local player, a player name, a score holder's display name or a fake player name), `op` (default `==`), `value` | The participant's score passes `op` against `value`. A missing objective or score never meets it. `observed`: `{ score }` or `{ objective: false }` |
+| `event` | `event` (an event kind or a `/scriptevent` id), `since` (a [game_events](#game_events) cursor, default the moment the wait starts), `match` (fields that must be equal) | An event after `since` has that kind (or is a `scriptevent` with that `id`) and every `match` field. `observed`: the event |
+| `log` | `pattern` (a case-insensitive regex), `errorsOnly` | A content-log diagnostic or script print written after the call starts matches `pattern` in its formatted text (`file:line:column: severity code: message`), or a log line does. Without `pattern` any new diagnostic meets it; `errorsOnly` takes only error diagnostics and no plain lines. It reads with its own cursor, so [game_log](#game_log) still reports the same entries. `observed`: `{ diagnostic }` or `{ line }` |
+| `player` | `x`, `y`, `z`, `radius` | The player stands within `radius` blocks of `x`, `y`, `z`. `observed`: `{ location, distance }` |
+| `ticks` | `ticks` (0 to 1100) | That many game ticks passed |
+
+The result has `met`, `timedOut`, `elapsedMs`, `ticks` (game ticks that passed, as the helper counted them; absent for `log`, and when the helper's answer did not arrive within 5 s after the timeout) and `observed`, the last value the check saw.
+
+### game_events
+
+Reads the in-world events the helper pack keeps (the newest 2000 since its scripts started), oldest first. Each event is `{ seq, tick, kind, ... }` with flat fields:
+
+| `kind` | Fields |
+|---|---|
+| `scriptevent` | `id`, `message`, `source` (the sending entity's type, when one sent it). sculkwire's own `sculkwire:query` events are left out |
+| `entitySpawn` | `id`, `typeId`, `cause`, `location` |
+| `entityDie` | `id`, `typeId`, `cause`, `killer` (its type) |
+| `entityHurt` | `id`, `typeId`, `damage`, `cause`, `damager`, `damagerId` |
+| `playerBreakBlock`, `playerPlaceBlock` | `player` (name), `block`, `location` |
+| `itemUse`, `itemCompleteUse` | `player`, `item`; `useDuration` for `itemCompleteUse` |
+| `playerInteractWithBlock` | `player`, `block`, `location`, `item` |
+| `playerInteractWithEntity` | `player`, `id`, `typeId`, `item` |
+| `effectAdd` | `id`, `typeId`, `effect`, `amplifier` (0-based), `duration` (ticks) |
+
+| Input | Description |
+|---|---|
+| `since` | Cursor: the `next` of the previous call (default 0, every event kept). `"now"` returns no events and the current cursor, to read only what happens afterwards |
+| `kinds` | Only these event kinds |
+| `limit` | Events to return, 1 to 500 (default 100). When more match, `next` is the last returned event's `seq`, so the next call reads on |
+
+The result has `events`, `next`, `dropped` (events after `since` the buffer no longer holds), `reset` (true when `since` was past the newest event because the helper's scripts restarted after a `/reload` or rejoin; reading then starts from its first event) and `tick`, the game tick of the answer.
+
 ### game_screenshot
 
 Takes a screenshot of what the game shows now and returns the image, its `path` and its size in `bytes`. Works in `window` and `headless` mode on Linux, and on Windows. On Windows it captures the game window's client area while it is covered; when the game hands back an empty (one-colour) frame it copies the client area from the screen, which needs the game window in the foreground, and fails saying so otherwise.
@@ -351,16 +483,29 @@ Reads the world through the helper pack and returns it as `result`.
 | `blocks` | Non-air blocks in a cube around the player or `x`, `y`, `z`, with their states. Rows outside the dimension's height range (below the world floor, above the build limit) are left out: a cube that crosses them returns the blocks inside, one wholly outside returns `[]` |
 | `block` | The block at `x`, `y`, `z`; `null` outside the height range or in an unloaded chunk |
 | `ping` | `pong` when the helper pack answers |
+| `components` | One entity's components: `id`, `typeId` and `components`, each with its `typeId` and `values` (the component's readable fields such as `currentValue`, `defaultValue`, `effectiveMax`, `value`: numbers, booleans and text as they are, a vector as `x`/`y`/`z`, nested objects two levels deep, a nested game object as its type id; functions left out). A field the game refuses to read is left out and named in `unreadable`. With `ids`, only those components (a bare name means `minecraft:<name>`), and `missing` lists the ones the entity lacks |
+| `dynamic_properties` | Dynamic properties of `target`: `world` (default), `player`, or `entity` (the default when `entity` or `type` is given). `properties` maps each id to its value (a Vector3 as `x`/`y`/`z`), with `count` (ids matched), `totalBytes` (the holder's whole dynamic-property size), and the entity's `id` and `typeId`. Strings past 4000 characters are cut and named in `cutStrings`; past `limit` ids (default and at most 500) `truncated` is set |
+| `scores` | `objectives`, each with `id`, `displayName`, `criteria` (always `dummy`: Bedrock has no other, and the Script API does not report one) and `scores` rows (`participant` name, `type` `Player`, `FakePlayer` or `Entity`, `score`, and `entityId` for a player or entity). `limit` caps the rows over all objectives (default 100, at most 1000) and sets `truncated`. An unknown `objective` fails with the list of objectives there are |
+| `raycast` | The first `block` along a ray (type, location, states, `face`, `faceLocation` within the block, `distance`) or `null`, and the `entities` on the ray before that block (`id`, `typeId`, `distance`), plus the `from`, unit `direction` and `maxDistance` used. Cast from `x`, `y`, `z` or else the player's head (the player is then left out of `entities`), along `direction`, toward `to`, or else along the player's view |
+| `entity_properties` | Values of an entity's properties (`entity.getProperty`): `id`, `typeId`, `properties` (id to value) and `missing` (ids with no value on this entity). The Script API cannot list property ids, so they are `ids`, or else the ones `minecraft:entity.description.properties` declares for the entity's type in the launched project's behavior packs; with neither the call fails naming the type |
 
 | Input | Description |
 |---|---|
 | `kind` | One of the kinds above (required) |
-| `type` | Only this entity or block type id |
+| `type` | Only this entity or block type id. For `components`, `dynamic_properties` and `entity_properties`: read the nearest entity of this type (within `radius`, default 64) |
 | `types` | Blocks only: an array of block type ids, keeping the blocks of any of them in one scan of the cube (`type` is then ignored) |
 | `radius` | 0 to 256. Entities default to 16 blocks. Blocks default to 4 and are capped at 16 |
-| `limit` | Entities to return, 1 to 200 (default 50) |
+| `limit` | Entities to return, 1 to 200 (default 50). Rows for `scores` (default 100, at most 1000) and ids for `dynamic_properties` (default and at most 500) |
 | `x`, `y`, `z` | The point to search around instead of the player |
 | `dimension` | Dimension of `x`, `y`, `z` (default the player's) |
+| `entity` | `components`, `dynamic_properties`, `entity_properties`: the entity's id as `entities` reports it. Without `entity` or `type` they read the player |
+| `target` | `world`, `player` or `entity`: whose dynamic properties to read. For the other entity kinds, `player` reads the player even when `type` is given; `entity` without `entity` or `type` fails |
+| `ids` | `components`: only these component ids. `entity_properties`: the property ids to read |
+| `prefix` | `dynamic_properties`: only ids starting with this |
+| `objective`, `participant` | `scores`: only this objective id; only this participant: `@s` or `@p` (the local player), a player name, a fake player name (`#round`) or an entity id |
+| `direction`, `to` | `raycast`: the ray's direction `{x, y, z}`, or a point `{x, y, z}` to cast toward (`to` wins) |
+| `maxDistance` | `raycast`: ray length, 0 to 64 (default 16, or the distance to `to`) |
+| `includeLiquidBlocks`, `includePassableBlocks` | `raycast`: let water and lava, or passable blocks such as grass, stop the ray (default false) |
 
 ### game_registry
 
@@ -461,18 +606,62 @@ The result has `source` (`engine` or `level.dat`), the `world` (`name`, and for 
 
 ### game_worlds
 
-Lists every world of the active game user, sculkwire's test worlds and the user's own, or deletes one test world. It reads the world folders and needs no running game. The user's own worlds are only listed: sculkwire never changes or deletes them. A world whose `level.dat` or `levelname.txt` cannot be read is left out.
+Lists every world of the active game user, sculkwire's test worlds and the user's own, chooses the user's default dev world, or deletes one test world. It reads the world folders and needs no running game. sculkwire changes only `sculkwire-*` worlds and the one world the user chose as their dev world (its pack lists, cheats flags and icon, and experiments on request, see [Your Own Dev World](#your-own-dev-world)); the user's other worlds are only listed, or read for `copyFrom`, and no world of the user's is ever deleted. A world whose `level.dat` or `levelname.txt` cannot be read is left out.
 
 | Input | Description |
 |---|---|
-| `action` | `list` (default) or `delete` |
-| `world` | `delete`: the test world's name, with or without the `sculkwire-` prefix (required) |
+| `action` | `list` (default), `use` or `delete` |
+| `world` | `use`: the user's world to save as the default dev world, by level name or level id (a name several worlds share is refused with their level ids); `null` forgets the saved one. Only the world the user names: list the worlds, ask, never pick one yourself. `delete`: the test world's name, with or without the `sculkwire-` prefix (required) |
+| `clear` | `use`: forget the saved default dev world |
 
-`list` returns `worlds`, played last first, each with `name`, `levelId` (the folder), `sculkwire` (both the folder and the name start with `sculkwire-`: the only worlds sculkwire writes or deletes), `kept` (launched with `keep` or copied: never removed automatically), `copiedFrom`, `lastPlayed` (ISO time from `level.dat`, else the folder's time), `gameMode`, `sizeBytes` and `loaded` (the world the launched game has open). The text has one line per world. `delete` returns `deleted` with `world`, `existed` and the removed `levelIds`. It refuses a world that is not sculkwire's and the world the game has loaded (stop the game first). `sculk game worlds [--json]` lists, `sculk game worlds --delete <name>` deletes (exit 1 when there is no such world, 2 when it is refused).
+`list` returns `worlds`, played last first, each with `name`, `levelId` (the folder), `sculkwire` (both the folder and the name start with `sculkwire-`: the only worlds sculkwire deletes), `kept` (launched with `keep` or copied: never removed automatically), `copiedFrom`, `lastPlayed` (ISO time from `level.dat`, else the folder's time), `gameMode`, `sizeBytes`, `loaded` (the world the launched game has open) and `default` (the saved dev world). The text has one line per world. `use` returns `defaultWorld` (`levelId` and `name`, or `null` after forgetting); it refuses a `sculkwire-` test world, a missing world and a shared name, and writes nothing into the world. `delete` returns `deleted` with `world`, `existed` and the removed `levelIds`. It refuses a world that is not sculkwire's and the world the game has loaded (stop the game first). `sculk game worlds [--json]` lists, `sculk game worlds --use <name or level id>` and `--clear-default` choose or forget the dev world, `sculk game worlds --delete <name>` deletes (exit 1 when there is no such world, 2 when it is refused).
+
+### scene_save
+
+Saves a named test start in the running world, so a test can return to it with [scene_reset](#scene_reset). A scene lives in the world itself: the blocks and entities of a box are a world structure `sculkwire:scene_<name>`, and the player's state is a world dynamic property `sculkwire:scene:<name>`. It therefore lasts as long as the world: with the default [game_launch](#game_launch) the test world is replaced on every launch, so scenes last one session; a world launched with `keep: true` or made with `copyFrom` keeps them across launches. A scene of the same name is overwritten. Needs the helper pack (`ready` in [game_status](#game_status)).
+
+| Input | Description |
+|---|---|
+| `name` | Scene name, 1 to 32 of `a-z`, `0-9`, `_` and `-` (required) |
+| `radius` | Half the box's side in blocks, 0 to 31 (default 8): the box is `2 * radius + 1` blocks each way, the largest a structure holds, cut to the world's height range |
+| `x`, `y`, `z` | Center of the box, all three or none (default the player's position, in the player's dimension) |
+
+What a scene keeps:
+
+| Part | Saved |
+|---|---|
+| Box | Every block and every non-player entity in it |
+| Player | Position, rotation, dimension, game mode, health, hunger, saturation, selected slot |
+| Inventory | All 36 slots, armour (head, chest, legs, feet) and off hand; per item the id, amount, name tag, lore, enchantments and durability damage |
+| World | Time of day; the weather when it changed since the helper's scripts started (the Script API has no stable way to read it otherwise). An unknown weather is named in `notes` and left alone by the reset |
+
+The result has `name`, `overwritten`, `dimension`, `box` (`min` and `max` block corners, inclusive), `entities` (non-player entities in the box), `items` (non-empty slots saved) and `notes`.
+
+### scene_reset
+
+Puts the world back to a scene from [scene_save](#scene_save), in this order: teleports the player to the scene's spot (and waits up to 5 s for the box's chunks to load), removes the non-player entities in the box, places the saved blocks and entities back, teleports again with rotation and dimension, clears and refills the inventory, armour and off hand, sets game mode, selected slot, health, hunger and saturation, clears every effect, and restores the time of day and the weather.
+
+| Input | Description |
+|---|---|
+| `name` | The scene (required) |
+
+The result has `name`, `dimension`, `box`, `removedEntities`, `restored` (the parts put back: `blocks`, `entities`, `position`, `rotation`, `dimension`, `inventory`, `equipment`, `gameMode`, `selectedSlot`, `health`, `hunger`, `saturation`, `effects`, `timeOfDay`, `weather`) and `notes`: what could not be restored and why, for example an item id or an enchantment the running game does not accept, or a missing structure. Such an item is left out and the reset goes on. A world without a scene of that name fails with `no scene named <name> in this world`.
+
+### scene_list
+
+Lists the scenes saved in the running world, or deletes one first.
+
+| Input | Description |
+|---|---|
+| `delete` | A scene to delete (its structure and stored state) before listing. A scene that does not exist fails with `no scene named <name> in this world` |
+
+The result has `scenes`, sorted by name, each with `name`, `savedAt` (Unix time in ms), `dimension`, `box`, `position` (the player's saved position) and `structure` (whether the scene's structure is still in the world), or `error` when the stored state could not be read; and `deleted` when `delete` was given.
 
 ### game_stop
 
-Closes the game, closes the bridge and puts back the `options.txt` keys sculkwire changed. It stops a running play job first. The result has `stopped`, `message`, `restoredOptions` and `restoredSettings`. The message says what happened, for example `closed the game (1 process(es))`, `the game was not running`, or that the game had to be forced to quit. When the stopped world is a kept one (`game_launch` `keep` or `copyFrom`), the text adds that blocks changed in the last minute before the stop may be missing on the next launch: the stop ends the game without Save & Quit.
+Closes the game, closes the bridge and puts back the `options.txt` keys sculkwire changed. It stops a running play job first. The result has `stopped`, `message`, `restoredOptions` and `restoredSettings`. The message says what happened, for example `closed the game (1 process(es))`, `the game was not running`, or that the game had to be forced to quit. When the stopped world is a kept one (`game_launch` `keep` or `copyFrom`), the text adds that blocks changed in the last minute before the stop may be missing on the next launch: in a test world the stop ends the game without Save & Quit.
+
+In the user's dev world (`worldMode: user`) the stop first tries Save & Quit, for up to 45 s: Escape opens the pause menu, Save & Quit is pressed by its name through the in-game agent's UI (or clicked at its known place with a background mouse when no agent is attached; never a press near it by guess), and the stop waits for the start or Play screen. `savedAndQuit` says whether it worked; when it did not (no input route, no Save & Quit control the agent can read, a timeout), the game is stopped anyway and `stopNote` says that recent changes may be lost. `stopNote` also says whether the world's own icon was put back, and `keptPackFolders` lists the project's development pack folders left in place because the world's pack lists name them.
 
 No inputs.
 

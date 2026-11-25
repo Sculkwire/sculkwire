@@ -27,7 +27,8 @@ export type DiagnosticSource =
   | "bds"
   | "client"
   | "debugger"
-  | "gametest";
+  | "gametest"
+  | "molang";
 
 export interface RelatedLocation {
   file: string;

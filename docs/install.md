@@ -76,6 +76,8 @@ A version folder is never changed after it is installed. A new version is cloned
 
 On Windows the entry runs `cmd /c <data>\bin\sculk.cmd mcp`, because MCP clients start servers without a shell.
 
+To give a client fewer tools, set `SCULKWIRE_TOOLSETS` in the entry's environment to a comma-separated list of toolset ids (`knowledge`, `validate`, `bds`, `game`, `engine`, `gamefiles`, `update`, or an extension's name). Unset, every tool is registered. See [Toolset Filter](tools.md#toolset-filter).
+
 ## Windows Firewall
 
 The Bedrock Dedicated Server binds its UDP ports on all network interfaces, and no `server.properties` option makes it listen on loopback only. Windows Firewall asks for permission the first time a program at a new path listens, and keys its rules on that path. Earlier versions ran every server from a new folder, so Windows asked on every run. A server now runs from a numbered slot folder, `bds-instances\slot-<n>` in the data folder, so the path stays the same from run to run. sculkwire itself talks to the server only through stdin and loopback, which the firewall does not filter.

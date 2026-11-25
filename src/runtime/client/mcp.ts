@@ -9,6 +9,7 @@ import { diagnosticSchema, diagText, fail, ok, summarySchema } from "../../core/
 import { dataDir } from "../../core/paths.ts";
 import { onShutdown } from "../../core/shutdown.ts";
 import { bridge, WORLD_WAIT_MAX_S, WORLD_WAIT_MS, type BridgeStatus, type CommandOutput } from "./bridge.ts";
+import { entityPropertyIdsFor } from "./entityproperties.ts";
 import { inputProvider, withInputLock } from "./inputprovider.ts";
 import { engine } from "../engine/engine.ts";
 import type { EngineResult } from "../engine/failure.ts";
@@ -22,8 +23,11 @@ import { pauseOnTakeover, playJobs, runActions, stepText, type PlayJobInfo } fro
 import { DIFFICULTIES, type Difficulty } from "../../gamefiles/worlds.ts";
 import { findInstall } from "../../gamefiles/install.ts";
 import { deleteWorld, listAllWorlds, readMarker, STALE_WORLD_DAYS, worldLine } from "./worldstore.ts";
+import { readDevWorld, useDevWorld } from "./devworld.ts";
 import { FOREGROUND_MESSAGE } from "./windows.ts";
+import { deleteScene, listScenes, resetScene, saveScene, SCENE_DEFAULT_RADIUS, SCENE_MAX_RADIUS, SCENE_NAME } from "./scenes.ts";
 import type { InputRoute } from "./input.ts";
+import { COMPARE_OPS, readEvents, WAIT_DEFAULT_MS, WAIT_MAX_MS, waitUntil } from "./waits.ts";
 
 const statusSchema = {
   running: z.boolean(),
@@ -59,6 +63,9 @@ const statusSchema = {
     .optional(),
   prunedWorlds: z.array(z.string()).optional(),
   worldNote: z.string().optional(),
+  worldMode: z.enum(["fresh", "kept", "copied", "user"]).optional(),
+  worldBackup: z.string().optional(),
+  defaultWorld: z.object({ levelId: z.string(), name: z.string() }).optional(),
 };
 const commandSchema = {
   command: z.string(),
@@ -108,9 +115,9 @@ async function inputThroughUi(a: {
 
 function statusText(s: BridgeStatus): string {
   if (s.gameExited) return `client not running: ${s.manualSteps.join("; ")}`;
-  if (!s.running) return "client not running";
+  if (!s.running) return `client not running${s.defaultWorld ? `; default dev world ${s.defaultWorld.name} [${s.defaultWorld.levelId}]` : ""}`;
   const parts = [
-    `${s.mode} client ${s.version ?? ""} in world ${s.world ?? "?"}`,
+    `${s.mode} client ${s.version ?? ""} in world ${s.world ?? "?"}${s.worldMode ? ` (${s.worldMode})` : ""}`,
     `debugger ${s.debugger.attached ? `attached (protocol ${s.debugger.protocolVersion ?? "?"})` : "not attached"}`,
     `/connect clients ${s.connect.clients}`,
   ];
@@ -133,6 +140,7 @@ function statusText(s: BridgeStatus): string {
   }
   if (s.worldNote) parts.push(s.worldNote);
   if (s.prunedWorlds?.length) parts.push(`removed ${s.prunedWorlds.length} old test world(s): ${s.prunedWorlds.join(", ")}`);
+  if (s.defaultWorld) parts.push(`default dev world ${s.defaultWorld.name} [${s.defaultWorld.levelId}]`);
   return parts.join("; ");
 }
 
@@ -198,9 +206,14 @@ export function register(server: McpServer): void {
       title: "Launch the Bedrock client",
       description:
         "Start the real Minecraft Bedrock client (any install sculkwire finds such as Windows, mcbe-gdk-installer, a Wine " +
-        "or Proton prefix like Flarial, or SCULKWIRE_MINECRAFT_DIR) in a fresh `sculkwire-` test world with the project's " +
-        "packs and the sculkwire helper pack active. The world is flat and creative, has cheats on, and keeps time and " +
-        "weather frozen. Attaches the script debugger automatically. Display modes: `window` (the default) is a visible " +
+        "or Proton prefix like Flarial, or SCULKWIRE_MINECRAFT_DIR) in a world with the project's packs and the sculkwire " +
+        "helper pack active. The world is the user's saved dev world (game_worlds action use) when one is saved and no " +
+        "test world option (world, keep, copyFrom, fresh) is given, or userWorld; else a fresh `sculkwire-` test world: " +
+        "flat and creative, cheats on, time and " +
+        "weather frozen. In the user's dev world sculkwire backs up level.dat, the pack lists and the icon first (worldBackup), " +
+        "merges the packs into its pack lists (other packs stay), turns cheats on when they are off (the world then awards " +
+        "no achievements) and says so in worldNote; experiments only with betaApis, the difficulty only when given; the game " +
+        "must be closed for that. Attaches the script debugger automatically. Display modes: `window` (the default) is a visible " +
         "gamescope window on Linux and the game's own window on Windows, where screenshots, input and /connect work; " +
         "`headless` runs without a window and muted on Linux (Windows has no gamescope, so it runs the window and the " +
         "result says so); `desktop` uses the launcher's normal window (on Windows the same as `window`). On Linux the " +
@@ -230,8 +243,13 @@ export function register(server: McpServer): void {
         world: z
           .string()
           .optional()
-          .describe("World name, prefixed with sculkwire-. Omit it unless a second world is really needed: the default bridge world is reused and replaced on each launch, so no new entry appears in the user's world list"),
+          .describe("A sculkwire- test world by name (the prefix is added). Omit it unless a second test world is really needed: the default bridge world is reused and replaced on each launch, so no new entry appears in the user's world list"),
         keep: z.boolean().optional().describe("Continue in the existing test world as it is (blocks, inventory, settings) instead of replacing it; it is then never removed automatically. game_stop ends the game without Save & Quit, so blocks changed in the last minute before it may be lost"),
+        userWorld: z
+          .string()
+          .optional()
+          .describe("Enter this one of the user's own worlds (level name or level id; a name several worlds share is refused) instead of the saved dev world. ONLY a world the user named: never choose one yourself. Not with world, keep, copyFrom or fresh"),
+        fresh: z.boolean().optional().describe("A fresh sculkwire-bridge test world even when the user saved a dev world"),
         copyFrom: z
           .string()
           .optional()
@@ -239,8 +257,8 @@ export function register(server: McpServer): void {
         difficulty: z
           .enum(Object.keys(DIFFICULTIES) as [Difficulty, ...Difficulty[]])
           .optional()
-          .describe("World difficulty (default normal). Peaceful removes hostile mobs such as zombies"),
-        betaApis: z.boolean().optional().describe("Enable the Beta APIs experiment"),
+          .describe("World difficulty (test world default normal; the user's dev world keeps its own unless this is given). Peaceful removes hostile mobs such as zombies"),
+        betaApis: z.boolean().optional().describe("Enable the Beta APIs experiment. In the user's dev world it stays on for good"),
         width: z.number().int().min(320).max(3840).optional(),
         height: z.number().int().min(240).max(2160).optional(),
         fps: z.number().int().min(10).max(240).optional().describe("Frame rate in window and headless modes (default 60)"),
@@ -269,6 +287,8 @@ export function register(server: McpServer): void {
           ...(a.world ? { world: a.world } : {}),
           ...(a.keep ? { keep: true } : {}),
           ...(a.copyFrom ? { copyFrom: a.copyFrom } : {}),
+          ...(a.userWorld ? { userWorld: a.userWorld } : {}),
+          ...(a.fresh ? { fresh: true } : {}),
           ...(a.difficulty ? { difficulty: a.difficulty } : {}),
           ...(a.betaApis ? { betaApis: true } : {}),
           ...(a.width ? { width: a.width } : {}),
@@ -288,12 +308,16 @@ export function register(server: McpServer): void {
     "game_status",
     {
       title: "Client bridge status",
-      description: "Whether the client runs, which world and packs are active, and which channels (debugger, /connect) are attached.",
+      description:
+        "Whether the client runs, which world and packs are active (worldMode: fresh, kept, copied or user), which channels " +
+        "(debugger, /connect) are attached, and the user's saved default dev world (defaultWorld).",
       inputSchema: {},
       outputSchema: statusSchema,
     },
     async () => {
-      const s = bridge.status();
+      const install = bridge.install ?? (await findInstall().catch(() => undefined));
+      const defaultWorld = install ? await readDevWorld(install) : undefined;
+      const s = { ...bridge.status(), ...(defaultWorld ? { defaultWorld } : {}) };
       return ok(statusText(s), s);
     },
   );
@@ -301,15 +325,24 @@ export function register(server: McpServer): void {
   server.registerTool(
     "game_worlds",
     {
-      title: "List or delete worlds",
+      title: "List, choose or delete worlds",
       description:
-        "List every world of the active game user (sculkwire's test worlds and the user's own), or delete one sculkwire " +
-        "test world. Needs no running game and never starts one. The user's own worlds are never changed or deleted; " +
-        "list them to ask the user which one game_launch copyFrom should copy. Test worlds not played for " +
+        "List every world of the active game user (sculkwire's test worlds and the user's own; `default` marks the saved " +
+        "dev world), choose the user's default dev world (action use), or delete one sculkwire test world. Needs no " +
+        "running game and never starts one. use saves one of the user's own worlds as the world game_launch enters by " +
+        "default (per game user; world null or clear: true forgets it): ONLY the world the user names, so list the worlds, " +
+        "ask the user which one, and never pick one yourself. sculkwire changes only sculkwire-* worlds and that one dev " +
+        "world (its pack lists, cheats flags, icon, and experiments on request, after a backup); the user's other worlds " +
+        "are only listed, or read for game_launch copyFrom, and never deleted. Test worlds not played for " +
         `${STALE_WORLD_DAYS} days are removed by the next game_launch unless kept.`,
       inputSchema: {
-        action: z.enum(["list", "delete"]).optional().describe("list (default) or delete"),
-        world: z.string().optional().describe("delete: the sculkwire world's name, with or without the sculkwire- prefix"),
+        action: z.enum(["list", "use", "delete"]).optional().describe("list (default), use or delete"),
+        world: z
+          .string()
+          .nullable()
+          .optional()
+          .describe("use: the user's world to save as the default dev world, level name or level id (a name several worlds share is refused: pass the level id); null forgets the saved one. delete: the sculkwire world's name, with or without the sculkwire- prefix"),
+        clear: z.boolean().optional().describe("use: forget the saved default dev world"),
       },
       outputSchema: {
         worlds: z
@@ -324,21 +357,34 @@ export function register(server: McpServer): void {
               gameMode: z.string().optional(),
               sizeBytes: z.number(),
               loaded: z.boolean(),
+              default: z.boolean(),
             }),
           )
           .optional(),
         deleted: z.object({ world: z.string(), existed: z.boolean(), levelIds: z.array(z.string()) }).optional(),
+        defaultWorld: z.object({ levelId: z.string(), name: z.string() }).nullable().optional(),
       },
     },
-    async ({ action, world }) => {
+    async ({ action, world, clear }) => {
       try {
         const install = bridge.install ?? (await findInstall());
         const loaded = bridge.running ? bridge.world?.levelId : undefined;
+        if (action === "use") {
+          if (!clear && world === undefined) throw new Error("use needs world (the user's world to save as the default dev world), or world null / clear: true to forget it");
+          const saved = await useDevWorld(install, clear || world === null ? undefined : world);
+          return ok(
+            saved
+              ? `default dev world: ${saved.name} [${saved.levelId}]; game_launch enters it unless world, keep, copyFrom or fresh is given`
+              : "no default dev world: game_launch uses sculkwire- test worlds",
+            { defaultWorld: saved ?? null },
+          );
+        }
         if (action === "delete") {
           if (!world) throw new Error("delete needs world: the sculkwire world's name");
           const deleted = await deleteWorld(install, world, loaded !== undefined ? { loaded } : {});
           return ok(deleted.existed ? `deleted ${deleted.world} (${deleted.levelIds.join(", ")})` : `no world ${deleted.world}`, { deleted });
         }
+        const devWorld = (await readDevWorld(install))?.levelId;
         const all = await listAllWorlds(install);
         const worlds = all.map((w) => ({
           name: w.name,
@@ -350,8 +396,9 @@ export function register(server: McpServer): void {
           ...(w.gameMode ? { gameMode: w.gameMode } : {}),
           sizeBytes: w.sizeBytes ?? 0,
           loaded: w.levelId === loaded,
+          default: w.levelId === devWorld,
         }));
-        return ok(all.map((w) => worldLine(w, loaded)).join("\n") || `no worlds in ${install.label}`, { worlds });
+        return ok(all.map((w) => worldLine(w, loaded, devWorld)).join("\n") || `no worlds in ${install.label}`, { worlds });
       } catch (err) {
         return fail(err);
       }
@@ -443,6 +490,109 @@ export function register(server: McpServer): void {
     },
   );
 
+  const value = z.union([z.string(), z.number(), z.boolean()]);
+  const at = { x: z.number(), y: z.number(), z: z.number() };
+  const op = z.enum(COMPARE_OPS);
+  const condition = z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("entity"),
+      type: z.string().describe("Entity type id (`zombie` means `minecraft:zombie`)"),
+      op: z.enum(["present", "absent", ...COMPARE_OPS]).optional().describe("present (default), absent, or a comparison of the count with `value`"),
+      value: z.number().optional(),
+      radius: z.number().min(0).max(256).optional().describe("Default 32"),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      z: z.number().optional(),
+      dimension: z.string().optional(),
+    }),
+    z.object({
+      kind: z.literal("block"),
+      ...at,
+      type: z.string(),
+      is: z.boolean().optional().describe("false waits until the block is no longer this type (and states); default true"),
+      states: z.record(z.string(), value).optional().describe("Block states that must match too"),
+      dimension: z.string().optional(),
+    }),
+    z.object({ kind: z.literal("score"), objective: z.string(), participant: z.string().describe("A player name, or a fake player / score holder name"), op: op.optional().describe("Default =="), value: z.number() }),
+    z.object({
+      kind: z.literal("event"),
+      event: z.string().describe("An event kind (`entityDie`, `playerPlaceBlock`, …) or a /scriptevent id (`myns:done`)"),
+      since: z.number().int().min(0).optional().describe("A game_events cursor; default the moment the wait starts"),
+      match: z.record(z.string(), value).optional().describe("Event fields that must be equal (`{\"typeId\":\"minecraft:zombie\"}`)"),
+    }),
+    z.object({
+      kind: z.literal("log"),
+      pattern: z.string().optional().describe("Regex (case-insensitive) a new diagnostic or log line must match; default any new diagnostic"),
+      errorsOnly: z.boolean().optional(),
+    }),
+    z.object({ kind: z.literal("player"), ...at, radius: z.number().min(0) }),
+    z.object({ kind: z.literal("ticks"), ticks: z.number().int().min(0).max(1_100) }),
+  ]);
+
+  server.registerTool(
+    "wait_until",
+    {
+      title: "Wait for a condition",
+      description:
+        "Wait, in one call, until a world condition holds: `entity` (type present, absent or a count near the player or " +
+        "x/y/z), `block` (block at x/y/z is or is not a type, with states), `score` (objective, participant, comparison), " +
+        "`event` (an in-world event or /scriptevent id after a game_events cursor, fields matched), `log` (a new " +
+        "content-log diagnostic or log line matching a regex), `player` (within radius of x/y/z) or `ticks` (n game " +
+        "ticks). The helper pack checks every tick. Returns met, timedOut, elapsedMs, ticks and the last value observed.",
+      inputSchema: {
+        condition,
+        timeoutMs: z.number().int().min(0).max(WAIT_MAX_MS).optional().describe(`Default ${WAIT_DEFAULT_MS}, at most ${WAIT_MAX_MS}`),
+      },
+      outputSchema: { met: z.boolean(), timedOut: z.boolean(), elapsedMs: z.number(), ticks: z.number().optional(), observed: z.unknown() },
+    },
+    async ({ condition, timeoutMs }) => {
+      try {
+        const r = await waitUntil(bridge, condition, timeoutMs);
+        const ticks = r.ticks === undefined ? "" : `, ${r.ticks} ticks`;
+        const head = r.met ? `met after ${r.elapsedMs} ms${ticks}` : `timed out after ${r.elapsedMs} ms${ticks}`;
+        return ok(`${head}; observed ${JSON.stringify(r.observed)}`, r);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "game_events",
+    {
+      title: "In-world events",
+      description:
+        "In-world events the helper pack buffered (the newest 2000), after cursor `since`: scriptevent (other than " +
+        "sculkwire's own), entitySpawn, entityDie, entityHurt, playerBreakBlock, playerPlaceBlock, itemUse, " +
+        "itemCompleteUse, playerInteractWithBlock, playerInteractWithEntity, effectAdd. Pass `next` back as `since` to " +
+        "read on; `since: \"now\"` returns only the current cursor. `dropped` counts events lost to the buffer.",
+      inputSchema: {
+        since: z.union([z.number().int().min(0), z.literal("now")]).optional().describe("Cursor (`next` of the last call); default 0, every event kept"),
+        kinds: z.array(z.string()).optional().describe("Only these event kinds"),
+        limit: z.number().int().min(1).max(500).optional().describe("Default 100"),
+      },
+      outputSchema: {
+        tick: z.number(),
+        events: z.array(z.object({ seq: z.number(), tick: z.number(), kind: z.string() }).passthrough()),
+        next: z.number(),
+        dropped: z.number(),
+        reset: z.boolean(),
+      },
+    },
+    async (args) => {
+      try {
+        const r = await readEvents(bridge, args);
+        const lost = r.dropped ? `, ${r.dropped} dropped` : "";
+        const reset = r.reset ? " (the helper restarted: cursor reset)" : "";
+        const lines = r.events.slice(0, 20).map((e) => JSON.stringify(e));
+        if (r.events.length > 20) lines.push(`… ${r.events.length - 20} more`);
+        return ok([`${r.events.length} event(s), next ${r.next}${lost}${reset}`, ...lines].join("\n"), r);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
   server.registerTool(
     "game_screenshot",
     {
@@ -474,23 +624,42 @@ export function register(server: McpServer): void {
       description:
         "Ask the in-world helper pack: `player` (players with position, rotation, game mode), `entities` (near the player " +
         "or x/y/z: type, position, tags, health, active effects with 0-based amplifier and duration in ticks), " +
-        "`blocks` (non-air blocks in a cube with states), `block` (one block).",
+        "`blocks` (non-air blocks in a cube with states), `block` (one block), `components` (an entity's components " +
+        "with their readable values), `dynamic_properties` (world, player or entity, with total bytes), `scores` " +
+        "(scoreboard objectives and scores), `raycast` (first block and the entities along a ray), `entity_properties` " +
+        "(values of the properties an entity file declares). `entity` picks an entity by id, else `type` the nearest one, " +
+        "else the player.",
       inputSchema: {
-        kind: z.enum(["player", "entities", "blocks", "block", "ping"]),
-        type: z.string().optional().describe("Filter by entity/block type id"),
+        kind: z.enum(["player", "entities", "blocks", "block", "ping", "components", "dynamic_properties", "scores", "raycast", "entity_properties"]),
+        type: z.string().optional().describe("Filter by entity/block type id; components, dynamic_properties, entity_properties: the nearest entity of this type"),
         types: z.array(z.string()).optional().describe("blocks: keep any of these block type ids (one scan for several types)"),
         radius: z.number().min(0).max(256).optional(),
-        limit: z.number().int().min(1).max(200).optional(),
+        limit: z.number().int().min(1).max(1000).optional().describe("entities: at most 200 (default 50); scores: rows (default 100); dynamic_properties: ids (default 500)"),
         x: z.number().optional(),
         y: z.number().optional(),
         z: z.number().optional(),
         dimension: z.string().optional(),
+        entity: z.string().optional().describe("components, dynamic_properties, entity_properties: entity id from `entities`"),
+        target: z.enum(["world", "player", "entity"]).optional().describe("dynamic_properties: whose (default world, or entity when `entity`/`type` is given); others: player or entity"),
+        ids: z.array(z.string()).optional().describe("components: only these component ids; entity_properties: property ids (default those the project's entity file declares)"),
+        prefix: z.string().optional().describe("dynamic_properties: only ids starting with this"),
+        objective: z.string().optional().describe("scores: only this objective id"),
+        participant: z.string().optional().describe("scores: only this player name, fake player name or entity id"),
+        direction: z.object({ x: z.number(), y: z.number(), z: z.number() }).optional().describe("raycast: ray direction (default the player's view)"),
+        to: z.object({ x: z.number(), y: z.number(), z: z.number() }).optional().describe("raycast: cast toward this point instead of `direction`"),
+        maxDistance: z.number().min(0).max(64).optional().describe("raycast: ray length (default 16, or the distance to `to`)"),
+        includeLiquidBlocks: z.boolean().optional().describe("raycast: water and lava stop the ray (default false)"),
+        includePassableBlocks: z.boolean().optional().describe("raycast: passable blocks such as grass stop the ray (default false)"),
       },
       outputSchema: { result: z.unknown() },
     },
-    async ({ kind, ...params }) => {
+    async ({ kind, ...input }) => {
       try {
-        const result = await bridge.query(kind, Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined)));
+        const params: Record<string, unknown> = Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined));
+        if (kind === "entity_properties" && !input.ids?.length) {
+          params.ids = await entityPropertyIdsFor(input, { query: (k, p) => bridge.query(k, p), declared: (t) => bridge.entityPropertyIds(t) });
+        }
+        const result = await bridge.query(kind, params);
         const text = JSON.stringify(result);
         return ok(text.length > 4000 ? `${text.slice(0, 4000)}…` : text, { result });
       } catch (err) {
@@ -920,30 +1089,160 @@ export function register(server: McpServer): void {
     },
   );
 
+  const sceneName = z.string().regex(SCENE_NAME).describe("Scene name: 1-32 of a-z, 0-9, _ and -");
+  const vec3 = z.object({ x: z.number(), y: z.number(), z: z.number() });
+  const sceneBox = z.object({ min: vec3, max: vec3 });
+  const scenesLast =
+    "Scenes live in the world (a structure plus a world dynamic property), so they last as long as the world: with the " +
+    "default game_launch (the test world is replaced each launch) one session, with `keep: true` or `copyFrom` across launches.";
+
+  server.registerTool(
+    "scene_save",
+    {
+      title: "Save a scene",
+      description:
+        "Save a named test start in the running world: the blocks and entities in a box around x/y/z (default the " +
+        "player) as a world structure, and the player's position, rotation, dimension, game mode, health, hunger, " +
+        "saturation, selected slot and whole inventory with armour and off hand (amounts, name tags, lore, " +
+        "enchantments, durability damage), plus the time of day and the weather. A scene of the same name is " +
+        "overwritten. scene_reset puts it all back. " +
+        scenesLast,
+      inputSchema: {
+        name: sceneName,
+        radius: z
+          .number()
+          .int()
+          .min(0)
+          .max(SCENE_MAX_RADIUS)
+          .optional()
+          .describe(`Half the box's side in blocks (default ${SCENE_DEFAULT_RADIUS}); the box is cut to the world's height range`),
+        x: z.number().optional().describe("Box center; give x, y and z together (default the player's position)"),
+        y: z.number().optional(),
+        z: z.number().optional(),
+      },
+      outputSchema: {
+        name: z.string(),
+        overwritten: z.boolean(),
+        dimension: z.string(),
+        box: sceneBox,
+        entities: z.number(),
+        items: z.number(),
+        notes: z.array(z.string()),
+      },
+    },
+    async (input) => {
+      try {
+        const r = await saveScene(input);
+        const { min, max } = r.box;
+        const box = `${min.x} ${min.y} ${min.z} to ${max.x} ${max.y} ${max.z}`;
+        const notes = r.notes.length ? `; ${r.notes.join("; ")}` : "";
+        return ok(`${r.overwritten ? "overwrote" : "saved"} scene ${r.name}: ${box} in ${r.dimension}, ${r.entities} entities, ${r.items} items${notes}`, r);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "scene_reset",
+    {
+      title: "Reset to a scene",
+      description:
+        "Put the world back to a scene saved with scene_save: removes the non-player entities in its box, places its " +
+        "blocks and entities back, clears and refills the player's inventory, armour and off hand, teleports the " +
+        "player with rotation and dimension, sets game mode, health, hunger, saturation and selected slot, clears " +
+        "effects, and restores the time of day and the weather. `restored` lists what was put back; `notes` says what " +
+        "could not be (an item or enchantment this game no longer accepts, weather that was unknown at save). Fails " +
+        "with \"no scene named <name> in this world\" when there is none.",
+      inputSchema: { name: sceneName },
+      outputSchema: {
+        name: z.string(),
+        dimension: z.string(),
+        box: sceneBox,
+        removedEntities: z.number(),
+        restored: z.array(z.string()),
+        notes: z.array(z.string()),
+      },
+    },
+    async ({ name }) => {
+      try {
+        const r = await resetScene(name);
+        const notes = r.notes.length ? `; not restored: ${r.notes.join("; ")}` : "";
+        return ok(`reset to scene ${r.name}: ${r.restored.join(", ")}; removed ${r.removedEntities} entities${notes}`, r);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "scene_list",
+    {
+      title: "List or delete scenes",
+      description:
+        "The scenes saved in the running world (name, save time, dimension, box, player position, whether its " +
+        "structure is still there), or with `delete`, remove that scene's structure and stored state first. " +
+        scenesLast,
+      inputSchema: { delete: sceneName.optional().describe("Delete this scene, then list the rest") },
+      outputSchema: {
+        scenes: z.array(
+          z.object({
+            name: z.string(),
+            savedAt: z.number().optional(),
+            dimension: z.string().optional(),
+            box: sceneBox.optional(),
+            position: vec3.optional(),
+            structure: z.boolean().optional(),
+            error: z.string().optional(),
+          }),
+        ),
+        deleted: z.string().optional(),
+      },
+    },
+    async (input) => {
+      try {
+        if (input.delete !== undefined) await deleteScene(input.delete);
+        const scenes = await listScenes();
+        const names = scenes.length ? scenes.map((s) => s.name).join(", ") : "no scenes in this world";
+        if (input.delete === undefined) return ok(names, { scenes });
+        return ok(`deleted scene ${input.delete}; left: ${names}`, { scenes, deleted: input.delete });
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
   server.registerTool(
     "game_stop",
     {
       title: "Stop the client",
       description:
         "Quit the game, close the bridge and restore the options.txt keys and game settings sculkwire changed " +
-        "(settings live while the game still runs, both in options.txt).",
+        "(settings live while the game still runs, both in options.txt). In the user's dev world (worldMode user) it first " +
+        "tries Save & Quit through the pause menu (up to 45 s; savedAndQuit says whether it worked, stopNote what was " +
+        "lost otherwise), puts the world's own icon back, and keeps the helper pack and the project's packs in its pack " +
+        "lists and their development pack folders (keptPackFolders). In test worlds the game is ended without Save & Quit.",
       inputSchema: {},
       outputSchema: {
         stopped: z.boolean(),
         message: z.string(),
         restoredOptions: z.record(z.string(), z.array(z.string())),
         restoredSettings: z.record(z.string(), z.union([z.boolean(), z.number(), z.string()]).nullable()),
+        savedAndQuit: z.boolean().optional(),
+        keptPackFolders: z.array(z.string()).optional(),
+        stopNote: z.string().optional(),
       },
     },
     async () => {
       try {
         await playJobs.stopAll("game_stop");
         const world = bridge.world;
-        const kept = world !== undefined && (await readMarker(world.dir))?.keep === true;
+        const kept = world !== undefined && world.how !== "user" && (await readMarker(world.dir))?.keep === true;
         const r = await bridge.stop();
-        // The stop ends the game without Save & Quit, and the game writes chunks on its own schedule.
+        // A test world is ended without Save & Quit, and the game writes chunks on its own schedule.
         const note = kept && r.stopped ? `; ${world.name} is a kept world: blocks changed in the last minute before this stop may be missing on the next launch` : "";
-        return ok(r.stopped ? `${r.message}${note}` : `not stopped: ${r.message}`, r);
+        const stopNote = r.stopNote ? `; ${r.stopNote}` : "";
+        return ok(r.stopped ? `${r.message}${note}${stopNote}` : `not stopped: ${r.message}${stopNote}`, r);
       } catch (err) {
         return fail(err);
       }

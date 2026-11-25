@@ -1,0 +1,20 @@
+{
+  // pack_fix_versions fixture: every comment and line break here must survive an apply
+  "format_version": 2,
+  "header": {
+    "name": "Steve's BP",
+    "description": "fix versions fixture",
+    "uuid": "6c2d8b1f-3e2a-4d66-8b4a-2f8e4c7b0001",
+    "version": [1, 0, 0],
+    "min_engine_version": [1, 21, 0] // raised to the game version
+  },
+  "modules": [
+    { "type": "data", "uuid": "6c2d8b1f-3e2a-4d66-8b4a-2f8e4c7b0002", "version": [1, 0, 0] },
+    { "type": "script", "language": "javascript", "uuid": "6c2d8b1f-3e2a-4d66-8b4a-2f8e4c7b0003", "version": [1, 0, 0], "entry": "scripts/main.js" }
+  ],
+  "dependencies": [
+    { "module_name": "@minecraft/server", "version": "1.11.0" },
+    /* a beta stays on beta */
+    { "module_name": "@minecraft/server-ui", "version": "1.2.0-beta" }
+  ]
+}
