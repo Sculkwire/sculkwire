@@ -36,6 +36,8 @@ let waitForGame: ((signal?: AbortSignal) => Promise<number>) | undefined;
 const stopGame = vi.fn(async () => ({ stopped: true, message: "the game was not running" }));
 /** The game processes the launcher finds. */
 let runningPids: number[] = [];
+/** Whether a launch state file exists (another process's launch, or none at all). */
+let stateFile = true;
 
 vi.mock("../../gamefiles/install.ts", async (original) => ({
   ...(await original<typeof Install>()),
@@ -45,7 +47,7 @@ vi.mock("./launcher.ts", async (original) => ({
   ...(await original<typeof Launcher>()),
   launch: async () => ({ ...state, ...launched }),
   waitForGame: async (_install: unknown, _timeoutMs: number, signal?: AbortSignal) => (waitForGame ? waitForGame(signal) : process.pid),
-  readLaunchState: async () => ({ ...state }),
+  readLaunchState: async () => (stateFile ? { ...state } : undefined),
   stop: () => stopGame(),
   gamePids: async () => runningPids,
   systemPactl: (args: readonly string[]) => pactl.run(args),
@@ -77,12 +79,22 @@ describe("client bridge start", () => {
   afterEach(async () => {
     waitForGame = undefined;
     runningPids = [];
+    stateFile = true;
     launched = {};
     pactl = new FakePactl();
     stopGame.mockClear();
     delete process.env.SCULKWIRE_DATA;
     delete process.env.SCULKWIRE_CONFIG;
     await rm(dir, { recursive: true, force: true });
+  });
+
+  it("never stops a running game it did not launch: a stop with no launch of its own leaves the game alone", async () => {
+    // The user's game runs; this process launched nothing and no launch state file says sculkwire did.
+    stateFile = false;
+    runningPids = [4242];
+    const r = await new ClientBridge().stop();
+    expect(stopGame).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ stopped: true, message: expect.stringMatching(/left alone/) });
   });
 
   it("frees the debugger port when the start fails after opening it, so the next launch can take it", async () => {

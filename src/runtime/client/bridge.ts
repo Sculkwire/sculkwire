@@ -2242,7 +2242,14 @@ export class ClientBridge {
         if (mutedPid && isAlive(mutedPid)) await windowsMute([mutedPid], false, 0).catch(() => undefined);
       }
     }
-    const result = attached ? { stopped: true, message: "detached from the game you opened; it keeps running" } : await stopGame(install);
+    // Only a game sculkwire launched is stopped: this process's launch, or one a launch state file records. With
+    // neither (a process that never launched, or an attach whose state is gone) any running game is the user's.
+    const launched = !attached && (this.launchState !== undefined || (await readLaunchState()) !== undefined);
+    const result = attached
+      ? { stopped: true, message: "detached from the game you opened; it keeps running" }
+      : launched
+        ? await stopGame(install)
+        : { stopped: true, message: "sculkwire launched no game: a running game was left alone" };
     // A game sculkwire stopped stayed on the silent sink (the watcher kept sweeping) until it exited: no sound during
     // the stop. Its streams are not moved back, and the silent sink goes once the game is gone.
     if (!attached) await muteWatcher?.stop({ restore: false });
