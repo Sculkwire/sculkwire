@@ -928,6 +928,52 @@ function fixedPress(t: Touch, kind: ScreenKind, n: number, wrongWorld: boolean):
 
 /** How long `leaveWorld` tries by default. */
 export const LEAVE_TIMEOUT_MS = 45_000;
+/** Arrow keys sent on the pause menu to walk the focus onto Save & Quit when its control cannot be read. */
+const MAX_QUIT_KEYS = 8;
+
+/**
+ * The focused button of a JSON-UI menu such as the pause menu: the keyboard focus fills it green (the other buttons are
+ * grey), found as the largest block of rows holding a long run of that green. Grass in the world behind is far less
+ * saturated. Undefined when no button shows the focus.
+ */
+export function focusedButton(image: Pixels): Box | undefined {
+  const { width, height, channels, data } = image;
+  const minRun = Math.max(8, Math.round(width * 0.025));
+  let best: Box | undefined;
+  let group: { y0: number; y1: number; x0: number; x1: number } | undefined;
+  const close = () => {
+    if (group && (!best || (group.x1 - group.x0) * (group.y1 - group.y0) > best.width * best.height)) {
+      best = { x: group.x0, y: group.y0, width: group.x1 - group.x0 + 1, height: group.y1 - group.y0 + 1 };
+    }
+    group = undefined;
+  };
+  for (let y = 0; y < height; y++) {
+    // The row's green span: from its first to its last green pixel, kept when most of it is green (the label's letters
+    // and an icon interrupt the fill, the world's grass behind is scattered).
+    let x0 = -1;
+    let x1 = -1;
+    let count = 0;
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * channels;
+      const r = data[i] ?? 0;
+      const g = data[i + 1] ?? 0;
+      const b = data[i + 2] ?? 0;
+      if (g >= 90 && g > r * 2.5 && g > b * 2.5) {
+        if (x0 < 0) x0 = x;
+        x1 = x;
+        count++;
+      }
+    }
+    const run = count >= minRun && count >= (x1 - x0 + 1) * 0.4 ? { x0, x1 } : undefined;
+    if (run && group && Math.abs(run.x0 - group.x0) <= 6 && Math.abs(run.x1 - group.x1) <= 6) group.y1 = y;
+    else {
+      close();
+      if (run) group = { y0: y, y1: y, ...run };
+    }
+  }
+  close();
+  return best && best.height >= height * 0.02 ? best : undefined;
+}
 
 export interface LeaveOptions {
   /** Give up after this long (default `LEAVE_TIMEOUT_MS`). */
@@ -973,6 +1019,55 @@ export async function leaveWorld(io: RecoveryIO, opts: LeaveOptions = {}): Promi
   // Save & Quit through the agent is pressed by name only, so no click needs the frame's size.
   const touches = touchRoute(io, uiRoute, () => undefined);
   const done = (left: boolean, reason?: string): LeaveResult => ({ left, steps, presses, screens, join, ...(reason ? { reason } : {}) });
+  /**
+   * Save & Quit by the keyboard focus, for a pause menu whose controls cannot be read: Down through the full-width
+   * buttons (Resume Game, Settings, Browse Add-ons!, Save & Quit) until the focus leaves them for the icon row under
+   * them, Up once, and Return only when the screenshot shows the focus back on the lowest full-width button seen. It
+   * never activates a button it did not see as the last of at least three full-width ones, so a store entry above Save &
+   * Quit is never pressed.
+   */
+  const quitFocus = { started: false, keys: 0, rows: [] as number[], lowest: undefined as Box | undefined, up: false, returns: 0, blind: 0 };
+  const quitByFocus = async (): Promise<Press | string> => {
+    quitFocus.started = true;
+    const shot = await io.screenshot("pause").catch(() => undefined);
+    const image = shot && decodePng(shot.png);
+    if (!image) return "Save & Quit cannot be read from the pause menu, and no screenshot shows its keyboard focus";
+    if (quitFocus.keys >= MAX_QUIT_KEYS) return `the pause menu's keyboard focus did not reach Save & Quit in ${MAX_QUIT_KEYS} keys`;
+    const box = focusedButton(image);
+    const wide = box !== undefined && box.width >= image.width * 0.2;
+    const key = (name: string, label: string, patienceMs = FOCUS_PATIENCE_MS): Press => {
+      quitFocus.keys++;
+      return { ...touches.key(name), label, patienceMs };
+    };
+    if (quitFocus.up) {
+      const onLowest = wide && quitFocus.lowest !== undefined && Math.abs(box.y - quitFocus.lowest.y) <= 6;
+      if (!onLowest) return "after Up the pause menu's keyboard focus is not on its last full-width button: Save & Quit was not pressed";
+      if (quitFocus.returns >= 2) return "Return on Save & Quit twice and the game stayed in the pause menu";
+      quitFocus.returns++;
+      return key("Return", "Return on Save & Quit (the keyboard focus is on the pause menu's last full-width button)", OPEN_PATIENCE_MS);
+    }
+    if (wide) {
+      if (!quitFocus.rows.some((y) => Math.abs(y - box.y) <= 6)) quitFocus.rows.push(box.y);
+      if (!quitFocus.lowest || box.y > quitFocus.lowest.y + 6) quitFocus.lowest = box;
+      return key("Down", "Down (moves the pause menu's keyboard focus towards Save & Quit)");
+    }
+    // No focus seen yet: Down gives the menu its focus.
+    if (!quitFocus.lowest) return key("Down", "Down (moves the pause menu's keyboard focus towards Save & Quit)");
+    // A frame with no focus in it (a missed or stale frame) proves nothing: look again, never move by guess.
+    if (!box) {
+      if (++quitFocus.blind > 2) return "the pause menu's keyboard focus could not be seen: Save & Quit was not pressed";
+      return { label: "the pause menu's keyboard focus is not in this frame: looking again", run: async () => undefined, patienceMs: FOCUS_PATIENCE_MS, input: false };
+    }
+    // Only a narrow button seen under the full-width ones is the icon row: Save & Quit is the one just above it.
+    if (box.y <= quitFocus.lowest.y + quitFocus.lowest.height) {
+      return "the pause menu's keyboard focus is on a narrow control that is not under its full-width buttons: Save & Quit was not pressed";
+    }
+    if (quitFocus.rows.length < 3) {
+      return `the pause menu shows ${quitFocus.rows.length} full-width buttons above its icon row, not the expected layout: Save & Quit was not pressed`;
+    }
+    quitFocus.up = true;
+    return key("Up", "Up (back to the pause menu's last full-width button, Save & Quit)");
+  };
 
   for (;;) {
     if (!(await io.alive())) return done(false, "the game stopped before it left the world");
@@ -1015,7 +1110,13 @@ export async function leaveWorld(io: RecoveryIO, opts: LeaveOptions = {}): Promi
     let press: Press;
     if (kind === "pause") {
       if (!touches.canClick()) return done(false, "Save & Quit cannot be pressed: no in-game agent UI and no background mouse reach this game");
-      press = touches.named("Save & Quit", ["Save & Quit"], LAYOUT.saveAndQuit, OPEN_PATIENCE_MS);
+      if (failedQuits === 0) press = touches.named("Save & Quit", ["Save & Quit"], LAYOUT.saveAndQuit, OPEN_PATIENCE_MS);
+      else {
+        // The menu's controls cannot be read (the retail pause menu): its keyboard focus can be seen.
+        const step = await quitByFocus();
+        if (typeof step === "string") return done(false, step);
+        press = step;
+      }
     } else {
       // In the world Escape opens the pause menu; over chat or any other screen it closes that screen first.
       press = touches.key("Escape");
@@ -1023,10 +1124,10 @@ export async function leaveWorld(io: RecoveryIO, opts: LeaveOptions = {}): Promi
     steps.push(`${kind}: ${press.label}`);
     try {
       await press.run();
-      presses++;
+      if (press.input !== false) presses++;
     } catch (e) {
       steps.push(`${kind}: ${press.label} failed: ${errorMessage(e)}`);
-      if (kind === "pause" && ++failedQuits >= 2) return done(false, `Save & Quit could not be pressed: ${errorMessage(e)}`);
+      if (kind === "pause" && ++failedQuits >= 2 && !quitFocus.started) return done(false, `Save & Quit could not be pressed: ${errorMessage(e)}`);
     }
     pressed = { at: io.now(), patienceMs: press.patienceMs ?? PATIENCE_MS };
   }

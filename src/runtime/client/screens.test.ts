@@ -5,6 +5,7 @@ import { decodePng, type Pixels } from "./png.ts";
 import {
   currentScreen,
   arrowTowards,
+  focusedButton,
   focusRing,
   kindOfRoute,
   kindOfScreenName,
@@ -869,6 +870,81 @@ describe("join recovery through the agent's UI", () => {
 });
 
 describe("Save & Quit before a stop", () => {
+  /**
+   * A retail-like pause menu whose controls cannot be read: four full-width buttons (Resume Game, Settings, Browse
+   * Add-ons!, Save & Quit) over an icon row, the focused one filled green. `blank` lists the frames (by screenshot
+   * number) that show no focus at all, as a missed frame would. Down and Up move the focus; Return on Save & Quit
+   * leaves the world, Return anywhere else is recorded.
+   */
+  function focusMenu(blank: number[] = []) {
+    const buttons = [0, 1, 2, 3].map((i) => ({ x: 115, y: 150 + i * 62, width: 334, height: 50 }));
+    const icons = { x: 200, y: 410, width: 44, height: 30 };
+    let focus = 0;
+    let shots = 0;
+    let left = false;
+    const keys: string[] = [];
+    let clock = 0;
+    const draw = (): Buffer => {
+      const width = 960;
+      const height = 540;
+      const data = new Uint8Array(width * height * 3).fill(60);
+      const shown = blank.includes(shots) ? -1 : focus;
+      const boxes = [...buttons, icons];
+      boxes.forEach((b, i) => {
+        const colour = i === shown ? [31, 125, 15] : [200, 200, 200];
+        for (let y = b.y; y < b.y + b.height; y++) for (let x = b.x; x < b.x + b.width; x++) data.set(colour, (y * width + x) * 3);
+      });
+      shots++;
+      return png({ width, height, channels: 3, data });
+    };
+    const ui: UiRecovery = {
+      screen: async () => (left ? { name: "start_screen", stack: ["start_screen"], modal: false } : { name: "pause_screen", stack: ["pause_screen"], modal: false }),
+      controls: async () => [],
+      press: async () => {
+        throw new Error("no such control");
+      },
+      key: async (k) => {
+        keys.push(k);
+        if (k === "Down") focus = Math.min(focus + 1, 4);
+        if (k === "Up") focus = Math.max(focus - 1, 0);
+        if (k === "Return" && focus === 3) left = true;
+      },
+      click: async () => {
+        throw new Error("no clicks");
+      },
+    };
+    const io: RecoveryIO = {
+      readLog: async () => "",
+      key: async () => undefined,
+      ui: () => ui,
+      screenshot: async () => ({ path: "pause.png", png: draw() }),
+      alive: async () => true,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      now: () => clock,
+    };
+    return { io, keys, returnedOn: () => (keys.includes("Return") ? focus : undefined), left: () => left };
+  }
+
+  it("reaches Save & Quit by the keyboard focus on a pause menu whose controls cannot be read, and presses Return only there", async () => {
+    const menu = focusMenu();
+    const result = await leaveWorld(menu.io, { screens: screensFromUi({ name: "pause_screen", stack: ["pause_screen"], modal: false }, NO_SCREENS) });
+    expect(result.left).toBe(true);
+    expect(menu.keys).toEqual(["Down", "Down", "Down", "Down", "Up", "Return"]);
+    expect(menu.returnedOn()).toBe(3);
+  });
+
+  it("never moves back up on a frame that shows no focus, so a missed frame cannot land Return on Browse Add-ons!", async () => {
+    // Frames 0-2 show Resume, Settings, Browse Add-ons!; frame 3 (focus on Save & Quit) is missed, then all are.
+    const menu = focusMenu([3, 4, 5, 6, 7, 8, 9]);
+    const result = await leaveWorld(menu.io, { screens: screensFromUi({ name: "pause_screen", stack: ["pause_screen"], modal: false }, NO_SCREENS) });
+    expect(result.left).toBe(false);
+    expect(result.reason).toMatch(/could not be seen/);
+    expect(menu.keys).not.toContain("Up");
+    expect(menu.keys).not.toContain("Return");
+  });
+
   /** A game in the user's world, and the screen state the bridge has read so far. */
   function inWorld(opts: Partial<FakeGameOptions> = {}): { game: FakeGame; screens: ScreenState } {
     const game = new FakeGame({ start: "start", ...opts });
@@ -895,13 +971,32 @@ describe("Save & Quit before a stop", () => {
     expect(game.inputs).toEqual(["ui:key Escape", "ui:press button.save_and_quit"]);
   });
 
-  it("gives up, pressing nothing near it, when the pause menu lists no Save & Quit control", async () => {
+  it("gives up without pressing or clicking anything, and never sends Return, when the pause menu lists no Save & Quit control and shows no focus", async () => {
     const { game, screens } = inWorld({ ui: true, quiet: true, noQuitControl: true });
     const result = await leaveWorld(game.io(), { screens });
     expect(result.left).toBe(false);
-    expect(result.reason).toContain("Save & Quit could not be pressed");
+    expect(result.reason).toMatch(/Save & Quit/);
     expect(game.inputs.filter((entry) => entry.startsWith("ui:press") || entry.startsWith("ui:click"))).toEqual([]);
+    expect(game.inputs.filter((entry) => /Return/.test(entry))).toEqual([]);
     expect(game.world).toBe("Xy+z=");
+  });
+
+  it("finds the focused (green) button of a menu, wide or narrow, and not the grass behind it", () => {
+    const width = 960;
+    const height = 540;
+    const data = new Uint8Array(width * height * 3);
+    // Grass behind: greenish but not saturated.
+    for (let i = 0; i < data.length; i += 3) data.set([90, 140, 60], i);
+    const fill = (x0: number, y0: number, w: number, h: number) => {
+      for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) data.set([31, 125, 15], (y * width + x) * 3);
+    };
+    fill(115, 340, 334, 50);
+    // Label letters across the button break its fill.
+    for (let x = 200; x < 360; x += 6) for (let y = 355; y < 375; y++) data.set([255, 255, 255], (y * width + x) * 3);
+    expect(focusedButton({ width, height, channels: 3, data })).toMatchObject({ x: 115, y: 340, width: 334, height: 50 });
+    const grass = new Uint8Array(width * height * 3);
+    for (let i = 0; i < grass.length; i += 3) grass.set([90, 140, 60], i);
+    expect(focusedButton({ width, height, channels: 3, data: grass })).toBeUndefined();
   });
 
   it("says it cannot press Save & Quit without the agent or a mouse", async () => {
