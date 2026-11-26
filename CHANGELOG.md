@@ -4,6 +4,8 @@ Release notes for sculkwire. Each `## vX.Y.Z` section becomes the GitHub release
 
 ## Unreleased
 
+## v0.1.14
+
 - `game_stop` saves your world on retail too: the retail pause menu hands out no control tree, so Save & Quit could not be pressed by its name and the game was closed without saving. Now the menu's keyboard focus (the focused button is filled green) is moved down through its full-width buttons until it reaches the icon row under them, back up once, and Return is sent only when a screenshot shows the focus on the lowest of at least three full-width buttons, Save & Quit; never on "Browse Add-ons!" above it. Checked live on 1.26.63: the world was saved and the game closed.
 - Save & Quit is also found by its button's name, `quit_button` (as the vanilla `pause_screen.json` names it), on a game whose pause menu lists its controls by name without their labels; before, such a game was stopped without Save & Quit.
 - The walk into your world works with the game's window behind other windows on retail under Wine, where the game reads its mouse about once a second and ignores or refuses clicks: after the tile clicks fail, sculkwire moves the game's keyboard focus with the arrow keys to the world's tile, reading the focus ring in each screenshot, and presses Space only once the ring is on that tile's open button. Checked live twice on 1.26.63 with the window covered: one refused click, two arrows, Space, the world loaded.
