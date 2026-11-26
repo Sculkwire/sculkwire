@@ -918,7 +918,7 @@ function fixedPress(t: Touch, kind: ScreenKind, n: number, wrongWorld: boolean):
       return ways[n % ways.length] as Press;
     }
     case "pause":
-      return wrongWorld && t.canClick() ? t.named("Save & Quit", ["Save & Quit"], LAYOUT.saveAndQuit, OPEN_PATIENCE_MS) : t.key("Escape");
+      return wrongWorld && t.canClick() ? t.named("Save & Quit", SAVE_AND_QUIT, LAYOUT.saveAndQuit, OPEN_PATIENCE_MS) : t.key("Escape");
     default:
       // The Play screen without a way to click, a wrong world (Escape opens its pause menu), a store or any other
       // screen: Escape.
@@ -928,6 +928,11 @@ function fixedPress(t: Touch, kind: ScreenKind, n: number, wrongWorld: boolean):
 
 /** How long `leaveWorld` tries by default. */
 export const LEAVE_TIMEOUT_MS = 45_000;
+/**
+ * The pause menu's Save & Quit as the agent's `ui.controls` may list it: by the text the player reads, or by the name
+ * the vanilla `pause_screen.json` gives the button, `quit_button` (a build that lists names without their labels).
+ */
+const SAVE_AND_QUIT = ["Save & Quit", "quit_button"];
 /** Arrow keys sent on the pause menu to walk the focus onto Save & Quit when its control cannot be read. */
 const MAX_QUIT_KEYS = 8;
 
@@ -1110,7 +1115,7 @@ export async function leaveWorld(io: RecoveryIO, opts: LeaveOptions = {}): Promi
     let press: Press;
     if (kind === "pause") {
       if (!touches.canClick()) return done(false, "Save & Quit cannot be pressed: no in-game agent UI and no background mouse reach this game");
-      if (failedQuits === 0) press = touches.named("Save & Quit", ["Save & Quit"], LAYOUT.saveAndQuit, OPEN_PATIENCE_MS);
+      if (failedQuits === 0) press = touches.named("Save & Quit", SAVE_AND_QUIT, LAYOUT.saveAndQuit, OPEN_PATIENCE_MS);
       else {
         // The menu's controls cannot be read (the retail pause menu): its keyboard focus can be seen.
         const step = await quitByFocus();
