@@ -456,6 +456,34 @@ describe("engine command origin bootstrap", () => {
     expect(methods).not.toContain("command");
     expect(agent.requests.map((request) => [request.method, request.params])).toContainEqual(["ui.text", { text: "/connect localhost:19150" }]);
   });
+
+  it("closes the chat with one uiKey Escape: a second only when the first just ended the text box's editing", async () => {
+    const agent = await makeAgent();
+    const session = makeSession(agent);
+    let screen = "chat_screen";
+    let editing = true;
+    agent.handler = (request) => {
+      const params = request.params as Record<string, unknown> | undefined;
+      if (request.method === "ui.screen") return reply(request, { name: screen, stack: ["hud_screen", screen], modal: false });
+      if (request.method === "ui.key" && params?.key === "Escape") {
+        const before = screen;
+        if (editing) editing = false;
+        else screen = "hud_screen";
+        return reply(request, { sent: 2, screen: before });
+      }
+      return reply(request, { sent: 1 });
+    };
+    expect((await session.uiKey("Escape")).ok).toBe(true);
+    expect(screen).toBe("hud_screen");
+    expect(agent.requests.filter((request) => request.method === "ui.key")).toHaveLength(2);
+    // A chat that closes on the first Escape gets no second one (it would open the pause menu).
+    screen = "chat_screen";
+    editing = false;
+    agent.requests.length = 0;
+    await session.uiKey("Escape");
+    expect(agent.requests.filter((request) => request.method === "ui.key")).toHaveLength(1);
+    expect(screen).toBe("hud_screen");
+  });
 });
 
 describe("engine tick arguments", () => {

@@ -1275,7 +1275,15 @@ export class EngineSession {
   async uiKey(key: string, action?: UiKeyAction): Promise<EngineResult<unknown>> {
     const params = keyParams(key, action);
     if (typeof params === "string") return invalid(params);
-    return this.#call("ui.key", params);
+    const sent = await this.#call<{ screen?: unknown }>("ui.key", params);
+    // On the chat screen the agent's Escape reaches the text box first, which only ends its editing; a player's
+    // Escape closes the chat. A second Escape is sent only when the chat is still in front after the first had its
+    // time (one more on any other screen would open the pause menu).
+    if (!sent.ok || key !== "Escape" || (action !== undefined && action !== "press") || sent.value?.screen !== CHAT_SCREEN) return sent;
+    const closed = await this.#waitScreen((screen) => !screen.stack.includes(CHAT_SCREEN));
+    if (closed.ok) return sent;
+    const now = await this.uiScreen();
+    return now.ok && now.value.name === CHAT_SCREEN ? this.#call("ui.key", params) : sent;
   }
 
   async uiText(text: string): Promise<EngineResult<unknown>> {
