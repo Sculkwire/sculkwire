@@ -4,6 +4,8 @@ import type { UiControl } from "../engine/ui.ts";
 import { decodePng, type Pixels } from "./png.ts";
 import {
   currentScreen,
+  arrowTowards,
+  focusRing,
   kindOfRoute,
   kindOfScreenName,
   LAYOUT,
@@ -13,6 +15,8 @@ import {
   NO_SCREENS,
   playTab,
   recoverJoin,
+  ringOn,
+  tileOpenButton,
   respawn,
   RESPAWN_TIMEOUT_MS,
   screensFromUi,
@@ -744,13 +748,38 @@ describe("join recovery through the agent's UI", () => {
     expect(result.steps.some((s) => s.includes("stopped answering"))).toBe(false);
   });
 
-  it("gives up after two clicks on a tile the game ignores, instead of clicking until the time limit", async () => {
+  it("after two ignored clicks walks the keyboard focus, never activates without the focus ring on the tile, then gives up", async () => {
     const game = uiOnly({ start: "play", dialog: "ignores" });
     const result = await recoverJoin(game.io(), start);
     expect(result).toMatchObject({ recovered: false, needsUser: true, stuck: "ignored" });
-    expect(result.reason).toMatch(/double-clicked 2 times and the world did not open/);
+    expect(result.reason).toMatch(/double-clicked 2 times and the world did not open, and the keyboard focus did not reach it/);
     expect(game.inputs.filter((i) => i.startsWith("ui:click"))).toHaveLength(2);
-    expect(game.clock).toBeLessThan(30_000);
+    // The fake screen draws no focus ring: arrows only, and never the key that activates.
+    const keys = game.inputs.filter((i) => i.startsWith("ui:key"));
+    expect(keys.length).toBeGreaterThan(0);
+    expect(keys.every((k) => /Down|Up|Left|Right/.test(k))).toBe(true);
+    expect(game.clock).toBeLessThan(60_000);
+  });
+
+  it("reads the keyboard focus ring, tells whether it sits on the tile's open button, and which arrow moves it there", () => {
+    const width = 400;
+    const height = 300;
+    const data = new Uint8Array(width * height * 3).fill(40);
+    const paint = (x: number, y: number) => data.fill(255, (y * width + x) * 3, (y * width + x) * 3 + 3);
+    // A ring around 20..120 x 150..190, two pixels wide.
+    for (let x = 20; x <= 120; x++) for (const y of [150, 151, 189, 190]) paint(x, y);
+    for (let y = 150; y <= 190; y++) for (const x of [20, 21, 119, 120]) paint(x, y);
+    const ring = focusRing({ width, height, channels: 3, data });
+    expect(ring).toMatchObject({ x: 20, y: 150, width: 101 });
+    const button = tileOpenButton({ x: 20, y: 40, width: 125, height: 110 });
+    expect(ringOn(ring!, button)).toBe(true);
+    expect(ringOn(ring!, tileOpenButton({ x: 200, y: 40, width: 125, height: 110 }))).toBe(false);
+    expect(arrowTowards(ring!, tileOpenButton({ x: 200, y: 40, width: 125, height: 110 }))).toBe("Right");
+    expect(arrowTowards({ x: 250, y: 20, width: 100, height: 30 }, button)).toBe("Down");
+    // A filled light control is no ring.
+    const filled = new Uint8Array(width * height * 3).fill(40);
+    for (let y = 150; y <= 190; y++) filled.fill(255, (y * width + 20) * 3, (y * width + 121) * 3);
+    expect(focusRing({ width, height, channels: 3, data: filled })).toBeUndefined();
   });
 
   it("selects the Worlds tab by its name, never presses or clicks another tab, and never clicks the tab strip", async () => {

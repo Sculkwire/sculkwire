@@ -437,6 +437,79 @@ const MAX_WRONG_WORLDS = 2;
  * opens shows its loading screen within `OPEN_PATIENCE_MS` of the first one.
  */
 const MAX_TILE_CLICKS = 2;
+/**
+ * Arrow keys sent to walk the Play screen's keyboard focus onto the world's tile when its clicks were ignored (a game in
+ * the background reads its mouse too seldom to take a click, but takes keys), and activations of the tile once the focus
+ * ring is seen on it. Space activates an OreUI button; nothing is activated unless the ring is on the tile's open button.
+ */
+const MAX_FOCUS_KEYS = 12;
+const MAX_FOCUS_ACTIVATIONS = 2;
+const FOCUS_PATIENCE_MS = 2000;
+
+type Box = { x: number; y: number; width: number; height: number };
+
+/**
+ * The keyboard focus ring on an OreUI screen: a white frame two or three pixels wide around the focused control, found as
+ * two long white rows (top and bottom edge) of the same horizontal extent joined by a white column. The top bar (light,
+ * never focused here) is left out. Undefined when no ring shows.
+ */
+export function focusRing(image: Pixels): Box | undefined {
+  const { width, height, channels, data } = image;
+  const white = (x: number, y: number): boolean => {
+    const i = (y * width + x) * channels;
+    return (data[i] ?? 0) >= 240 && (data[i + 1] ?? 0) >= 240 && (data[i + 2] ?? 0) >= 240;
+  };
+  const minRun = Math.round(width * 0.12);
+  const runs: { y: number; x0: number; x1: number }[] = [];
+  for (let y = Math.round(height * 0.07); y < height; y++) {
+    let start = -1;
+    for (let x = 0; x <= width; x++) {
+      const on = x < width && white(x, y);
+      if (on && start < 0) start = x;
+      if (!on && start >= 0) {
+        if (x - start >= minRun) runs.push({ y, x0: start, x1: x - 1 });
+        start = -1;
+      }
+    }
+  }
+  for (const top of runs) {
+    for (const bottom of runs) {
+      const gap = bottom.y - top.y;
+      if (gap < height * 0.04 || gap > height * 0.6 || Math.abs(top.x0 - bottom.x0) > 4 || Math.abs(top.x1 - bottom.x1) > 4) continue;
+      // The ring's left side: white down the column between the two edges; a filled light control is not a ring.
+      let side = 0;
+      let inside = 0;
+      for (let y = top.y; y <= bottom.y; y++) {
+        if (white(top.x0, y)) side++;
+        if (white(Math.round((top.x0 + top.x1) / 2), y)) inside++;
+      }
+      if (side < gap * 0.8 || inside > gap * 0.5) continue;
+      return { x: top.x0, y: top.y, width: top.x1 - top.x0 + 1, height: gap + 1 };
+    }
+  }
+  return undefined;
+}
+
+/** The Play screen tile's open button: its name bar under the picture, left of the edit pencil (measured on 1.26.63). */
+export function tileOpenButton(picture: Box): Box {
+  return { x: picture.x, y: picture.y + picture.height, width: picture.width * 0.8, height: picture.height * 0.37 };
+}
+
+/** Whether a focus ring sits on `button`: its centre inside the button and its size close to it. */
+export function ringOn(ring: Box, button: Box): boolean {
+  const cx = ring.x + ring.width / 2;
+  const cy = ring.y + ring.height / 2;
+  const inside = cx >= button.x && cx <= button.x + button.width && cy >= button.y && cy <= button.y + button.height;
+  return inside && ring.width >= button.width * 0.8 && ring.width <= button.width * 1.25 && ring.height <= button.height * 1.6;
+}
+
+/** The arrow key that moves a focus ring towards `button`; vertical first, as the screen's rows are. */
+export function arrowTowards(ring: Box, button: Box): string {
+  const dy = button.y + button.height / 2 - (ring.y + ring.height / 2);
+  const dx = button.x + button.width / 2 - (ring.x + ring.width / 2);
+  if (Math.abs(dy) > Math.max(ring.height, button.height) / 2) return dy > 0 ? "Down" : "Up";
+  return dx > 0 ? "Right" : "Left";
+}
 
 type Press = { label: string; run: () => Promise<void>; patienceMs?: number; /** False for a wait that sends nothing. */ input?: boolean };
 
@@ -608,6 +681,11 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
   /** When the last tile click was sent: the agent's UI going quiet after it is the world loading. */
   let clickedAt: number | undefined;
   let loadingNoted = false;
+  /** Arrow keys and activations sent to open the tile by its keyboard focus after its clicks were ignored. */
+  let focusKeys = 0;
+  let focusActivations = 0;
+  /** The last press that clicked the world's tile. */
+  let tilePress: Press | undefined;
 
   for (;;) {
     if (!(await io.alive())) return done(false, "the game stopped");
@@ -729,13 +807,28 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
             );
           }
           if (clicked >= MAX_TILE_CLICKS) {
-            return done(
-              false,
-              `the tile of ${opts.levelId} was double-clicked ${clicked} times and the world did not open: the Play screen stayed ` +
-                "up without a change (the game may show a dialog over it, or ignore clicks)",
-              true,
-              "ignored",
-            );
+            // The clicks were ignored (a game in the background reads its mouse too seldom), but it takes keys: walk its
+            // keyboard focus onto the tile's open button, seen as the focus ring on it, and only then activate it.
+            const button = tile && image ? tileOpenButton(tile.rect) : undefined;
+            const ring = image ? focusRing(image) : undefined;
+            if (button && ring && ringOn(ring, button) && focusActivations < MAX_FOCUS_ACTIVATIONS) {
+              focusActivations++;
+              press = { ...touches.key("space"), label: `space on the tile of ${opts.levelId} (the keyboard focus is on it)`, patienceMs: OPEN_PATIENCE_MS };
+              clickedAt = io.now();
+            } else if (button && !(ring && ringOn(ring, button)) && focusKeys < MAX_FOCUS_KEYS) {
+              focusKeys++;
+              const key = ring ? arrowTowards(ring, button) : "Down";
+              press = { ...touches.key(key), label: `${key} (moves the keyboard focus towards the tile of ${opts.levelId})`, patienceMs: FOCUS_PATIENCE_MS };
+            } else {
+              return done(
+                false,
+                `the tile of ${opts.levelId} was double-clicked ${clicked} times and the world did not open` +
+                  (focusActivations ? `, nor when its keyboard focus was activated ${focusActivations} times` : focusKeys ? `, and the keyboard focus did not reach it in ${focusKeys} keys` : "") +
+                  ": the Play screen stayed up without a change (the game may show a dialog over it, or ignore input)",
+                true,
+                "ignored",
+              );
+            }
           }
           const scroll = ui?.scroll?.bind(ui);
           const wheel = (label: string, notches: number): Press => ({
@@ -746,7 +839,9 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
             },
             patienceMs: LOOK_PATIENCE_MS,
           });
-          if (tile && image && !tile.whole && scroll && list.nudges < MAX_NUDGES) {
+          if (press) {
+            // The keyboard step above.
+          } else if (tile && image && !tile.whole && scroll && list.nudges < MAX_NUDGES) {
             // Part of the tile is under the list's edge: bring it into view, never scroll it away.
             list.nudges++;
             scrolls++;
@@ -756,6 +851,7 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
             const at = { x: tile.at.x / image.width, y: tile.at.y / image.height };
             const what = tile.whole ? "the tile showing the world's picture" : `the visible half of the tile showing the world's picture (its ${tile.hidden} is hidden)`;
             press = touches.click(`${what} of ${opts.levelId}`, at, 2, OPEN_PATIENCE_MS);
+            tilePress = press;
             tileClick = { changes: screens.changes, count: clicked + 1 };
             clickedAt = io.now();
           } else if (list.looks < THUMBNAIL_LOOKS) {
@@ -791,6 +887,9 @@ export async function recoverJoin(io: RecoveryIO, opts: RecoveryOptions): Promis
       if (press.input !== false) presses++;
     } catch (e) {
       steps.push(`${known}: ${press.label} failed: ${errorMessage(e)}`);
+      // A game that reads its mouse too seldom refuses the tile click outright: no point waiting for another one, the
+      // keyboard focus is walked to the tile next.
+      if (tileClick && press === tilePress && /not reading the mouse/.test(errorMessage(e))) tileClick.count = MAX_TILE_CLICKS;
     }
     pressed = { changes: screens.changes, at: io.now(), patienceMs: press.patienceMs ?? PATIENCE_MS };
   }
